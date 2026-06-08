@@ -1,0 +1,24 @@
+# --- Core ---
+python-dotenv>=1.0
+pandas>=2.1
+numpy>=1.26
+aiohttp>=3.9
+websockets>=12.0      # AI4Trade WebSocket heartbeat
+
+# --- Technical analysis ---
+pandas-ta>=0.3.14b
+
+# --- Brokers / data ---
+alpaca-py>=0.21
+ib-insync>=0.9.86
+
+# --- Vision / LLM sentiment ---
+anthropic>=0.50
+
+# --- Charting (vision agent) ---
+matplotlib>=3.8
+mplfinance>=0.12.10b0
+
+# --- Dashboard API server ---
+fastapi>=0.111
+uvicorn[standard]>=0.29

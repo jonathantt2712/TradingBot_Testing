@@ -1,0 +1,95 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --radius: 0.5rem;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #020617;
+    color: #F1F5F9;
+    min-height: 100dvh;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar        { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track  { background: transparent; }
+  ::-webkit-scrollbar-thumb  { background: #1E293B; border-radius: 2px; }
+  ::-webkit-scrollbar-thumb:hover { background: #334155; }
+
+  /* Selection */
+  ::selection { background: rgba(6,182,212,0.25); color: #F1F5F9; }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-bg-border bg-bg-card;
+  }
+
+  .card-glow-cyan {
+    @apply shadow-glow-cyan;
+  }
+
+  .stat-label {
+    @apply text-xs font-medium tracking-wide uppercase text-muted;
+  }
+
+  .stat-value {
+    @apply text-2xl font-semibold tabular-nums text-primary;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-brand-cyan px-4 py-2
+           text-sm font-semibold text-bg-base transition-all duration-200
+           hover:bg-brand-cyan-dim focus:outline-none focus:ring-2 focus:ring-brand-cyan/50
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-bg-border
+           px-4 py-2 text-sm font-medium text-subtle transition-all duration-200
+           hover:border-bg-hover hover:bg-bg-hover hover:text-primary;
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-bear px-4 py-2
+           text-sm font-semibold text-white transition-all duration-200
+           hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-bear/50;
+  }
+
+  .score-bar-track {
+    @apply h-1.5 w-full rounded-full bg-bg-border;
+  }
+
+  .ticker-mono {
+    @apply font-mono font-semibold tracking-tight;
+  }
+}
+
+/* Chart tooltip override */
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+/* iPhone safe-area bottom padding for mobile nav */
+.pb-safe {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
