@@ -14,16 +14,38 @@ const REFRESH_MS = 30_000
 const PRICE_MS   = 15_000
 const KEY_IDS    = 'executed_trade_ids'
 const KEY_RECS   = 'executed_trade_recs'
+const KEY_DATE   = 'executed_trade_date'
+
+function _todayUTC(): string {
+  return new Date().toISOString().slice(0, 10) // 'YYYY-MM-DD'
+}
+
+/** Reset IDs and recs if the stored date differs from today (new trading day). */
+function _maybeDailyReset(): void {
+  try {
+    const stored = localStorage.getItem(KEY_DATE)
+    const today  = _todayUTC()
+    if (stored !== today) {
+      localStorage.removeItem(KEY_IDS)
+      localStorage.removeItem(KEY_RECS)
+      localStorage.setItem(KEY_DATE, today)
+    }
+  } catch { /* ignore */ }
+}
 
 function loadIds(): Set<string> {
   if (typeof window === 'undefined') return new Set()
   try {
+    _maybeDailyReset()
     const raw = localStorage.getItem(KEY_IDS)
     return raw ? new Set(JSON.parse(raw) as string[]) : new Set()
   } catch { return new Set() }
 }
 function saveIds(ids: Set<string>) {
-  try { localStorage.setItem(KEY_IDS, JSON.stringify([...ids])) } catch {}
+  try {
+    localStorage.setItem(KEY_DATE, _todayUTC())
+    localStorage.setItem(KEY_IDS, JSON.stringify([...ids]))
+  } catch {}
 }
 function loadExecRecs(): TradeRecommendation[] {
   if (typeof window === 'undefined') return []
@@ -134,9 +156,18 @@ export default function TradesPage() {
         toast.success(`${trade.direction} ${trade.ticker}`, {
           description: `${trade.risk.qty} shares @ ${trade.risk.entry}`,
         })
-      } catch {
-        failed++
-        toast.error(`Failed: ${trade.ticker}`)
+      } catch (err: any) {
+        const msg: string = err?.message ?? ''
+        if (msg.includes('409')) {
+          // Idempotency dedup — already submitted within 30s, mark as executed
+          const newIds = new Set(executedIds).add(trade.id)
+          setExecutedIds(newIds)
+          saveIds(newIds)
+          toast.info(`${trade.ticker} already submitted`, { description: 'Skipped duplicate within 30s' })
+        } else {
+          failed++
+          toast.error(`Failed: ${trade.ticker}`, { description: msg || undefined })
+        }
       }
     }
     setBuyingAll(false)

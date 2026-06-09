@@ -97,6 +97,7 @@ DATA_DIR.mkdir(exist_ok=True)
 RECS_FILE    = DATA_DIR / "recommendations.json"
 TRADES_FILE  = DATA_DIR / "trades.json"
 WEIGHTS_FILE = DATA_DIR / "strategy_weights.json"
+REGIME_FILE  = DATA_DIR / "regime.json"
 
 
 def _load(path: Path, default: Any) -> Any:
@@ -491,10 +492,53 @@ async def _run_market_scan() -> None:
                     return
                 snaps: Dict[str, Any] = await r.json()
 
-            bars_map = await _fetch_multi_bars(session, list(set(symbols_raw + ["SPY"])), limit=100)
+            bars_map = await _fetch_multi_bars(session, list(set(symbols_raw + ["SPY", "QQQ", "VIXY"])), limit=100)
 
         if _AGENTS_AVAILABLE and _tech_agent is not None:
             _tech_agent.spy_bars = bars_map.get("SPY")
+
+        # Save regime snapshot (vix/spy/qqq daily change)
+        def _daily_chg(df: Any) -> float:
+            if df is None or len(df) < 2:
+                return 0.0
+            try:
+                prev_close = float(df.iloc[-2]["close"])
+                last_close = float(df.iloc[-1]["close"])
+                return round((last_close - prev_close) / prev_close * 100, 2) if prev_close else 0.0
+            except Exception:
+                return 0.0
+
+        spy_chg  = _daily_chg(bars_map.get("SPY"))
+        qqq_chg  = _daily_chg(bars_map.get("QQQ"))
+        vixy_df  = bars_map.get("VIXY")
+        vix_approx = 0.0
+        if vixy_df is not None and len(vixy_df) > 0:
+            try:
+                vix_approx = round(float(vixy_df.iloc[-1]["close"]) * 10, 1)
+            except Exception:
+                vix_approx = 0.0
+
+        if spy_chg > 0.5 and qqq_chg > 0.5 and vix_approx < 25:
+            regime_label = "risk_on"
+            regime_rationale = f"SPY +{spy_chg:.2f}%, QQQ +{qqq_chg:.2f}%, VIX-proxy {vix_approx:.1f} — bullish"
+        elif spy_chg < -0.5 or vix_approx > 35:
+            regime_label = "risk_off"
+            regime_rationale = f"SPY {spy_chg:.2f}%, VIX-proxy {vix_approx:.1f} — bearish"
+        elif abs(spy_chg) < 0.3 and abs(qqq_chg) < 0.3:
+            regime_label = "choppy"
+            regime_rationale = f"SPY {spy_chg:.2f}%, QQQ {qqq_chg:.2f}% — low momentum"
+        else:
+            regime_label = "neutral"
+            regime_rationale = f"SPY {spy_chg:.2f}%, QQQ {qqq_chg:.2f}%"
+
+        _save(REGIME_FILE, {
+            "regime":      regime_label,
+            "vix_level":   vix_approx if vix_approx > 0 else 15.0,
+            "spy_day_chg": spy_chg,
+            "qqq_day_chg": qqq_chg,
+            "rationale":   regime_rationale,
+            "timestamp":   datetime.utcnow().isoformat(),
+        })
 
         recs: List[Dict[str, Any]] = []
 
@@ -596,6 +640,10 @@ async def _run_market_scan() -> None:
                 "scanned_at":   datetime.utcnow().isoformat(),
                 "expires_at":   expires_iso,
                 "reeval_count": 0,
+                "hot_sector":   False,
+                "evaluations":  [],
+                "timestamp":    datetime.utcnow().isoformat(),
+                "chg_pct":      round(chg_pct, 2),
             })
 
         recs.sort(key=lambda x: x["composite_score"], reverse=True)
@@ -684,12 +732,25 @@ def get_history():
 def get_pnl():
     trades  = _load(TRADES_FILE, [])
     closed  = [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None]
-    by_date: Dict[str, float] = {}
+    by_date: Dict[str, Dict] = {}
     for t in closed:
         day = (t.get("closed_at") or t.get("executed_at") or "")[:10]
         if day:
-            by_date[day] = round(by_date.get(day, 0.0) + float(t["pnl"]), 2)
-    return [{"date": d, "pnl": p} for d, p in sorted(by_date.items())]
+            entry = by_date.setdefault(day, {"daily_pnl": 0.0, "trade_count": 0})
+            entry["daily_pnl"]   = round(entry["daily_pnl"] + float(t["pnl"]), 2)
+            entry["trade_count"] += 1
+
+    result  = []
+    cum_pnl = 0.0
+    for day in sorted(by_date):
+        cum_pnl = round(cum_pnl + by_date[day]["daily_pnl"], 2)
+        result.append({
+            "date":           day,
+            "daily_pnl":      by_date[day]["daily_pnl"],
+            "cumulative_pnl": cum_pnl,
+            "trade_count":    by_date[day]["trade_count"],
+        })
+    return result
 
 
 @app.get("/api/stats")
@@ -705,15 +766,43 @@ def get_stats():
     avg_win   = sum(float(t["pnl"]) for t in wins)   / len(wins)   if wins   else 0.0
     avg_loss  = sum(float(t["pnl"]) for t in losses) / len(losses) if losses else 0.0
     pf        = abs(avg_win * len(wins) / (avg_loss * len(losses))) if losses and avg_loss else 0.0
+    avg_rr    = round(avg_win / abs(avg_loss), 2) if avg_loss != 0 else 0.0
+
+    # Max drawdown from cumulative PnL series
+    max_dd = 0.0
+    if closed:
+        pnls    = [float(t["pnl"]) for t in closed]
+        cum     = 0.0
+        peak    = 0.0
+        for p in pnls:
+            cum += p
+            if cum > peak:
+                peak = cum
+            dd = (cum - peak) / (peak if peak != 0 else 1) * 100
+            if dd < max_dd:
+                max_dd = dd
+
+    # Sharpe approximation: mean(pnl) / std(pnl) * sqrt(252 / avg_hold)
+    sharpe = 0.0
+    if len(closed) >= 5:
+        import statistics
+        pnls  = [float(t["pnl"]) for t in closed]
+        mu    = statistics.mean(pnls)
+        sigma = statistics.stdev(pnls) or 1
+        sharpe = round((mu / sigma) * (252 ** 0.5), 2)
 
     return {
         "total_pnl":       round(total_pnl, 2),
+        "today_pnl":       0.0,   # overridden by Alpaca account in dashboard
         "win_rate":         round(win_rate, 1),
         "total_trades":     len(closed),
         "open_positions":   len([t for t in trades if t.get("status") == "open"]),
         "avg_win":          round(avg_win, 2),
         "avg_loss":         round(avg_loss, 2),
         "profit_factor":    round(pf, 2),
+        "avg_rr":           avg_rr,
+        "sharpe_ratio":     sharpe,
+        "max_drawdown":     round(max_dd, 2),
         "strategy_version": weights.get("update_count", 0),
         "win_rate_30d":     weights.get("win_rate_30d"),
         "bias":             weights.get("bias", "neutral"),
@@ -723,9 +812,19 @@ def get_stats():
 
 @app.get("/api/regime")
 def get_regime():
-    recs   = _load(RECS_FILE, [])
-    regime = recs[0].get("regime", "neutral") if recs else "neutral"
-    return {"regime": regime, "updated_at": datetime.utcnow().isoformat()}
+    default = {
+        "regime":      "neutral",
+        "vix_level":   15.0,
+        "spy_day_chg": 0.0,
+        "qqq_day_chg": 0.0,
+        "rationale":   "Waiting for first market scan...",
+        "timestamp":   datetime.utcnow().isoformat(),
+    }
+    data = _load(REGIME_FILE, default)
+    # Ensure all required keys exist (backwards compat)
+    for k, v in default.items():
+        data.setdefault(k, v)
+    return data
 
 
 @app.get("/api/sectors")
@@ -733,11 +832,22 @@ def get_sectors():
     recs = _load(RECS_FILE, [])
     now  = datetime.utcnow()
     active = [r for r in recs if not r.get("expires_at") or datetime.fromisoformat(r["expires_at"]) > now]
-    bucket: Dict[str, List[float]] = {}
+    bucket_score: Dict[str, List[float]] = {}
+    bucket_chg:   Dict[str, List[float]] = {}
     for r in active:
-        bucket.setdefault(r.get("sector", "Other"), []).append(r["composite_score"])
+        sec = r.get("sector", "Other")
+        bucket_score.setdefault(sec, []).append(float(r.get("composite_score", 50)))
+        bucket_chg.setdefault(sec, []).append(float(r.get("chg_pct", 0)))
     return sorted(
-        [{"sector": s, "score": round(sum(v) / len(v), 1), "count": len(v)} for s, v in bucket.items()],
+        [
+            {
+                "sector": s,
+                "score":  round(sum(bucket_score[s]) / len(bucket_score[s]), 1),
+                "change": round(sum(bucket_chg.get(s, [0])) / max(len(bucket_chg.get(s, [1])), 1), 2),
+                "count":  len(bucket_score[s]),
+            }
+            for s in bucket_score
+        ],
         key=lambda x: x["score"], reverse=True,
     )
 
@@ -768,6 +878,30 @@ def execute_trade(body: ExecuteBody):
     logger.info("Recorded trade: %s %s qty=%d entry=%.2f",
                 body.direction, body.ticker, body.qty, body.entry)
     return {"ok": True, "trade_id": record["id"]}
+
+
+@app.get("/api/open")
+def get_open_positions():
+    """Return open trades with their TP/SL context.
+    Used by the dashboard PositionsTable to show target/stop overlays
+    without relying on browser localStorage.
+    """
+    trades = _load(TRADES_FILE, [])
+    open_trades = [t for t in trades if t.get("status") == "open"]
+    return [
+        {
+            "ticker":          t["ticker"],
+            "direction":       t.get("direction", "LONG"),
+            "entry":           t.get("entry"),
+            "stop_loss":       t.get("stop_loss"),
+            "take_profit":     t.get("take_profit"),
+            "qty":             t.get("qty", 1),
+            "composite_score": t.get("composite_score"),
+            "order_id":        t.get("order_id"),
+            "executed_at":     t.get("executed_at"),
+        }
+        for t in open_trades
+    ]
 
 
 @app.post("/api/scan")

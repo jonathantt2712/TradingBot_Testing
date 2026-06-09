@@ -90,7 +90,7 @@ async def handle_heartbeat(
     execute: bool,
     publisher: SignalPublisher | None,
 ) -> None:
-    """React to heartbeat events — re-evaluate tickers mentioned in messages."""
+    """React to heartbeat events -- re-evaluate tickers mentioned in messages."""
     triggered: set[str] = set()
 
     for msg in messages:
@@ -99,7 +99,6 @@ async def handle_heartbeat(
             msg.get("type", "?"),
             msg.get("content", "")[:100],
         )
-        # If someone mentions a ticker we track, re-run analysis
         data = msg.get("data") or {}
         symbol = data.get("symbol") or data.get("ticker")
         if symbol and symbol.upper() in {t.upper() for t in default_tickers}:
@@ -131,16 +130,11 @@ async def rescan_loop(
     universe: UniverseScanner | None = None,
     scanner_cfg=None,
 ) -> None:
-    """Re-evaluate tickers every interval_min minutes.
-
-    If a UniverseScanner is provided, refreshes the candidate list each cycle
-    so the bot always tracks the hottest stocks, not yesterday's picks.
-    """
-    active = tickers  # mutable reference updated each cycle
+    """Re-evaluate tickers every interval_min minutes."""
+    active = tickers
     while True:
         await asyncio.sleep(interval_min * 60)
 
-        # Refresh universe if auto-scan is enabled
         if universe is not None and scanner_cfg is not None:
             try:
                 fresh = await universe.get_candidates(
@@ -156,11 +150,11 @@ async def rescan_loop(
                     active  = fresh
                     if added or removed:
                         logger.info(
-                            "Universe refreshed: +%s -%s → active=%s",
+                            "Universe refreshed: +%s -%s -> active=%s",
                             sorted(added), sorted(removed), active
                         )
             except Exception:
-                logger.exception("Universe refresh failed — keeping previous list")
+                logger.exception("Universe refresh failed -- keeping previous list")
 
         logger.info("Scheduled rescan of %s", active)
         await asyncio.gather(
@@ -174,20 +168,18 @@ async def main(tickers: Sequence[str]) -> None:
     execute = os.environ.get("EXECUTE_LIVE", "false").lower() == "true"
 
     if not execute:
-        logger.warning("EXECUTE_LIVE!=true → DRY RUN (analysis only, no orders sent)")
+        logger.warning("EXECUTE_LIVE!=true -> DRY RUN (analysis only, no orders sent)")
 
-    # --- build broker -------------------------------------------------
     broker: BaseBroker = AlpacaBroker(
         settings.alpaca_key_id, settings.alpaca_secret, paper=True
     )
 
-    # --- auto-scan universe if no tickers given -----------------------
     universe: UniverseScanner | None = None
     tickers_list: list[str] = list(tickers)
 
     if not tickers_list and settings.scanner.enabled:
         universe = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
-        logger.info("No tickers provided — running UniverseScanner...")
+        logger.info("No tickers provided -- running UniverseScanner...")
         async with broker:
             tickers_list = await universe.get_candidates(
                 top_n=settings.scanner.top_n,
@@ -197,24 +189,21 @@ async def main(tickers: Sequence[str]) -> None:
                 min_change=settings.scanner.min_change_pct,
             )
         if not tickers_list:
-            logger.error("Universe scanner returned no candidates — exiting")
+            logger.error("Universe scanner returned no candidates -- exiting")
             return
         logger.info("Auto-selected %d tickers: %s", len(tickers_list), tickers_list)
     elif not tickers_list:
-        logger.error("No tickers provided and SCANNER_ENABLED=false — nothing to do")
+        logger.error("No tickers provided and SCANNER_ENABLED=false -- nothing to do")
         return
 
-    # --- build AI4Trade client ----------------------------------------
     ai4 = AI4TradeClient()
     await ai4.__aenter__()
 
-    # --- build news sources -------------------------------------------
     alpaca_news = AlpacaNewsSource(settings.alpaca_key_id, settings.alpaca_secret) \
         if settings.alpaca_key_id else PoliStockSource(settings.news_base_url, settings.news_api_key)
     intel_news = MarketIntelNewsSource(ai4)
     news = CombinedNewsSource(alpaca_news, intel_news)
 
-    # --- build agents -------------------------------------------------
     social = SocialSentimentAgent(ai4, weight=settings.weights.social)
     pm = PortfolioManager(
         settings=settings,
@@ -234,14 +223,12 @@ async def main(tickers: Sequence[str]) -> None:
     publisher = SignalPublisher(ai4, publish_pass=True) if ai4.token else None
 
     async with broker:
-        # Initial scan
         logger.info("Initial scan of %s", tickers_list)
         await asyncio.gather(
             *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher) for t in tickers_list],
             return_exceptions=True,
         )
 
-        # Run heartbeat + rescan concurrently
         async def hb_callback(messages, tasks):
             await handle_heartbeat(messages, tasks, pm, broker, tickers_list,
                                    execute=execute, publisher=publisher)

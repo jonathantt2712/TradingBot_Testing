@@ -29,8 +29,8 @@ export function SectorHeatmap({ sectors }: Props) {
           >
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium truncate">{s.sector}</span>
-              <span className={cn('text-xs font-mono font-bold', s.change >= 0 ? 'text-bull' : 'text-bear')}>
-                {s.change >= 0 ? '+' : ''}{s.change.toFixed(1)}%
+              <span className={cn('text-xs font-mono font-bold', (s.change ?? 0) >= 0 ? 'text-bull' : 'text-bear')}>
+                {(s.change ?? 0) >= 0 ? '+' : ''}{(s.change ?? 0).toFixed(1)}%
               </span>
             </div>
             <div className="mt-1">

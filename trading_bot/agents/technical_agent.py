@@ -281,19 +281,17 @@ class TechnicalAgent(BaseAgent):
         if rolling_avg <= 0:
             return 50.0
         ratio = float(vol.iloc[-1]) / rolling_avg
+        ratio = float(vol.iloc[-1]) / rolling_avg
         if ratio >= _VOL_CONFIRM_RATIO:
             return float(np.clip(50 + (ratio - 1.0) * 25, 60, 90))
         else:
-            # Below threshold: strong bearish signal on conviction
+            # Below threshold: penalise low-conviction entry
             return float(np.clip(50 - (1.0 - ratio) * 40, 20, 49))
 
     def _lottery_penalty(self, df: pd.DataFrame) -> float:
-        """Research #2 (CPT / Reichenbach & Walther): lottery stock detector.
+        """Research #2 (CPT): lottery stock detector.
 
-        Returns a penalty [0, 30] that gets subtracted from the raw score's
-        distance from 50. A lottery stock is one that has surged >12% in the
-        last 20 bars AND has volume > 2.5× average — the retail frenzy profile
-        that precedes violent mean-reversions.
+        Returns a penalty [0, 30] subtracted from the raw score distance from 50.
         """
         if len(df) < _LOTTERY_RECENT_BARS + 5:
             return 0.0
@@ -306,23 +304,14 @@ class TechnicalAgent(BaseAgent):
         if vol_ratio is None:
             vol_ratio = 1.0
         if price_move >= _LOTTERY_PRICE_THRESH and vol_ratio >= _LOTTERY_VOL_THRESH:
-            # Scale penalty by how extreme the setup is
             penalty = min(price_move * 80 + (vol_ratio - 2.5) * 5, 30.0)
             return float(penalty)
         return 0.0
 
     def _is_retail_driven(self, df: pd.DataFrame) -> bool:
-        """Research #4 (Gao et al.): classify momentum as retail-attention driven.
-
-        Retail-driven = stock up >8% in last ~3 trading days (234 bars at 5min)
-        AND projected volume > 2.0× average. These setups are highly exploitable
-        intraday but carry overnight gap-down risk — enforce stricter entry threshold.
-        """
-        bars_3days = 234  # 3 × 78 bars/day
-        if len(df) < bars_3days:
-            lookback = df
-        else:
-            lookback = df.iloc[-bars_3days:]
+        """Research #4 (Gao et al.): retail-attention-driven momentum."""
+        bars_3days = 234
+        lookback = df.iloc[-bars_3days:] if len(df) >= bars_3days else df
         price_move = (
             (float(lookback["close"].iloc[-1]) - float(lookback["open"].iloc[0]))
             / max(float(lookback["open"].iloc[0]), 0.01)
@@ -346,17 +335,12 @@ class TechnicalAgent(BaseAgent):
         return (last - lo) / (hi - lo)
 
     def _pattern_score(self, df: pd.DataFrame) -> Optional[float]:
-        """Score based on candlestick pattern detections.
-
-        Uses pandas-ta cdl_pattern. Bullish patterns push score above 50,
-        bearish below 50. Returns None if too few bars or ta unavailable.
-        """
+        """Candlestick pattern score via pandas-ta."""
         if len(df) < 10:
             return None
         try:
             patterns = ta.cdl_pattern(
-                df["open"], df["high"], df["low"], df["close"],
-                name="all",
+                df["open"], df["high"], df["low"], df["close"], name="all"
             )
             if patterns is None or patterns.empty:
                 return None
@@ -366,14 +350,12 @@ class TechnicalAgent(BaseAgent):
             total = bullish + bearish
             if total == 0:
                 return 50.0
-            # net bullish fraction → [20, 80]
-            net = (bullish - bearish) / total
-            return float(np.clip(50 + net * 30, 20, 80))
-        except Exception as exc:  # noqa: BLE001
+            return float(np.clip(50 + (bullish - bearish) / total * 30, 20, 80))
+        except Exception as exc:
             logger.debug("pattern detection failed: %s", exc)
             return None
 
-    # ── Classic indicator helpers ─────────────────────────────────────────
+    # ---- Classic indicator helpers ----------------------------------------
 
     def _rsi(self, close: pd.Series, length: int = 14) -> float:
         if _HAS_PANDAS_TA:
@@ -393,12 +375,11 @@ class TechnicalAgent(BaseAgent):
             return float(macd.iloc[-1, -1])
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal = macd_line.ewm(span=9, adjust=False).mean()
-        return float((macd_line - signal).iloc[-1])
+        signal = (ema12 - ema26).ewm(span=9, adjust=False).mean()
+        return float(((ema12 - ema26) - signal).iloc[-1])
 
     def _session_vwap(self, df: pd.DataFrame) -> float:
-        """Session-only VWAP — resets at day boundary."""
+        """Session-only VWAP -- resets at day boundary."""
         if hasattr(df.index, "date") and len(df.index) > 0:
             today = df.index[-1].date()
             session = df[df.index.map(lambda x: x.date()) == today]
@@ -410,7 +391,7 @@ class TechnicalAgent(BaseAgent):
         return float((typical * df["volume"]).cumsum().iloc[-1] / cum_vol.iloc[-1])
 
 
-# ── Module-level helper (used by RegimeAgent too) ─────────────────────────
+# ---- Module-level helper (used by RegimeAgent too) ----------------------
 
 def _day_change_pct(df: pd.DataFrame) -> float:
     """% change from today's first bar open to latest close."""

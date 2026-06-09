@@ -1,8 +1,8 @@
-"""Portfolio Manager — orchestrator / execution brain.
+"""Portfolio Manager -- orchestrator / execution brain.
 
 Pipeline per ticker:
 1. Run Fundamental, Vision, Technical, Liquid (opt), Social (opt), Risk CONCURRENTLY.
-2. Blend directional scores by configured weights → composite [1, 100].
+2. Blend directional scores by configured weights -> composite [1, 100].
 3. Map composite to LONG / SHORT / PASS via thresholds.
 4. Apply Risk veto and minimum-risk-score gate.
 5. Build concrete plan, size the order, route bracket through the broker.
@@ -41,7 +41,7 @@ class PortfolioManager:
         risk: RiskAgent,
         liquid: Optional[LiquidAgent] = None,
         social: Optional[SocialSentimentAgent] = None,
-        publisher=None,   # Optional[SignalPublisher] — avoid circular import
+        publisher=None,
     ) -> None:
         self.settings = settings
         self.broker = broker
@@ -54,12 +54,12 @@ class PortfolioManager:
         self.publisher = publisher
         self._weights = settings.weights.as_map()
         self._thresholds: DecisionThresholds = settings.thresholds
-        self._regime: Optional[RegimeSnapshot] = None   # set via set_regime()
+        self._regime: Optional[RegimeSnapshot] = None
 
     def set_regime(self, regime: RegimeSnapshot) -> None:
         """Inject the current market regime (called once per scan cycle)."""
         self._regime = regime
-        logger.info("Regime applied: %s (Δlong=%+.0f Δshort=%+.0f)",
+        logger.info("Regime applied: %s (Dlong=%+.0f Dshort=%+.0f)",
                     regime.regime.value, regime.long_delta, regime.short_delta)
 
     async def decide(self, ctx: AnalysisContext) -> TradeDecision:
@@ -68,7 +68,6 @@ class PortfolioManager:
             self.technical.safe_evaluate(ctx),
             self.risk.safe_evaluate(ctx),
         ]
-        # Optional agents
         vision_idx = liquid_idx = social_idx = None
         if self.vision is not None:
             vision_idx = len(coros)
@@ -91,7 +90,6 @@ class PortfolioManager:
         evaluations = tuple(r for r in results)
         composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval)
 
-        # Research #4: extract retail-driven surcharge from TechnicalAgent data
         retail_surcharge = 0.0
         if technical is not None and technical.data:
             retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
@@ -164,7 +162,7 @@ class PortfolioManager:
 
         num = den = 0.0
         for key, ev in agents:
-            if ev is None:          # optional agent not wired up (e.g. vision in backtest)
+            if ev is None:
                 continue
             w = self._weights.get(key, 0.0) * max(ev.confidence, 0.05)
             num += ev.score * w
@@ -181,7 +179,7 @@ class PortfolioManager:
 
         Research #4 (Gao et al.): retail-attention-driven momentum gets an extra
         +surcharge on the entry threshold. These setups are exploitable intraday
-        (we're already day-trade-only) but require higher conviction to enter.
+        (we are already day-trade-only) but require higher conviction to enter.
         """
         long_thr  = self._thresholds.long_above  + retail_surcharge
         short_thr = self._thresholds.short_below - retail_surcharge

@@ -101,13 +101,12 @@ async def evaluate_ticker(pm: PortfolioManager, broker: BaseBroker, ticker: str,
 async def main(tickers: Sequence[str]) -> None:
     settings = load_settings()
 
-    # ── Auto-scan universe if no tickers given ────────────────────────────────
     tickers_list: list[str] = list(tickers)
     if not tickers_list:
         if settings.scanner.enabled:
             broker_tmp = build_broker(settings)
             universe = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
-            logger.info("No tickers provided — running UniverseScanner...")
+            logger.info("No tickers provided -- running UniverseScanner...")
             async with broker_tmp:
                 tickers_list = await universe.get_candidates(
                     top_n=settings.scanner.top_n,
@@ -117,10 +116,10 @@ async def main(tickers: Sequence[str]) -> None:
                     min_change=settings.scanner.min_change_pct,
                 )
             if not tickers_list:
-                logger.error("Universe scanner returned no candidates — exiting")
+                logger.error("Universe scanner returned no candidates -- exiting")
                 return
         else:
-            logger.error("No tickers provided and SCANNER_ENABLED=false — nothing to do")
+            logger.error("No tickers provided and SCANNER_ENABLED=false -- nothing to do")
             return
 
     logger.info("run_mode=%s tickers=%s", settings.run_mode.value, tickers_list)
@@ -140,14 +139,14 @@ async def main(tickers: Sequence[str]) -> None:
         or os.environ.get("EXECUTE_LIVE", "false").lower() == "true"
     )
     if settings.run_mode is RunMode.LIVE and not execute:
-        logger.warning("LIVE mode but EXECUTE_LIVE!=true → DRY RUN")
+        logger.warning("LIVE mode but EXECUTE_LIVE!=true -> DRY RUN")
 
     async with broker:
-        # ── 1. Market regime (runs once, adjusts thresholds for all tickers) ──
+        # 1. Market regime
         regime = await detect_regime(broker)
         pm.set_regime(regime)
 
-        # ── 2. Sector scan (hot sectors → prioritise tickers) ─────────────────
+        # 2. Sector scan
         scanner = SectorScanner(broker)
         scan    = await scanner.scan(tickers_list)
         hot     = set(scan.hot_tickers(top_n_sectors=2))
@@ -155,34 +154,29 @@ async def main(tickers: Sequence[str]) -> None:
             logger.info("Hot tickers (top 2 sectors): %s | sectors: %s",
                         sorted(hot), scan.sector_summary())
 
-        # ── 3. Inject SPY bars into TechnicalAgent for relative-strength ──────
+        # 3. Inject SPY bars into TechnicalAgent
         try:
             spy_bars = await broker.get_bars("SPY", timeframe="5Min", limit=120)
             pm.technical.spy_bars = spy_bars
         except Exception:
             pass
 
-        # ── 4. Evaluate tickers concurrently ──────────────────────────────────
+        # 4. Evaluate tickers concurrently
         results = await asyncio.gather(
             *[evaluate_ticker(pm, broker, t, execute=execute) for t in tickers_list],
             return_exceptions=True,
         )
-        decisions = []
         for ticker, result in zip(tickers_list, results):
             if isinstance(result, Exception):
                 logger.exception("evaluation failed for %s: %s", ticker, result)
             else:
                 if ticker.upper() not in hot:
-                    logger.info("  %s is in a cold sector — signal noted but deprioritised", ticker)
-                # collect non-exception decisions for dashboard push
-                # (evaluate_ticker logs internally; result is None here)
+                    logger.info("  %s is in a cold sector -- signal noted but deprioritised", ticker)
 
-        # ── 5. Push signals to dashboard API ─────────────────────────────────
+        # 5. Push signals to dashboard API
         try:
-            # Re-run decisions collection via pm's last evaluations
-            # Simpler: push_scan_results with regime + scan for dashboard
             await push_scan_results(
-                decisions=[],   # populated by live_runner which has direct access
+                decisions=[],
                 regime=regime,
                 scan_report=scan,
             )
@@ -193,5 +187,4 @@ async def main(tickers: Sequence[str]) -> None:
 
 
 if __name__ == "__main__":
-    # No default ticker — if nothing passed, UniverseScanner takes over
     asyncio.run(main(sys.argv[1:]))

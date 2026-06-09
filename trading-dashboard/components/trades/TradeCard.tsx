@@ -139,7 +139,7 @@ export function TradeCard({ trade, onExecute, currentPrice }: Props) {
       </div>
 
       <div className="space-y-1.5 mb-4">
-        {trade.evaluations.map(ev => (
+        {(trade.evaluations ?? []).map(ev => (
           <div key={ev.role} className="flex items-center gap-2">
             <span className="w-20 text-[10px] text-muted capitalize">{ev.role}</span>
             <div className="flex-1 score-bar-track">

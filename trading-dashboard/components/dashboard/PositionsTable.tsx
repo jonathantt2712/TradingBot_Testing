@@ -1,10 +1,11 @@
 'use client'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   X, Loader2, ChevronDown, ChevronUp,
   TrendingUp, TrendingDown, Minus,
   AlertTriangle, PlusCircle, MinusCircle, ShieldCheck,
+  RefreshCw,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn, formatPrice } from '@/lib/utils'
@@ -15,6 +16,44 @@ interface Bar { o: number; h: number; l: number; c: number; v: number; t: string
 type RecAction = 'HOLD' | 'ADD' | 'TAKE_PROFIT' | 'REDUCE' | 'EXIT'
 interface Recommendation { action: RecAction; reason: string; addQty?: number }
 interface Props { positions: AlpacaPosition[]; onClosed?: (symbol: string) => void }
+
+interface PositionContext {
+  ticker:          string
+  direction:       string
+  entry:           number
+  stop_loss:       number | null
+  take_profit:     number | null
+  qty:             number
+  composite_score: number | null
+}
+
+/** Build a minimal TradeRecommendation from server-side context. */
+function _ctxToRec(ctx: PositionContext): TradeRecommendation {
+  return {
+    id:              ctx.ticker,
+    ticker:          ctx.ticker,
+    direction:       ctx.direction as 'LONG' | 'SHORT',
+    composite_score: ctx.composite_score ?? 50,
+    agent_used:      false,
+    rationale:       '',
+    regime:          'neutral',
+    sector:          '',
+    scanned_at:      '',
+    expires_at:      '',
+    reeval_count:    0,
+    hot_sector:      false,
+    evaluations:     [],
+    timestamp:       '',
+    risk: {
+      entry:       ctx.entry,
+      stop_loss:   ctx.stop_loss ?? 0,
+      take_profit: ctx.take_profit ?? 0,
+      qty:         ctx.qty,
+      risk_reward: 0,
+      dollar_risk: 0,
+    },
+  } as TradeRecommendation
+}
 
 function computeRec(pos: AlpacaPosition, tradeRec?: TradeRecommendation | null): Recommendation {
   const current = parseFloat(pos.current_price)
@@ -212,17 +251,53 @@ function PositionRow({ position, tradeRec, onClose, closing }: {
   )
 }
 
+const REFRESH_MS = 30_000
+
 export function PositionsTable({ positions, onClosed }: Props) {
-  const [closing,   setClosing]   = useState<string | null>(null)
-  const [tradeRecs, setTradeRecs] = useState<TradeRecommendation[]>([])
+  const [closing,     setClosing]     = useState<string | null>(null)
+  const [tradeRecs,   setTradeRecs]   = useState<TradeRecommendation[]>([])
+  const [refreshing,  setRefreshing]  = useState(false)
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
   const router = useRouter()
 
-  useEffect(() => {
+  // Fetch TP/SL context from bot server; fall back to localStorage
+  const fetchCtx = useCallback(async () => {
+    try {
+      const r = await fetch('/api/bot/positions/context')
+      if (!r.ok) throw new Error('not ok')
+      const ctx: PositionContext[] = await r.json()
+      if (ctx.length > 0) {
+        setTradeRecs(ctx.map(_ctxToRec))
+        return
+      }
+    } catch { /* bot offline */ }
+    // Fall back to localStorage
     try {
       const raw = localStorage.getItem('executed_trade_recs')
       if (raw) setTradeRecs(JSON.parse(raw) as TradeRecommendation[])
     } catch { /* ignore */ }
   }, [])
+
+  // Initial fetch
+  useEffect(() => { fetchCtx() }, [fetchCtx])
+
+  // Auto-refresh P&L (via server component rerender) + context every 30 s
+  useEffect(() => {
+    const id = setInterval(() => {
+      router.refresh()
+      fetchCtx()
+    }, REFRESH_MS)
+    return () => clearInterval(id)
+  }, [router, fetchCtx])
+
+  // Manual refresh handler
+  async function handleManualRefresh() {
+    setRefreshing(true)
+    router.refresh()
+    await fetchCtx()
+    setLastRefresh(new Date())
+    setRefreshing(false)
+  }
 
   function findRec(symbol: string): TradeRecommendation | null {
     return tradeRecs.find(r => r.ticker === symbol) ?? null
@@ -257,6 +332,17 @@ export function PositionsTable({ positions, onClosed }: Props) {
         <h2 className="text-sm font-semibold text-primary">Open Positions</h2>
         <div className="flex items-center gap-2">
           <span className="badge bg-brand-cyan/10 border-brand-cyan/20 text-brand-cyan">{positions.length} open</span>
+          {lastRefresh && (
+            <span className="text-[10px] text-muted">{lastRefresh.toLocaleTimeString()}</span>
+          )}
+          <button
+            onClick={handleManualRefresh}
+            disabled={refreshing}
+            className="flex items-center gap-1 rounded-md p-1 text-muted hover:text-subtle hover:bg-bg-hover transition-colors disabled:opacity-40"
+            title="Refresh positions"
+          >
+            <RefreshCw className={cn('h-3 w-3', refreshing && 'animate-spin')} />
+          </button>
           <span className="text-[10px] text-muted">Bracket orders auto-close on TP/SL - EOD if unfilled</span>
         </div>
       </div>
