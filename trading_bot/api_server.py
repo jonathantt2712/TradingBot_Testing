@@ -31,6 +31,43 @@ import aiohttp
 from dotenv import load_dotenv
 load_dotenv()
 
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ET = _ZoneInfo("America/New_York")
+except ImportError:
+    try:
+        from backports.zoneinfo import ZoneInfo as _ZoneInfo  # type: ignore
+        _ET = _ZoneInfo("America/New_York")
+    except ImportError:
+        _ET = None  # fallback — market hours guard disabled
+
+
+def _is_market_open() -> bool:
+    """Return True if US equities market is currently open (Mon–Fri 09:30–16:00 ET)."""
+    if _ET is None:
+        return True  # can't check — allow through
+    now = datetime.now(_ET)
+    if now.weekday() >= 5:          # Saturday=5, Sunday=6
+        return False
+    open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+    close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return open_t <= now <= close_t
+
+
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
+
+# Daily scan stats (reset at midnight by _background_loop)
+_scan_stats: Dict[str, Any] = {
+    "date":             "",
+    "scans_today":      0,
+    "tickers_scanned":  0,
+    "recs_generated":   0,
+    "recs_skipped":     0,
+    "scan_errors":      0,
+    "last_scan_at":     None,
+    "market_closed_skips": 0,
+}
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -611,9 +648,39 @@ async def _revalidate_expired_recs(session: aiohttp.ClientSession) -> None:
 _scan_counter: Dict[str, int] = {"n": 0}
 
 
+def _reset_scan_stats_if_needed() -> None:
+    today = str(date.today())
+    if _scan_stats["date"] != today:
+        _scan_stats.update({
+            "date":             today,
+            "scans_today":      0,
+            "tickers_scanned":  0,
+            "recs_generated":   0,
+            "recs_skipped":     0,
+            "scan_errors":      0,
+            "last_scan_at":     None,
+            "market_closed_skips": 0,
+        })
+
+
 async def _run_market_scan() -> None:
+    _reset_scan_stats_if_needed()
+
     if not _ALPACA_KEY or not _ALPACA_SECRET:
         logger.warning("Alpaca credentials missing -- skipping auto-scan")
+        return
+
+    if not _is_market_open():
+        _scan_stats["market_closed_skips"] += 1
+        logger.info("Market closed — skipping scan (skip #%d today)", _scan_stats["market_closed_skips"])
+        return
+
+    open_trades = [t for t in _load(TRADES_FILE, []) if t.get("status") == "open"]
+    if len(open_trades) >= MAX_OPEN_POSITIONS:
+        logger.info(
+            "Max open positions (%d/%d) — skipping scan",
+            len(open_trades), MAX_OPEN_POSITIONS,
+        )
         return
 
     weights     = _load_weights()
@@ -842,13 +909,25 @@ async def _run_market_scan() -> None:
 
         recs.sort(key=lambda x: x["composite_score"], reverse=True)
         _save(RECS_FILE, recs)
-        logger.info("Scan complete: %d recs (agents=%s)", len(recs), _AGENTS_AVAILABLE)
+
+        scanned_n = len(symbols_raw)
+        skipped_n = scanned_n - len(recs)
+        _scan_stats["scans_today"]     += 1
+        _scan_stats["tickers_scanned"] += scanned_n
+        _scan_stats["recs_generated"]  += len(recs)
+        _scan_stats["recs_skipped"]    += skipped_n
+        _scan_stats["last_scan_at"]     = datetime.utcnow().isoformat()
+        logger.info(
+            "Scan complete: %d recs from %d symbols — skipped=%d agents=%s",
+            len(recs), scanned_n, skipped_n, _AGENTS_AVAILABLE,
+        )
 
         _scan_counter["n"] += 1
         if _scan_counter["n"] % 3 == 0:
             _update_strategy_weights()
 
     except Exception as exc:
+        _scan_stats["scan_errors"] += 1
         logger.exception("Market scan failed: %s", exc)
 
 
@@ -857,14 +936,36 @@ async def _run_market_scan() -> None:
 async def _background_loop() -> None:
     await asyncio.sleep(5)
     await _run_market_scan()
+    consecutive_errors = 0
+    last_day = ""
     while True:
-        await asyncio.sleep(300)
+        # Reset daily scan stats at midnight
+        today = str(date.today())
+        if today != last_day:
+            _reset_scan_stats_if_needed()
+            last_day = today
+
+        # Backoff: after 3 consecutive errors, wait 10× longer
+        wait = 300 if consecutive_errors < 3 else 3000
+        await asyncio.sleep(wait)
+
         try:
             await _run_market_scan()
+            consecutive_errors = 0  # reset on success
         except Exception as exc:
-            logger.error("Scanner error: %s", exc)
+            consecutive_errors += 1
+            _scan_stats["scan_errors"] += 1
+            logger.error(
+                "Scanner error #%d (backoff=%ds): %s",
+                consecutive_errors, wait, exc,
+            )
+
         try:
-            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())) as session:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(
+                    resolver=aiohttp.resolver.ThreadedResolver()
+                )
+            ) as session:
                 await _check_and_close_trades(session)
                 await _revalidate_expired_recs(session)
         except Exception as exc:
@@ -961,50 +1062,82 @@ def get_pnl():
 
 @app.get("/api/stats")
 def get_stats():
-    history = _load(HISTORY_FILE, [])
-    if not isinstance(history, list):
-        history = []
+    all_trades = _load(HISTORY_FILE, [])
+    if not isinstance(all_trades, list):
+        all_trades = []
 
-    total_trades = len(history)
-    wins = [t for t in history if float(t.get("pnl") or t.get("realized_pnl") or 0) > 0]
-    win_rate = (len(wins) / total_trades * 100) if total_trades else 0.0
-    total_pnl = sum(float(t.get("pnl") or t.get("realized_pnl") or 0) for t in history)
+    closed  = [t for t in all_trades if t.get("status") == "closed"]
+    open_tr = [t for t in all_trades if t.get("status") == "open"]
+    today_s = str(date.today())
+
+    total_trades  = len(closed)
+    open_count    = len(open_tr)
+    pnls          = [float(t.get("pnl") or t.get("realized_pnl") or 0) for t in closed]
+    total_pnl     = sum(pnls)
+    wins          = [p for p in pnls if p > 0]
+    win_rate      = (len(wins) / total_trades * 100) if total_trades else 0.0
+
+    today_pnl = sum(
+        float(t.get("pnl") or t.get("realized_pnl") or 0)
+        for t in closed
+        if str(t.get("closed_at", ""))[:10] == today_s
+    )
 
     # Sharpe, max drawdown, avg R/R
-    pnls = [float(t.get("pnl") or t.get("realized_pnl") or 0) for t in history]
     import numpy as _np
     sharpe = 0.0
     if len(pnls) >= 2:
         arr = _np.array(pnls)
         std = float(_np.std(arr))
         if std > 0:
-            sharpe = round(float(_np.mean(arr)) / std * (_np.sqrt(252)), 2)
+            sharpe = round(float(_np.mean(arr)) / std * _np.sqrt(252), 2)
 
     max_dd = 0.0
     if pnls:
-        cum = _np.cumsum(_np.array(pnls))
+        cum  = _np.cumsum(_np.array(pnls))
         peak = _np.maximum.accumulate(cum)
-        dd = cum - peak
+        dd   = cum - peak
         max_dd = round(float(dd.min()), 2)
 
-    rr_vals = [float(t.get("risk_reward") or 0) for t in history if t.get("risk_reward")]
+    rr_vals = [float(t.get("risk_reward") or 0) for t in closed if t.get("risk_reward")]
     avg_rr  = round(sum(rr_vals) / len(rr_vals), 2) if rr_vals else 0.0
+
+    # Best / worst trade
+    best_trade  = round(max(pnls), 2)  if pnls else 0.0
+    worst_trade = round(min(pnls), 2)  if pnls else 0.0
+
+    # Avg hold time (hours)
+    hold_times = []
+    for t in closed:
+        try:
+            opened = t.get("executed_at") or ""
+            closed_at = t.get("closed_at") or ""
+            if opened and closed_at:
+                delta = datetime.fromisoformat(closed_at) - datetime.fromisoformat(opened)
+                hold_times.append(delta.total_seconds() / 3600)
+        except Exception:
+            pass
+    avg_hold_hours = round(sum(hold_times) / len(hold_times), 1) if hold_times else 0.0
 
     weights = _load_weights()
     return {
-        "total_pnl":      round(total_pnl, 2),
-        "today_pnl":      0.0,
-        "win_rate":       round(win_rate, 1),
-        "total_trades":   total_trades,
-        "open_positions": 0,
-        "sharpe_ratio":   sharpe,
-        "max_drawdown":   max_dd,
-        "avg_rr":         avg_rr,
+        "total_pnl":       round(total_pnl, 2),
+        "today_pnl":       round(today_pnl, 2),
+        "win_rate":        round(win_rate, 1),
+        "total_trades":    total_trades,
+        "open_positions":  open_count,
+        "sharpe_ratio":    sharpe,
+        "max_drawdown":    max_dd,
+        "avg_rr":          avg_rr,
+        "best_trade":      best_trade,
+        "worst_trade":     worst_trade,
+        "avg_hold_hours":  avg_hold_hours,
         "strategy_version": weights.get("update_count", 0),
-        "win_rate_30d":   weights.get("win_rate_30d"),
-        "bias":           weights.get("bias", "neutral"),
-        "agents_active":  _AGENTS_AVAILABLE,
+        "win_rate_30d":    weights.get("win_rate_30d"),
+        "bias":            weights.get("bias", "neutral"),
+        "agents_active":   _AGENTS_AVAILABLE,
     }
+
 
 
 @app.get("/api/regime")
@@ -1059,7 +1192,6 @@ class ExecuteBody(BaseModel):
     order_id:          Optional[str] = None
     composite_score:   Optional[float] = None
     score:             Optional[float] = None
-
 
 
 @app.get("/api/open")
@@ -1130,6 +1262,22 @@ def execute_trade(body: ExecuteBody):
 async def trigger_scan():
     asyncio.create_task(_run_market_scan())
     return {"status": "scan_triggered", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/scan-stats")
+def get_scan_stats():
+    """Return today's scan activity counters and market status."""
+    all_trades = _load(HISTORY_FILE, [])
+    if not isinstance(all_trades, list):
+        all_trades = []
+    open_count = len([t for t in all_trades if t.get("status") == "open"])
+    return {
+        **_scan_stats,
+        "market_open":    _is_market_open(),
+        "max_positions":  MAX_OPEN_POSITIONS,
+        "open_positions": open_count,
+        "agents_active":  _AGENTS_AVAILABLE,
+    }
 
 
 @app.get("/api/health")
