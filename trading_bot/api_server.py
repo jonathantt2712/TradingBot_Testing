@@ -744,7 +744,7 @@ async def _run_market_scan() -> None:
                 score, agent_evals = await _run_all_agents(ctx)
                 evaluations_out   = [
                     {
-                        "agent":      ev.role.value if hasattr(ev.role, "value") else str(ev.role),
+                        "role":       ev.role.value if hasattr(ev.role, "value") else str(ev.role),
                         "score":      round(float(ev.score), 1),
                         "confidence": round(float(ev.confidence), 2),
                         "rationale":  ev.rationale or "",
@@ -828,6 +828,17 @@ async def _run_market_scan() -> None:
                 "timestamp":    datetime.utcnow().isoformat(),
                 "chg_pct":      round(chg_pct, 2),
             })
+
+        # Mark hot_sector = True for recs in the top-2 scoring sectors
+        if recs:
+            from collections import defaultdict as _dd
+            sector_scores: dict = _dd(list)
+            for r in recs:
+                sector_scores[r["sector"]].append(r["composite_score"])
+            sector_avg = {s: sum(v)/len(v) for s, v in sector_scores.items()}
+            top_sectors = set(sorted(sector_avg, key=sector_avg.get, reverse=True)[:2])
+            for r in recs:
+                r["hot_sector"] = r["sector"] in top_sectors
 
         recs.sort(key=lambda x: x["composite_score"], reverse=True)
         _save(RECS_FILE, recs)
@@ -921,9 +932,7 @@ def get_history():
 
 @app.get("/api/pnl")
 def get_pnl():
-    data = _load(PNL_FILE, [])
-    if isinstance(data, list):
-        return data
+    # Always compute from trade history (PNL_FILE is not used as a cache)
     history = _load(HISTORY_FILE, [])
     if not isinstance(history, list):
         return []
@@ -1052,6 +1061,30 @@ class ExecuteBody(BaseModel):
     score:             Optional[float] = None
 
 
+
+@app.get("/api/open")
+def get_open_context():
+    """Return open trade TP/SL context for PositionsTable."""
+    trades = _load(HISTORY_FILE, [])
+    if not isinstance(trades, list):
+        return []
+    open_trades = [t for t in trades if t.get("status") == "open"]
+    return [
+        {
+            "ticker":          t.get("ticker", ""),
+            "direction":       t.get("direction", "LONG"),
+            "entry":           float(t.get("entry", 0)),
+            "stop_loss":       float(t.get("stop_loss") or 0) or None,
+            "take_profit":     float(t.get("take_profit") or 0) or None,
+            "qty":             int(t.get("qty", 1)),
+            "composite_score": t.get("composite_score"),
+            "order_id":        t.get("order_id") or None,
+            "executed_at":     t.get("executed_at") or None,
+        }
+        for t in open_trades
+    ]
+
+
 @app.post("/api/execute")
 def execute_trade(body: ExecuteBody):
     trade = {
@@ -1101,4 +1134,9 @@ async def trigger_scan():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": _AGENTS_AVAILABLE, "
+    return {"status": "ok", "agents": _AGENTS_AVAILABLE, "timestamp": datetime.utcnow().isoformat()}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("api_server:app", host="0.0.0.0", port=8000, reload=False)

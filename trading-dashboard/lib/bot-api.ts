@@ -4,7 +4,7 @@
  * when the bot server is offline — no hanging requests.
  */
 
-const BOT_URL     = process.env.BOT_URL ?? 'http://localhost:8000'
+const BOT_URL     = process.env.TRADING_BOT_API_URL ?? process.env.BOT_URL ?? 'http://localhost:8000'
 const BOT_TIMEOUT = 3_000  // ms
 
 function abortAfter(ms: number): AbortSignal {

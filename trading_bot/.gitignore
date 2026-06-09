@@ -1,5 +1,7 @@
 .env
 __pycache__/
 *.pyc
-data/
 *.log
+# Runtime data files only — Python source files in data/ ARE committed
+data/*.json
+data/__pycache__/
