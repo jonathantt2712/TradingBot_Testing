@@ -263,6 +263,9 @@ DATA_DIR    = _HERE / "data"
 DATA_DIR.mkdir(exist_ok=True)
 RECS_FILE    = DATA_DIR / "recommendations.json"
 TRADES_FILE  = DATA_DIR / "trades.json"
+HISTORY_FILE = TRADES_FILE                        # alias — executed trades = history
+PNL_FILE     = DATA_DIR / "pnl.json"
+CONTEXT_FILE = DATA_DIR / "context.json"
 WEIGHTS_FILE = DATA_DIR / "strategy_weights.json"
 REGIME_FILE  = DATA_DIR / "regime.json"
 
@@ -902,7 +905,7 @@ app.add_middleware(
 
 @app.get("/api/recommendations")
 def get_recommendations():
-    data = _load(RECS_FILE)
+    data = _load(RECS_FILE, [])
     if isinstance(data, list):
         return data
     return []
@@ -910,7 +913,7 @@ def get_recommendations():
 
 @app.get("/api/history")
 def get_history():
-    data = _load(HISTORY_FILE)
+    data = _load(HISTORY_FILE, [])
     if isinstance(data, list):
         return data
     return []
@@ -918,10 +921,10 @@ def get_history():
 
 @app.get("/api/pnl")
 def get_pnl():
-    data = _load(PNL_FILE)
+    data = _load(PNL_FILE, [])
     if isinstance(data, list):
         return data
-    history = _load(HISTORY_FILE)
+    history = _load(HISTORY_FILE, [])
     if not isinstance(history, list):
         return []
     from collections import defaultdict
@@ -949,7 +952,7 @@ def get_pnl():
 
 @app.get("/api/stats")
 def get_stats():
-    history = _load(HISTORY_FILE)
+    history = _load(HISTORY_FILE, [])
     if not isinstance(history, list):
         history = []
 
@@ -997,7 +1000,7 @@ def get_stats():
 
 @app.get("/api/regime")
 def get_regime():
-    data = _load(REGIME_FILE)
+    data = _load(REGIME_FILE, {})
     if isinstance(data, dict) and data.get("regime"):
         return data
     return {
@@ -1012,7 +1015,7 @@ def get_regime():
 
 @app.get("/api/sectors")
 def get_sectors():
-    recs = _load(RECS_FILE)
+    recs = _load(RECS_FILE, [])
     if not isinstance(recs, list):
         return []
     from collections import defaultdict
@@ -1066,14 +1069,14 @@ def execute_trade(body: ExecuteBody):
         "status":          "open",
         "pnl":             None,
     }
-    history = _load(HISTORY_FILE)
+    history = _load(HISTORY_FILE, [])
     if not isinstance(history, list):
         history = []
     history.append(trade)
     _save(HISTORY_FILE, history)
 
     # Store TP/SL context for auto-close detection
-    ctx_data = _load(CONTEXT_FILE)
+    ctx_data = _load(CONTEXT_FILE, {})
     if not isinstance(ctx_data, dict):
         ctx_data = {}
     ctx_data[body.order_id or trade["id"]] = {
@@ -1098,4 +1101,4 @@ async def trigger_scan():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": _AGENTS_AVAILABLE, "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "agents": _AGENTS_AVAILABLE, "
