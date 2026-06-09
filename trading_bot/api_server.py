@@ -463,7 +463,69 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
     modified = False
     for trade in open_trades:
         try:
-            order_id = trade["order_id"]
+            order_id  = trade["order_id"]
+            direction = trade.get("direction", "LONG")
+            entry     = float(trade.get("entry") or 0)
+            qty       = int(trade.get("qty", 1))
+            tp_val    = float(trade.get("take_profit") or (trade.get("risk") or {}).get("take_profit") or 0)
+            sl_val    = float(trade.get("stop_loss")   or (trade.get("risk") or {}).get("stop_loss")   or 0)
+
+            # ── Simulated / offline orders (PAPER-* IDs) ──────────────────
+            # These have no real Alpaca bracket. Fall back to price-based
+            # TP/SL detection so they don't stay open forever.
+            if order_id.startswith("PAPER-"):
+                if not tp_val or not sl_val or not entry:
+                    continue
+                ticker_sym = trade.get("ticker", "")
+                try:
+                    async with session.get(
+                        f"{_DATA_BASE}/v2/stocks/snapshots?symbols={ticker_sym}",
+                        headers=_ALPACA_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as rq:
+                        if rq.status != 200:
+                            continue
+                        snap_data = await rq.json()
+                except Exception:
+                    continue
+
+                snap  = (snap_data or {}).get(ticker_sym, {})
+                lt    = snap.get("latestTrade") or {}
+                db    = snap.get("dailyBar") or {}
+                price = float(lt.get("p") or db.get("c") or 0)
+                if price <= 0:
+                    continue
+
+                hit_tp = (direction == "LONG"  and price >= tp_val) or \
+                         (direction == "SHORT" and price <= tp_val)
+                hit_sl = (direction == "LONG"  and price <= sl_val) or \
+                         (direction == "SHORT" and price >= sl_val)
+
+                if not hit_tp and not hit_sl:
+                    continue   # still open
+
+                exit_price  = tp_val if hit_tp else sl_val
+                exit_reason = "take_profit" if hit_tp else "stop_loss"
+                if direction == "LONG":
+                    pnl     = (exit_price - entry) * qty
+                    pnl_pct = (exit_price - entry) / entry * 100
+                else:
+                    pnl     = (entry - exit_price) * qty
+                    pnl_pct = (entry - exit_price) / entry * 100
+                trade["status"]      = "closed"
+                trade["exit"]        = round(exit_price, 2)
+                trade["exit_reason"] = exit_reason
+                trade["pnl"]         = round(pnl, 2)
+                trade["pnl_pct"]     = round(pnl_pct, 2)
+                trade["closed_at"]   = datetime.utcnow().isoformat()
+                modified = True
+                logger.info(
+                    "Closed (simulated) %s %s via %s: exit=%.2f  PnL=$%.2f (%.2f%%)",
+                    direction, ticker_sym, exit_reason, exit_price, pnl, pnl_pct,
+                )
+                continue
+
+            # ── Real Alpaca bracket order ──────────────────────────────────
             async with session.get(
                 f"{_BROKER_BASE}/v2/orders/{order_id}",
                 headers=_ALPACA_HEADERS,
@@ -1197,24 +1259,19 @@ class ExecuteBody(BaseModel):
 @app.get("/api/open")
 def get_open_context():
     """Return open trade TP/SL context for PositionsTable."""
-    trades = _load(HISTORY_FILE, [])
     if not isinstance(trades, list):
-        return []
+        trades = []
     open_trades = [t for t in trades if t.get("status") == "open"]
-    return [
-        {
-            "ticker":          t.get("ticker", ""),
-            "direction":       t.get("direction", "LONG"),
-            "entry":           float(t.get("entry", 0)),
-            "stop_loss":       float(t.get("stop_loss") or 0) or None,
-            "take_profit":     float(t.get("take_profit") or 0) or None,
-            "qty":             int(t.get("qty", 1)),
-            "composite_score": t.get("composite_score"),
-            "order_id":        t.get("order_id") or None,
-            "executed_at":     t.get("executed_at") or None,
+    return {
+        t["id"]: {
+            "take_profit": t.get("take_profit"),
+            "stop_loss":   t.get("stop_loss"),
+            "direction":   t.get("direction"),
+            "entry":       t.get("entry"),
+            "qty":         t.get("qty"),
         }
-        for t in open_trades
-    ]
+        for t in open_trades if "id" in t
+    }
 
 
 @app.post("/api/execute")
