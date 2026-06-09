@@ -40,8 +40,9 @@ _WEIGHTS = {
     "vwap":             0.12,
     "rel_strength":     0.14,  # vs SPY
     "volume_surge":     0.12,  # unusual volume
-    "intraday_mom":     0.10,  # price vs open
-    "day_range_pos":    0.08,  # where in today's H-L range
+    "intraday_mom":     0.07,  # price vs open (reduced to accommodate ORB)
+    "day_range_pos":    0.04,  # where in today's H-L range (reduced)
+    "orb":              0.07,  # Opening Range Breakout (9:30–9:45 ET range)
     "vol_confirm":      0.06,  # Research #3: volume confirmation gate
 }
 
@@ -134,7 +135,12 @@ class TechnicalAgent(BaseAgent):
             # 0 = at low (bearish=20), 0.5 = mid (50), 1 = at high (bullish=80)
             signals["day_range_pos"] = float(np.clip(drp * 80 + 10, 10, 90))
 
-        # 5. Candlestick Patterns (pandas-ta only)
+        # 5. Opening Range Breakout
+        orb = self._orb_score(df)
+        if orb is not None:
+            signals["orb"] = orb
+
+        # 6. Candlestick Patterns (pandas-ta only)
         if _HAS_PANDAS_TA:
             pat_score = self._pattern_score(df)
             if pat_score is not None:
@@ -202,6 +208,10 @@ class TechnicalAgent(BaseAgent):
             rationale += f" RS={rs:.2f}"
         if "volume_surge" in clean and vol_ratio is not None:
             rationale += f" vol={vol_ratio:.1f}x"
+        if "orb" in clean:
+            orb_val = clean["orb"]
+            orb_tag = "↑BRK" if orb_val > 55 else ("↓BRK" if orb_val < 45 else "=RNG")
+            rationale += f" ORB{orb_tag}"
         if lottery_penalty > 0:
             rationale += f" [LOTTERY pen={lottery_penalty:.0f}]"
         if retail_surcharge > 0:
@@ -281,7 +291,6 @@ class TechnicalAgent(BaseAgent):
         if rolling_avg <= 0:
             return 50.0
         ratio = float(vol.iloc[-1]) / rolling_avg
-        ratio = float(vol.iloc[-1]) / rolling_avg
         if ratio >= _VOL_CONFIRM_RATIO:
             return float(np.clip(50 + (ratio - 1.0) * 25, 60, 90))
         else:
@@ -334,6 +343,44 @@ class TechnicalAgent(BaseAgent):
             return 0.5
         return (last - lo) / (hi - lo)
 
+    def _orb_score(self, df: pd.DataFrame, num_bars: int = 3) -> Optional[float]:
+        """Opening Range Breakout: first 3 five-min bars (9:30–9:45 ET) form the range.
+
+        score > 55  → price above ORB high (bullish breakout)
+        score < 45  → price below ORB low  (bearish breakdown)
+        45–55       → price inside opening range (no directional edge)
+
+        Returns None if not enough bars in today's session to confirm the breakout
+        (requires opening range bars + at least 2 follow-through bars).
+        """
+        today = df.index[-1].date()
+        today_df = df[df.index.map(lambda x: x.date()) == today]
+
+        # Need opening range bars PLUS at least 2 confirmed follow-through bars
+        if len(today_df) <= num_bars + 1:
+            return None
+
+        orb_df    = today_df.iloc[:num_bars]
+        orb_high  = float(orb_df["high"].max())
+        orb_low   = float(orb_df["low"].min())
+        orb_range = orb_high - orb_low
+        if orb_range <= 0:
+            return None
+
+        last = float(today_df["close"].iloc[-1])
+
+        if last > orb_high:
+            # Breakout above: +% above high maps to score 65–90
+            pct_above = (last - orb_high) / orb_high * 100
+            return float(np.clip(65 + pct_above * 8, 65, 90))
+        if last < orb_low:
+            # Breakdown below: +% below low maps to score 10–35
+            pct_below = (orb_low - last) / orb_low * 100
+            return float(np.clip(35 - pct_below * 8, 10, 35))
+        # Inside range: neutral with slight position bias (45–55)
+        pos_in_range = (last - orb_low) / orb_range
+        return float(np.clip(45 + pos_in_range * 10, 45, 55))
+
     def _pattern_score(self, df: pd.DataFrame) -> Optional[float]:
         """Candlestick pattern score via pandas-ta."""
         if len(df) < 10:
@@ -356,7 +403,6 @@ class TechnicalAgent(BaseAgent):
             return None
 
     # ---- Classic indicator helpers ----------------------------------------
-
     def _rsi(self, close: pd.Series, length: int = 14) -> float:
         if _HAS_PANDAS_TA:
             return float(ta.rsi(close, length=length).iloc[-1])

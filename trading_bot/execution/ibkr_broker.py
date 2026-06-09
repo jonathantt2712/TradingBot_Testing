@@ -235,7 +235,6 @@ class IBKRBroker(BaseBroker):
             return None
 
         action     = "BUY"  if decision.decision is Decision.LONG else "SELL"
-        action     = "BUY"  if decision.decision is Decision.LONG else "SELL"
         rev_action = "SELL" if action == "BUY"  else "BUY"
         sl         = round(plan.stop_loss,   2)
         tp         = round(plan.take_profit, 2)
