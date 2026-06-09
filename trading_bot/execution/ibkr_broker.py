@@ -51,10 +51,11 @@ class IBKRBroker(BaseBroker):
         port:      int = 7497,
         client_id: int = 1,
     ) -> None:
-        self.host      = host
-        self.port      = port
-        self.client_id = client_id
-        self._ib       = None
+        self.host           = host
+        self.port           = port
+        self.client_id      = client_id
+        self._ib            = None
+        self._reconnect_task: Optional[asyncio.Task] = None
 
     # ── Context manager ───────────────────────────────────────────────────────
 
@@ -62,25 +63,68 @@ class IBKRBroker(BaseBroker):
         from ib_insync import IB, util
         util.patchAsyncio()          # let ib_insync share the running event loop
         self._ib = IB()
-        try:
-            await self._ib.connectAsync(
-                self.host, self.port,
-                clientId=self.client_id,
-                timeout=15,
-            )
-            logger.info(
-                "IBKRBroker connected to %s:%d (clientId=%d)",
-                self.host, self.port, self.client_id,
-            )
-        except Exception as exc:
-            logger.error("IBKRBroker connect failed: %s", exc)
-            raise
+        await self._connect()
+        self._ib.disconnectedEvent += self._on_disconnect
         return self
 
+    async def _connect(self) -> None:
+        """Establish connection to TWS/IB Gateway with retry on first attempt."""
+        for attempt in range(1, 4):
+            try:
+                await self._ib.connectAsync(
+                    self.host, self.port,
+                    clientId=self.client_id,
+                    timeout=15,
+                )
+                logger.info(
+                    "IBKRBroker connected to %s:%d (clientId=%d)",
+                    self.host, self.port, self.client_id,
+                )
+                return
+            except Exception as exc:
+                logger.error("IBKRBroker connect attempt %d failed: %s", attempt, exc)
+                if attempt < 3:
+                    await asyncio.sleep(5 * attempt)
+        raise ConnectionError(
+            f"IBKRBroker could not connect to {self.host}:{self.port} after 3 attempts"
+        )
+
+    def _on_disconnect(self) -> None:
+        """Called by ib_insync when the connection drops unexpectedly."""
+        logger.warning("IBKRBroker: TWS disconnected — scheduling reconnect")
+        if self._reconnect_task is None or self._reconnect_task.done():
+            self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self) -> None:
+        """Exponential-backoff reconnect loop: waits 5s, 15s, 30s, 60s…"""
+        delays = [5, 15, 30, 60, 120]
+        for i, delay in enumerate(delays):
+            logger.info("IBKRBroker reconnect attempt %d in %ds…", i + 1, delay)
+            await asyncio.sleep(delay)
+            try:
+                if not self._ib.isConnected():
+                    await self._ib.connectAsync(
+                        self.host, self.port,
+                        clientId=self.client_id,
+                        timeout=15,
+                    )
+                    logger.info("IBKRBroker reconnected successfully")
+                    return
+            except Exception as exc:
+                logger.warning("IBKRBroker reconnect attempt %d failed: %s", i + 1, exc)
+        logger.error("IBKRBroker: all reconnect attempts exhausted — giving up")
+
     async def __aexit__(self, *_) -> None:
-        if self._ib and self._ib.isConnected():
-            self._ib.disconnect()
-            logger.info("IBKRBroker disconnected")
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+        if self._ib:
+            try:
+                self._ib.disconnectedEvent -= self._on_disconnect
+            except Exception:
+                pass
+            if self._ib.isConnected():
+                self._ib.disconnect()
+                logger.info("IBKRBroker disconnected")
         self._ib = None
 
     def _require(self) -> None:
@@ -190,6 +234,7 @@ class IBKRBroker(BaseBroker):
             logger.warning("%s: qty=%d — skipping order", decision.ticker, qty)
             return None
 
+        action     = "BUY"  if decision.decision is Decision.LONG else "SELL"
         action     = "BUY"  if decision.decision is Decision.LONG else "SELL"
         rev_action = "SELL" if action == "BUY"  else "BUY"
         sl         = round(plan.stop_loss,   2)

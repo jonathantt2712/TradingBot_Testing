@@ -1,6 +1,9 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { CheckCircle2, XCircle, Loader2, ExternalLink, Key, Server, Zap, Shield, RefreshCw } from 'lucide-react'
+import {
+  CheckCircle2, XCircle, Loader2, ExternalLink,
+  Key, Server, Zap, Shield, RefreshCw, Activity,
+} from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 
@@ -49,19 +52,30 @@ function StatusList({ rows }: { rows: StatusRow[] }) {
   )
 }
 
+interface ScanStats {
+  ok: boolean
+  market_open: boolean | null
+  scans_today: number
+  tickers_scanned: number
+  recs_generated: number
+  scan_errors: number
+  open_positions: number
+  max_positions: number
+  last_scan_at: string | null
+  agents_active: boolean
+}
+
 export default function SettingsPage() {
   const [scanning, setScanning] = useState(false)
 
   async function triggerScan() {
     setScanning(true)
     try {
-      const ctrl = new AbortController()
-      setTimeout(() => ctrl.abort(), 5000)
-      const r = await fetch('http://localhost:8000/api/scan', { method: 'POST', signal: ctrl.signal })
+      const r = await fetch('/api/bot/scan', { method: 'POST' })
       if (r.ok) toast.success('Market scan started', { description: 'Recommendations will update in ~5 seconds' })
-      else toast.error('Scan failed', { description: `Server returned ${r.status}` })
+      else toast.error('Scan failed', { description: r.status === 503 ? 'Bot server offline' : `Server returned ${r.status}` })
     } catch {
-      toast.error('Bot server offline', { description: 'Start api_server.py first' })
+      toast.error('Request failed', { description: 'Check your connection' })
     } finally {
       setScanning(false)
     }
@@ -71,9 +85,11 @@ export default function SettingsPage() {
     account: null, data: null, paper: null,
   })
   const [botStatus, setBotStatus] = useState<boolean | null>(null)
-  const [envVars, setEnvVars]     = useState<{ keySet: boolean | null; secretSet: boolean | null; paper: boolean | null }>({
+  const [agentsOk,  setAgentsOk]  = useState<boolean | null>(null)
+  const [envVars,   setEnvVars]   = useState<{ keySet: boolean | null; secretSet: boolean | null; paper: boolean | null }>({
     keySet: null, secretSet: null, paper: null,
   })
+  const [scanStats, setScanStats] = useState<ScanStats | null>(null)
 
   useEffect(() => {
     async function check() {
@@ -81,11 +97,7 @@ export default function SettingsPage() {
       try {
         const r = await fetch('/api/alpaca/account', { cache: 'no-store' })
         const d = await r.json()
-        setAlpacaStatus(prev => ({
-          ...prev,
-          account: r.ok,
-          paper: d?.status === 'ACTIVE' || r.ok,
-        }))
+        setAlpacaStatus(prev => ({ ...prev, account: r.ok, paper: d?.status === 'ACTIVE' || r.ok }))
       } catch {
         setAlpacaStatus(prev => ({ ...prev, account: false, paper: false }))
       }
@@ -98,17 +110,24 @@ export default function SettingsPage() {
         setAlpacaStatus(prev => ({ ...prev, data: false }))
       }
 
-      // Bot server
+      // Bot health — via server-side proxy (works on Vercel too, not just localhost)
       try {
-        const ctrl = new AbortController()
-        setTimeout(() => ctrl.abort(), 3000)
-        const r = await fetch('http://localhost:8000/api/stats', { signal: ctrl.signal, cache: 'no-store' })
-        setBotStatus(r.ok)
+        const r = await fetch('/api/bot/health', { cache: 'no-store' })
+        const d = await r.json()
+        setBotStatus(d.ok === true)
+        setAgentsOk(d.agents ?? null)
       } catch {
         setBotStatus(false)
+        setAgentsOk(false)
       }
 
-      // Env var check endpoint
+      // Scan stats
+      try {
+        const r = await fetch('/api/bot/scan-stats', { cache: 'no-store' })
+        if (r.ok) setScanStats(await r.json())
+      } catch { /* bot offline */ }
+
+      // Env var check
       try {
         const r = await fetch('/api/settings/env', { cache: 'no-store' })
         if (r.ok) {
@@ -116,32 +135,42 @@ export default function SettingsPage() {
           setEnvVars({ keySet: d.keySet, secretSet: d.secretSet, paper: d.paper })
         }
       } catch {
-        setEnvVars(prev => ({
-          ...prev,
-          keySet:    true,
-          secretSet: true,
-          paper: true,
-        }))
+        setEnvVars({ keySet: true, secretSet: true, paper: true })
       }
     }
     check()
   }, [])
 
   const alpacaRows: StatusRow[] = [
-    { label: 'Account API',          ok: alpacaStatus.account, detail: alpacaStatus.account ? 'connected' : 'unreachable' },
-    { label: 'Market Data API',      ok: alpacaStatus.data,    detail: alpacaStatus.data    ? 'connected' : 'unreachable' },
-    { label: 'Paper trading mode',   ok: alpacaStatus.paper,   detail: 'paper-api.alpaca.markets'  },
+    { label: 'Account API',        ok: alpacaStatus.account, detail: alpacaStatus.account ? 'connected'   : 'unreachable' },
+    { label: 'Market Data API',    ok: alpacaStatus.data,    detail: alpacaStatus.data    ? 'connected'   : 'unreachable' },
+    { label: 'Paper trading mode', ok: alpacaStatus.paper,   detail: 'paper-api.alpaca.markets' },
   ]
 
   const envRows: StatusRow[] = [
-    { label: 'ALPACA_KEY_ID',   ok: envVars.keySet,    detail: envVars.keySet    ? 'set' : 'missing' },
-    { label: 'ALPACA_SECRET',   ok: envVars.secretSet, detail: envVars.secretSet ? 'set' : 'missing' },
-    { label: 'ALPACA_PAPER',    ok: envVars.paper,     detail: envVars.paper     ? 'true' : 'false'  },
+    { label: 'ALPACA_KEY_ID',  ok: envVars.keySet,    detail: envVars.keySet    ? 'set'  : 'missing' },
+    { label: 'ALPACA_SECRET',  ok: envVars.secretSet, detail: envVars.secretSet ? 'set'  : 'missing' },
+    { label: 'ALPACA_PAPER',   ok: envVars.paper,     detail: envVars.paper     ? 'true' : 'false'   },
   ]
 
   const botRows: StatusRow[] = [
-    { label: 'Bot server (localhost:8000)', ok: botStatus, detail: botStatus ? 'running' : 'offline' },
+    { label: 'Bot server (api_server.py)', ok: botStatus, detail: botStatus  ? 'running' : 'offline'  },
+    { label: 'LLM agents wired',           ok: agentsOk,  detail: agentsOk   ? 'active'  : 'inactive' },
   ]
+
+  const marketLabel =
+    scanStats === null       ? undefined :
+    scanStats.market_open === null ? 'checking…' :
+    scanStats.market_open          ? 'open'      : 'closed'
+
+  const scanRows: StatusRow[] = scanStats ? [
+    { label: 'Market status',     ok: scanStats.market_open ?? false,                                   detail: marketLabel },
+    { label: 'Scans today',       ok: scanStats.scans_today > 0,                                        detail: String(scanStats.scans_today) },
+    { label: 'Tickers scanned',   ok: scanStats.tickers_scanned > 0,                                    detail: String(scanStats.tickers_scanned) },
+    { label: 'Recs generated',    ok: scanStats.recs_generated > 0,                                     detail: String(scanStats.recs_generated) },
+    { label: 'Open positions',    ok: scanStats.open_positions < scanStats.max_positions,                detail: `${scanStats.open_positions} / ${scanStats.max_positions}` },
+    { label: 'Scan errors today', ok: scanStats.scan_errors === 0,                                      detail: String(scanStats.scan_errors) },
+  ] : []
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[900px]">
@@ -177,63 +206,58 @@ ALPACA_PAPER=true`}
         <SettingsCard title="Environment Variables" icon={Key} iconColor="text-caution">
           <StatusList rows={envRows} />
           <p className="text-[11px] text-muted">
-            Restart <code className="text-brand-cyan">npm run dev</code> after changing <code className="text-brand-cyan">.env.local</code>.
+            Restart <code className="text-brand-cyan">npm run dev</code> after changing{' '}
+            <code className="text-brand-cyan">.env.local</code>.
           </p>
         </SettingsCard>
 
         {/* Bot server */}
-        <SettingsCard title="Python Bot Server" icon={Server} iconColor="text-purple-400">
+        <SettingsCard title="Bot Server" icon={Server} iconColor="text-brand-purple">
           <StatusList rows={botRows} />
           <div className="rounded-lg border border-bg-border bg-bg-base px-3 py-3 text-[11px] text-muted space-y-1">
-            <p>Start the FastAPI server to enable live signals:</p>
-            <pre className="mt-1 text-[10px] font-mono text-subtle">
-{`cd trading_bot
-python api_server.py`}
-            </pre>
+            <p>Start the bot server locally:</p>
+            <pre className="mt-1 text-[10px] font-mono text-subtle">cd trading_bot{'\n'}python api_server.py</pre>
           </div>
           <button
             onClick={triggerScan}
-            disabled={scanning}
-            className="flex items-center gap-1.5 rounded-lg border border-brand-cyan/30 bg-brand-cyan/10 px-3 py-1.5 text-xs font-medium text-brand-cyan hover:bg-brand-cyan/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={scanning || !botStatus}
+            className="btn-ghost flex items-center gap-1.5 text-xs disabled:opacity-50"
           >
             {scanning
-              ? <Loader2 className="h-3 w-3 animate-spin" />
-              : <RefreshCw className="h-3 w-3" />
-            }
-            {scanning ? 'Scanning...' : 'Scan Market Now'}
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : <RefreshCw className="h-3.5 w-3.5" />}
+            Trigger Market Scan
           </button>
-          <p className="text-[11px] text-muted/60">
-            The dashboard works in demo mode when the bot server is offline. Auto-scans every 30 min when running.
-          </p>
         </SettingsCard>
 
-        {/* System info */}
-        <SettingsCard title="App Info" icon={Shield} iconColor="text-teal-400">
-          <div className="space-y-2">
-            {[
-              { label: 'Mode',          value: 'Paper Trading'      },
-              { label: 'Dashboard',     value: 'Next.js App Router' },
-              { label: 'Bot Engine',    value: 'Python + FastAPI'   },
-              { label: 'Data Source',   value: 'Alpaca Markets API' },
-              { label: 'Strategy',      value: 'Multi-Agent AI'     },
-              { label: 'Backtest',      value: 'Walk-Forward 30d'   },
-            ].map(({ label, value }) => (
-              <div key={label} className="flex items-center justify-between rounded-lg bg-bg-base px-3 py-2">
-                <span className="text-xs text-muted">{label}</span>
-                <span className="text-xs font-medium text-subtle font-mono">{value}</span>
-              </div>
-            ))}
-          </div>
-          <a
-            href="https://github.com/itaitoker64/tradingbot2026"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1.5 text-xs text-brand-cyan/80 hover:text-brand-cyan transition-colors"
-          >
-            <ExternalLink className="h-3 w-3" />
-            View on GitHub
-          </a>
+        {/* Scan stats */}
+        <SettingsCard title="Today's Scan Activity" icon={Activity} iconColor="text-bull">
+          {scanStats === null ? (
+            <div className="flex items-center gap-2 text-xs text-muted py-2">
+              <XCircle className="h-4 w-4 text-bear" />
+              Bot server offline — no scan data available
+            </div>
+          ) : (
+            <>
+              <StatusList rows={scanRows} />
+              {scanStats.last_scan_at && (
+                <p className="text-[10px] text-muted font-mono">
+                  Last scan: {new Date(scanStats.last_scan_at + 'Z').toLocaleTimeString()}
+                </p>
+              )}
+            </>
+          )}
         </SettingsCard>
+      </div>
+
+      {/* Security notice */}
+      <div className="flex items-start gap-3 rounded-xl border border-bg-border bg-bg-hover px-4 py-3">
+        <Shield className="h-4 w-4 text-caution mt-0.5 shrink-0" />
+        <p className="text-[11px] text-muted leading-relaxed">
+          <span className="font-semibold text-subtle">Paper trading only.</span>{' '}
+          This dashboard is configured for Alpaca Paper Trading. No real money is at risk.
+          Never set <code className="text-brand-cyan">ALPACA_PAPER=false</code> without fully understanding the implications.
+        </p>
       </div>
     </div>
   )
