@@ -1,13 +1,15 @@
-"""Vision Specialist — chart pattern recognition.
+"""Vision Specialist — chart pattern recognition via vision LLM.
 
-Sends a rendered chart image to a vision-capable model and asks for a
-structured read of the setup (support/resistance, trend, breakout) mapped to
-a 1..100 score. If no image or API key is available it degrades to neutral.
+Provider priority (automatic, based on available env keys):
+  1. GEMINI_API_KEY   → Google Gemini Flash vision (free tier)
+  2. ANTHROPIC_API_KEY → Anthropic Claude Sonnet vision (paid)
+  3. none             → degrades to neutral (no cost)
+
+Renders a candlestick chart PNG and asks the model to score the setup 1-100.
 """
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import mimetypes
@@ -15,9 +17,18 @@ from pathlib import Path
 
 from core.base_agent import NEUTRAL_SCORE, BaseAgent, clamp_score
 from core.enums import AgentRole
+from core.llm_adapter import LLMAdapter
 from core.models import AgentEvaluation, AnalysisContext
 
 logger = logging.getLogger(__name__)
+
+_VISION_PROMPT = (
+    "You are a technical chart analyst. Assess this price chart. "
+    "Identify trend, key support/resistance, and any breakout/breakdown pattern. "
+    "Return ONLY valid JSON: "
+    '{"score": <int 1-100, 1=strong bearish setup, 100=strong bullish setup>, '
+    '"pattern": "<short pattern name>", "reason": "<25 words max>"}. '
+)
 
 
 class VisionAgent(BaseAgent):
@@ -26,13 +37,16 @@ class VisionAgent(BaseAgent):
     def __init__(
         self,
         *,
-        weight: float = 0.2,
-        anthropic_api_key: str = "",
-        model: str = "claude-sonnet-4-6",
+        weight:            float = 0.15,
+        anthropic_api_key: str   = "",
+        gemini_api_key:    str   = "",
+        model:             str   = "",
     ) -> None:
         super().__init__(weight=weight)
-        self.api_key = anthropic_api_key
-        self.model = model
+        self._llm = LLMAdapter(
+            gemini_key=gemini_api_key,
+            anthropic_key=anthropic_api_key,
+        )
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
         path = ctx.chart_image_path
@@ -43,7 +57,8 @@ class VisionAgent(BaseAgent):
                 confidence=0.1,
                 rationale="no chart image provided",
             )
-        if not self.api_key:
+
+        if not self._llm.has_vision:
             return AgentEvaluation(
                 role=self.role,
                 score=NEUTRAL_SCORE,
@@ -52,45 +67,27 @@ class VisionAgent(BaseAgent):
             )
 
         media_type = mimetypes.guess_type(path)[0] or "image/png"
-        # FIX: read file bytes with asyncio.to_thread to avoid blocking the event loop
-        raw = await asyncio.to_thread(Path(path).read_bytes)
-        b64 = base64.standard_b64encode(raw).decode()
+        raw_bytes  = await asyncio.to_thread(Path(path).read_bytes)
 
-        import anthropic  # lazy import
-
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
-        instruction = (
-            "You are a technical chart analyst. Assess this price chart for "
-            f"{ctx.ticker}. Identify trend, key support/resistance, and any "
-            "breakout/breakdown. Return ONLY JSON: "
-            '{"score": <int 1-100, 1=bearish setup,100=bullish setup>, '
-            '"pattern": "<short>", "reason": "<=25 words"}.'
-        )
+        prompt = _VISION_PROMPT + f"\n\nTicker: {ctx.ticker}"
         try:
-            resp = await client.messages.create(
-                model=self.model,
-                max_tokens=300,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-                            {"type": "text", "text": instruction},
-                        ],
-                    }
-                ],
-            )
-            text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-            parsed = json.loads(text)
+            text = await self._llm.vision(raw_bytes, prompt, media_type)
+            if not text:
+                raise ValueError("empty response")
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            parsed = json.loads(text.strip())
             return AgentEvaluation(
                 role=self.role,
                 score=clamp_score(int(parsed["score"])),
                 confidence=0.7,
-                rationale=f"{parsed.get('pattern', '')}: {parsed.get('reason', '')}",
+                rationale=f"[{self._llm.provider}] {parsed.get('pattern', '')}: {parsed.get('reason', '')}",
                 data=parsed,
             )
-        except Exception:  # noqa: BLE001
-            logger.exception("vision analysis failed for %s", ctx.ticker)
+        except Exception as exc:
+            logger.debug("VisionAgent failed for %s: %s", ctx.ticker, exc)
             return AgentEvaluation(
                 role=self.role,
                 score=NEUTRAL_SCORE,

@@ -1,3 +1,4 @@
+export const dynamic = 'force-dynamic'
 import { StatsCards }     from '@/components/dashboard/StatsCards'
 import { AccountBar }      from '@/components/dashboard/AccountBar'
 import { PnLChart }        from '@/components/dashboard/PnLChart'

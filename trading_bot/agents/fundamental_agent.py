@@ -1,17 +1,9 @@
-"""Fundamental Analyst — news sentiment + earnings/catalyst scoring via Claude LLM.
+"""Fundamental Analyst — news sentiment + earnings/catalyst scoring via LLM.
 
-Fetches recent news for the ticker, summarises it with an Anthropic model,
-and returns a directional 1..100 score.
-
-Score semantics:
-  1  = strongly bearish (bad earnings, scandal, downgrade, macro headwind)
-  50 = neutral / no signal
-  100 = strongly bullish (beat + raise, M&A, positive catalyst)
-
-Degrades to neutral (score=50, confidence=0.1) if:
-  - No news available
-  - No Anthropic API key configured
-  - LLM call fails for any reason
+Provider priority (automatic, based on available env keys):
+  1. GEMINI_API_KEY    -> Google Gemini Flash (free tier)
+  2. ANTHROPIC_API_KEY -> Anthropic Claude Haiku (paid)
+  3. none              -> keyword sentiment fallback (always works, no cost)
 """
 from __future__ import annotations
 
@@ -21,6 +13,7 @@ from typing import Any
 
 from core.base_agent import NEUTRAL_SCORE, BaseAgent, clamp_score
 from core.enums import AgentRole
+from core.llm_adapter import LLMAdapter
 from core.models import AgentEvaluation, AnalysisContext
 
 logger = logging.getLogger(__name__)
@@ -42,21 +35,23 @@ class FundamentalAgent(BaseAgent):
 
     def __init__(
         self,
-        news_source,          # NewsSource instance (AlpacaNewsSource, etc.)
+        news_source,
         *,
-        weight:           float = 0.20,
-        anthropic_api_key: str  = "",
-        model:             str  = "claude-haiku-4-5-20251001",
-        max_articles:      int  = 8,
+        weight:            float = 0.20,
+        anthropic_api_key: str   = "",
+        gemini_api_key:    str   = "",
+        model:             str   = "",
+        max_articles:      int   = 8,
     ) -> None:
         super().__init__(weight=weight)
-        self.news        = news_source
-        self.api_key     = anthropic_api_key
-        self.model       = model
+        self.news         = news_source
         self.max_articles = max_articles
+        self._llm         = LLMAdapter(
+            gemini_key=gemini_api_key,
+            anthropic_key=anthropic_api_key,
+        )
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
-        # ── Fetch news ─────────────────────────────────────────────────────────
         try:
             articles = await self.news.get_news(ctx.ticker, limit=self.max_articles)
         except Exception as exc:
@@ -71,49 +66,33 @@ class FundamentalAgent(BaseAgent):
                 rationale="no news available",
             )
 
-        if not self.api_key:
-            # No LLM — do a simple keyword sentiment as fallback
-            return self._keyword_fallback(ctx.ticker, articles)
-
-        # ── Build LLM prompt ───────────────────────────────────────────────────
-        news_text = "\n".join(
-            f"- {a.get('headline', a.get('title', ''))}: {a.get('summary', '')[:120]}"
-            for a in articles[:self.max_articles]
-        )
-        user_msg = f"Ticker: {ctx.ticker}\n\nRecent news:\n{news_text}"
-
-        # ── Call Anthropic ─────────────────────────────────────────────────────
-        try:
-            import anthropic  # lazy import
-            client = anthropic.AsyncAnthropic(api_key=self.api_key)
-            resp = await client.messages.create(
-                model=self.model,
-                max_tokens=256,
-                system=_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_msg}],
+        if self._llm.has_llm:
+            news_text = "\n".join(
+                f"- {a.get('headline', a.get('title', ''))}: {a.get('summary', '')[:120]}"
+                for a in articles[:self.max_articles]
             )
-            raw = resp.content[0].text.strip()
-            # Strip markdown code fences if present
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            data: dict[str, Any] = json.loads(raw)
-            score      = clamp_score(float(data.get("score", 50)))
-            confidence = float(max(0.1, min(1.0, data.get("confidence", 0.6))))
-            rationale  = str(data.get("rationale", ""))
-        except Exception as exc:
-            logger.warning("Fundamental LLM call failed for %s: %s", ctx.ticker, exc)
-            return self._keyword_fallback(ctx.ticker, articles)
+            user_msg = f"Ticker: {ctx.ticker}\n\nRecent news:\n{news_text}"
+            try:
+                raw = await self._llm.chat(user_msg, system=_SYSTEM_PROMPT)
+                if raw:
+                    if raw.startswith("```"):
+                        raw = raw.split("```")[1]
+                        if raw.startswith("json"):
+                            raw = raw[4:]
+                    data: dict[str, Any] = json.loads(raw.strip())
+                    score      = clamp_score(float(data.get("score", 50)))
+                    confidence = float(max(0.1, min(1.0, data.get("confidence", 0.6))))
+                    rationale  = str(data.get("rationale", ""))
+                    return AgentEvaluation(
+                        role=self.role,
+                        score=score,
+                        confidence=confidence,
+                        rationale=f"[{self._llm.provider}] {rationale}",
+                    )
+            except Exception as exc:
+                logger.warning("Fundamental LLM call failed for %s: %s", ctx.ticker, exc)
 
-        return AgentEvaluation(
-            role=self.role,
-            score=score,
-            confidence=confidence,
-            rationale=rationale,
-        )
-
-    # ── Keyword fallback (no API key) ─────────────────────────────────────────
+        return self._keyword_fallback(ctx.ticker, articles)
 
     _BULL = {"beat", "raised", "upgrade", "bullish", "surge", "record", "strong",
              "growth", "buy", "outperform", "positive", "breakout", "rally"}
@@ -138,5 +117,5 @@ class FundamentalAgent(BaseAgent):
             role=self.role,
             score=score,
             confidence=conf,
-            rationale=f"keyword: +{bull}/-{bear} signals",
+            rationale=f"[keyword] +{bull}/-{bear} signals",
         )

@@ -1,3 +1,4 @@
+export const dynamic = 'force-dynamic'
 import { PnLAnalytics } from '@/components/pnl/PnLAnalytics'
 import { botGet }       from '@/lib/bot-api'
 import { getAccount, getOrders } from '@/lib/alpaca'

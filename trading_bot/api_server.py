@@ -45,9 +45,23 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 _AGENTS_AVAILABLE = False
-_tech_agent = None
-_risk_agent = None
-_Decision = None
+_tech_agent        = None
+_risk_agent        = None
+_fundamental_agent = None
+_vision_agent      = None
+_social_agent      = None
+_liquid_agent      = None
+_ai4trade_client   = None
+_Decision          = None
+
+# Agent composite weights (must sum to 1.0 across active agents)
+_AGENT_WEIGHTS = {
+    "technical":   0.35,
+    "fundamental": 0.20,
+    "vision":      0.15,
+    "social":      0.15,
+    "liquid":      0.15,
+}
 
 try:
     import pandas as pd
@@ -64,8 +78,161 @@ try:
     _Decision   = Decision
     _AGENTS_AVAILABLE = True
     logger.info("Agent pipeline loaded -- TechnicalAgent + RiskAgent active")
+
+    # ── FundamentalAgent (news sentiment via Alpaca news + optional Claude LLM) ──
+    try:
+        from agents.fundamental_agent import FundamentalAgent
+        from data.news_sources import AlpacaNewsSource
+
+        class _NewsAdapter:
+            """Wraps AlpacaNewsSource.fetch_headlines() → .get_news() interface."""
+            def __init__(self, src):
+                self._src = src
+            async def get_news(self, ticker: str, limit: int = 8):
+                try:
+                    headlines = await self._src.fetch_headlines(ticker, limit=limit)
+                    return [{"headline": h.title, "summary": h.summary} for h in headlines]
+                except Exception:
+                    return []
+
+        _alpaca_key_tmp    = os.getenv("ALPACA_API_KEY_ID", "")
+        _alpaca_secret_tmp = os.getenv("ALPACA_API_SECRET", "")
+        _anthropic_key     = os.getenv("ANTHROPIC_API_KEY", "")
+        _gemini_key        = os.getenv("GEMINI_API_KEY", "")
+        _llm_provider      = "gemini" if _gemini_key else ("anthropic" if _anthropic_key else "keyword")
+        _news_adapter      = _NewsAdapter(AlpacaNewsSource(_alpaca_key_tmp, _alpaca_secret_tmp))
+        _fundamental_agent = FundamentalAgent(
+            _news_adapter,
+            weight=0.20,
+            anthropic_api_key=_anthropic_key,
+            gemini_api_key=_gemini_key,
+            max_articles=6,
+        )
+        logger.info("FundamentalAgent loaded (provider=%s)", _llm_provider)
+    except Exception as _e:
+        logger.warning("FundamentalAgent unavailable: %s", _e)
+
+    # ── VisionAgent (chart image → vision LLM) ─────────────────────────────────
+    try:
+        from agents.vision_agent import VisionAgent
+        _anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        _gemini_key    = os.getenv("GEMINI_API_KEY", "")
+        _vision_agent  = VisionAgent(
+            weight=0.15,
+            anthropic_api_key=_anthropic_key,
+            gemini_api_key=_gemini_key,
+        )
+        _vis_provider = "gemini" if _gemini_key else ("anthropic" if _anthropic_key else "none")
+        logger.info("VisionAgent loaded (provider=%s)", _vis_provider)
+    except Exception as _e:
+        logger.warning("VisionAgent unavailable: %s", _e)
+
+    # ── SocialAgent (AI4Trade community feed — public, no auth required) ───────
+    try:
+        from agents.social_agent import SocialSentimentAgent
+        from data.ai4trade_client import AI4TradeClient as _AI4TC
+        _ai4trade_client = _AI4TC(
+            email=os.getenv("AI4TRADE_EMAIL", ""),
+            password=os.getenv("AI4TRADE_PASSWORD", ""),
+        )
+        _social_agent = SocialSentimentAgent(_ai4trade_client, weight=0.15)
+        logger.info("SocialAgent loaded (AI4Trade client ready)")
+    except Exception as _e:
+        logger.warning("SocialAgent unavailable: %s", _e)
+
+    # ── LiquidAgent (crowd positioning / funding rate) ─────────────────────────
+    try:
+        from agents.liquid_agent import LiquidAgent
+        _liquid_agent = LiquidAgent(weight=0.15, api_key=os.getenv("LIQUID_API_KEY", ""))
+        logger.info("LiquidAgent loaded")
+    except Exception as _e:
+        logger.warning("LiquidAgent unavailable: %s", _e)
+
 except Exception as _import_err:
     logger.warning("Agent imports failed (%s) -- scanner using fallback formula", _import_err)
+
+
+async def _run_all_agents(ctx: "AnalysisContext") -> tuple:
+    """Run all available agents in parallel and return (composite_score, evaluations).
+
+    Only agents that are instantiated and return non-neutral confidence contribute
+    to the weighted composite. Falls back to TechnicalAgent alone if others fail.
+    """
+    if not _AGENTS_AVAILABLE:
+        return 50.0, []
+
+    # Build chart image path for VisionAgent (render async in thread)
+    chart_path = None
+    if _vision_agent is not None and ctx.bars is not None:
+        try:
+            from data.chart_renderer import render_chart
+            chart_path = await asyncio.to_thread(render_chart, ctx.ticker, ctx.bars)
+            ctx = type(ctx)(
+                ticker=ctx.ticker,
+                bars=ctx.bars,
+                account=ctx.account,
+                chart_image_path=chart_path,
+            )
+        except Exception:
+            pass
+
+    # Ensure AI4Trade client session is open
+    if _ai4trade_client is not None and _ai4trade_client._session is None:
+        try:
+            import aiohttp as _aio
+            _ai4trade_client._session = _aio.ClientSession(
+                timeout=_aio.ClientTimeout(total=15.0)
+            )
+        except Exception:
+            pass
+
+    # Collect agents to run
+    agents_to_run = []
+    if _tech_agent is not None:
+        agents_to_run.append(("technical", _tech_agent))
+    if _fundamental_agent is not None:
+        agents_to_run.append(("fundamental", _fundamental_agent))
+    if _vision_agent is not None:
+        agents_to_run.append(("vision", _vision_agent))
+    if _social_agent is not None:
+        agents_to_run.append(("social", _social_agent))
+    if _liquid_agent is not None:
+        agents_to_run.append(("liquid", _liquid_agent))
+
+    # Run all in parallel with a per-agent timeout
+    async def _safe_eval(name, agent):
+        try:
+            return name, await asyncio.wait_for(agent.safe_evaluate(ctx), timeout=8.0)
+        except Exception as e:
+            logger.debug("Agent %s failed for %s: %s", name, ctx.ticker, e)
+            return name, None
+
+    results = await asyncio.gather(*[_safe_eval(n, a) for n, a in agents_to_run])
+
+    # Weighted composite — only count agents with confidence > 0.15
+    evaluations = []
+    total_w = 0.0
+    weighted_sum = 0.0
+    for name, ev in results:
+        if ev is None:
+            continue
+        evaluations.append(ev)
+        if ev.confidence > 0.15:
+            w = _AGENT_WEIGHTS.get(name, 0.10)
+            weighted_sum += ev.score * w
+            total_w += w
+
+    composite = weighted_sum / total_w if total_w > 0 else 50.0
+
+    # Clean up temp chart file
+    if chart_path:
+        try:
+            import os as _os
+            _os.unlink(chart_path)
+        except Exception:
+            pass
+
+    return composite, evaluations
 
 
 # === Alpaca credentials & constants ===
@@ -460,7 +627,7 @@ async def _run_market_scan() -> None:
         _risk_agent.cfg.atr_target_multiple = weights.get("atr_target_multiple", 3.0)
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())) as session:
             equity = await _get_account_equity(session)
             logger.info("Auto-scan: equity=$%.2f v%d agents=%s",
                         equity, weights.get("update_count", 0), _AGENTS_AVAILABLE)
@@ -567,12 +734,25 @@ async def _run_market_scan() -> None:
             df         = bars_map.get(sym)
             agent_used = False
             rationale  = ""
+            evaluations_out = []
 
-            if _AGENTS_AVAILABLE and _tech_agent is not None and df is not None and len(df) >= 20:
-                ctx         = AnalysisContext(ticker=sym, bars=df, account={"equity": equity})
-                eval_result = await _tech_agent.safe_evaluate(ctx)
-                score       = float(eval_result.score)
-                rationale   = eval_result.rationale or ""
+            if _AGENTS_AVAILABLE and df is not None and len(df) >= 20:
+                ctx   = AnalysisContext(ticker=sym, bars=df, account={"equity": equity})
+                score, agent_evals = await _run_all_agents(ctx)
+                evaluations_out   = [
+                    {
+                        "agent":      ev.role.value if hasattr(ev.role, "value") else str(ev.role),
+                        "score":      round(float(ev.score), 1),
+                        "confidence": round(float(ev.confidence), 2),
+                        "rationale":  ev.rationale or "",
+                    }
+                    for ev in agent_evals
+                ]
+                # Primary rationale from technical agent if available
+                for ev in agent_evals:
+                    if hasattr(ev.role, "value") and ev.role.value == "technical":
+                        rationale = ev.rationale or ""
+                        break
 
                 if score > 55:
                     direction = "LONG"
@@ -603,19 +783,19 @@ async def _run_market_scan() -> None:
                     rr   = round(tp_pct / stop_pct, 2)
 
             else:
-                chg_w = weights.get("chg_weight", 4.0)
+                chg_w   = weights.get("chg_weight", 4.0)
                 intra_w = weights.get("intra_weight", 2.0)
-                score = min(max(50 + chg_pct * chg_w + intra_pct * intra_w, score_floor), score_ceil)
+                score   = min(max(50 + chg_pct * chg_w + intra_pct * intra_w, score_floor), score_ceil)
                 if score < min_score:
                     continue
-                direction = "LONG" if chg_pct > 0 else "SHORT"
-                entry = round(price, 2)
-                d     = 1 if direction == "LONG" else -1
+                direction   = "LONG" if chg_pct > 0 else "SHORT"
+                entry       = round(price, 2)
+                d           = 1 if direction == "LONG" else -1
                 stop_loss   = round(entry * (1 - d * stop_pct), 2)
                 take_profit = round(entry * (1 + d * tp_pct),   2)
-                qty      = _kelly_qty(equity, entry, stop_loss, take_profit, score)
-                rr       = round(tp_pct / stop_pct, 2)
-                rationale = f"fallback chg={chg_pct:+.1f}% intra={intra_pct:+.1f}%"
+                qty         = _kelly_qty(equity, entry, stop_loss, take_profit, score)
+                rr          = round(tp_pct / stop_pct, 2)
+                rationale   = f"fallback chg={chg_pct:+.1f}% intra={intra_pct:+.1f}%"
 
             dollar_rsk  = round(abs(entry - stop_loss) * qty, 2)
             expires_iso = (datetime.utcnow() + timedelta(minutes=win_mins)).isoformat()
@@ -641,7 +821,7 @@ async def _run_market_scan() -> None:
                 "expires_at":   expires_iso,
                 "reeval_count": 0,
                 "hot_sector":   False,
-                "evaluations":  [],
+                "evaluations":  evaluations_out,
                 "timestamp":    datetime.utcnow().isoformat(),
                 "chg_pct":      round(chg_pct, 2),
             })
@@ -670,7 +850,7 @@ async def _background_loop() -> None:
         except Exception as exc:
             logger.error("Scanner error: %s", exc)
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())) as session:
                 await _check_and_close_trades(session)
                 await _revalidate_expired_recs(session)
         except Exception as exc:
@@ -681,6 +861,19 @@ async def _background_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Open AI4Trade session if client was created
+    if _ai4trade_client is not None and _ai4trade_client._session is None:
+        try:
+            import aiohttp as _aio
+            _ai4trade_client._session = _aio.ClientSession(
+                timeout=_aio.ClientTimeout(total=15.0)
+            )
+            if _ai4trade_client.email and _ai4trade_client.password:
+                await _ai4trade_client._authenticate()
+            logger.info("AI4Trade session opened")
+        except Exception as _e:
+            logger.warning("AI4Trade session failed to open: %s", _e)
+
     task = asyncio.create_task(_background_loop())
     yield
     task.cancel()
@@ -689,14 +882,158 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    # Close AI4Trade session on shutdown
+    if _ai4trade_client is not None and _ai4trade_client._session is not None:
+        try:
+            await _ai4trade_client._session.close()
+        except Exception:
+            pass
+
 
 app = FastAPI(title="Trading Bot API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],    allow_headers=["*"],
 )
+
+
+# === REST endpoints ===
+
+@app.get("/api/recommendations")
+def get_recommendations():
+    data = _load(RECS_FILE)
+    if isinstance(data, list):
+        return data
+    return []
+
+
+@app.get("/api/history")
+def get_history():
+    data = _load(HISTORY_FILE)
+    if isinstance(data, list):
+        return data
+    return []
+
+
+@app.get("/api/pnl")
+def get_pnl():
+    data = _load(PNL_FILE)
+    if isinstance(data, list):
+        return data
+    history = _load(HISTORY_FILE)
+    if not isinstance(history, list):
+        return []
+    from collections import defaultdict
+    daily: dict = defaultdict(lambda: {"pnl": 0.0, "count": 0})
+    for t in history:
+        d = str(t.get("closed_at", t.get("executed_at", ""))[:10])
+        if not d:
+            continue
+        pnl = float(t.get("pnl") or t.get("realized_pnl") or 0)
+        daily[d]["pnl"]   += pnl
+        daily[d]["count"] += 1
+    rows = sorted(daily.items())
+    cum  = 0.0
+    out  = []
+    for date_str, v in rows:
+        cum += v["pnl"]
+        out.append({
+            "date":            date_str,
+            "daily_pnl":       round(v["pnl"], 2),
+            "cumulative_pnl":  round(cum, 2),
+            "trade_count":     v["count"],
+        })
+    return out
+
+
+@app.get("/api/stats")
+def get_stats():
+    history = _load(HISTORY_FILE)
+    if not isinstance(history, list):
+        history = []
+
+    total_trades = len(history)
+    wins = [t for t in history if float(t.get("pnl") or t.get("realized_pnl") or 0) > 0]
+    win_rate = (len(wins) / total_trades * 100) if total_trades else 0.0
+    total_pnl = sum(float(t.get("pnl") or t.get("realized_pnl") or 0) for t in history)
+
+    # Sharpe, max drawdown, avg R/R
+    pnls = [float(t.get("pnl") or t.get("realized_pnl") or 0) for t in history]
+    import numpy as _np
+    sharpe = 0.0
+    if len(pnls) >= 2:
+        arr = _np.array(pnls)
+        std = float(_np.std(arr))
+        if std > 0:
+            sharpe = round(float(_np.mean(arr)) / std * (_np.sqrt(252)), 2)
+
+    max_dd = 0.0
+    if pnls:
+        cum = _np.cumsum(_np.array(pnls))
+        peak = _np.maximum.accumulate(cum)
+        dd = cum - peak
+        max_dd = round(float(dd.min()), 2)
+
+    rr_vals = [float(t.get("risk_reward") or 0) for t in history if t.get("risk_reward")]
+    avg_rr  = round(sum(rr_vals) / len(rr_vals), 2) if rr_vals else 0.0
+
+    weights = _load_weights()
+    return {
+        "total_pnl":      round(total_pnl, 2),
+        "today_pnl":      0.0,
+        "win_rate":       round(win_rate, 1),
+        "total_trades":   total_trades,
+        "open_positions": 0,
+        "sharpe_ratio":   sharpe,
+        "max_drawdown":   max_dd,
+        "avg_rr":         avg_rr,
+        "strategy_version": weights.get("update_count", 0),
+        "win_rate_30d":   weights.get("win_rate_30d"),
+        "bias":           weights.get("bias", "neutral"),
+        "agents_active":  _AGENTS_AVAILABLE,
+    }
+
+
+@app.get("/api/regime")
+def get_regime():
+    data = _load(REGIME_FILE)
+    if isinstance(data, dict) and data.get("regime"):
+        return data
+    return {
+        "regime":      "neutral",
+        "vix_level":   15.0,
+        "spy_day_chg": 0.0,
+        "qqq_day_chg": 0.0,
+        "rationale":   "no data yet",
+        "timestamp":   datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/api/sectors")
+def get_sectors():
+    recs = _load(RECS_FILE)
+    if not isinstance(recs, list):
+        return []
+    from collections import defaultdict
+    bucket_score: dict = defaultdict(list)
+    bucket_chg:   dict = defaultdict(list)
+    for r in recs:
+        sec = r.get("sector", "Other")
+        bucket_score[sec].append(float(r.get("composite_score", 50)))
+        bucket_chg[sec].append(float(r.get("chg_pct", 0)))
+    return sorted(
+        [
+            {
+                "sector": s,
+                "score":  round(sum(bucket_score[s]) / len(bucket_score[s]), 1),
+                "change": round(sum(bucket_chg[s])   / len(bucket_chg[s]),   2),
+                "count":  len(bucket_score[s]),
+            }
+            for s in bucket_score
+        ],
+        key=lambda x: x["score"], reverse=True,
+    )
 
 
 class ExecuteBody(BaseModel):
@@ -706,215 +1043,59 @@ class ExecuteBody(BaseModel):
     entry:             float
     stop_loss:         float
     take_profit:       float
-    order_id:          Optional[str]   = None
+    recommendation_id: Optional[str] = None
+    order_id:          Optional[str] = None
+    composite_score:   Optional[float] = None
     score:             Optional[float] = None
-    recommendation_id: Optional[str]   = None
-
-
-# === Routes ===
-
-@app.get("/api/recommendations")
-def get_recommendations():
-    recs = _load(RECS_FILE, [])
-    now  = datetime.utcnow()
-    return [r for r in recs
-            if not r.get("expires_at") or datetime.fromisoformat(r["expires_at"]) > now]
-
-
-@app.get("/api/history")
-def get_history():
-    trades = _load(TRADES_FILE, [])
-    closed = [t for t in trades if t.get("status") in ("closed", "cancelled")]
-    return sorted(closed, key=lambda t: t.get("closed_at", ""), reverse=True)
-
-
-@app.get("/api/pnl")
-def get_pnl():
-    trades  = _load(TRADES_FILE, [])
-    closed  = [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None]
-    by_date: Dict[str, Dict] = {}
-    for t in closed:
-        day = (t.get("closed_at") or t.get("executed_at") or "")[:10]
-        if day:
-            entry = by_date.setdefault(day, {"daily_pnl": 0.0, "trade_count": 0})
-            entry["daily_pnl"]   = round(entry["daily_pnl"] + float(t["pnl"]), 2)
-            entry["trade_count"] += 1
-
-    result  = []
-    cum_pnl = 0.0
-    for day in sorted(by_date):
-        cum_pnl = round(cum_pnl + by_date[day]["daily_pnl"], 2)
-        result.append({
-            "date":           day,
-            "daily_pnl":      by_date[day]["daily_pnl"],
-            "cumulative_pnl": cum_pnl,
-            "trade_count":    by_date[day]["trade_count"],
-        })
-    return result
-
-
-@app.get("/api/stats")
-def get_stats():
-    trades  = _load(TRADES_FILE, [])
-    weights = _load_weights()
-    closed  = [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None]
-    wins    = [t for t in closed if float(t["pnl"]) > 0]
-    losses  = [t for t in closed if float(t["pnl"]) <= 0]
-
-    total_pnl = sum(float(t["pnl"]) for t in closed)
-    win_rate  = len(wins) / len(closed) * 100 if closed else 0.0
-    avg_win   = sum(float(t["pnl"]) for t in wins)   / len(wins)   if wins   else 0.0
-    avg_loss  = sum(float(t["pnl"]) for t in losses) / len(losses) if losses else 0.0
-    pf        = abs(avg_win * len(wins) / (avg_loss * len(losses))) if losses and avg_loss else 0.0
-    avg_rr    = round(avg_win / abs(avg_loss), 2) if avg_loss != 0 else 0.0
-
-    # Max drawdown from cumulative PnL series
-    max_dd = 0.0
-    if closed:
-        pnls    = [float(t["pnl"]) for t in closed]
-        cum     = 0.0
-        peak    = 0.0
-        for p in pnls:
-            cum += p
-            if cum > peak:
-                peak = cum
-            dd = (cum - peak) / (peak if peak != 0 else 1) * 100
-            if dd < max_dd:
-                max_dd = dd
-
-    # Sharpe approximation: mean(pnl) / std(pnl) * sqrt(252 / avg_hold)
-    sharpe = 0.0
-    if len(closed) >= 5:
-        import statistics
-        pnls  = [float(t["pnl"]) for t in closed]
-        mu    = statistics.mean(pnls)
-        sigma = statistics.stdev(pnls) or 1
-        sharpe = round((mu / sigma) * (252 ** 0.5), 2)
-
-    return {
-        "total_pnl":       round(total_pnl, 2),
-        "today_pnl":       0.0,   # overridden by Alpaca account in dashboard
-        "win_rate":         round(win_rate, 1),
-        "total_trades":     len(closed),
-        "open_positions":   len([t for t in trades if t.get("status") == "open"]),
-        "avg_win":          round(avg_win, 2),
-        "avg_loss":         round(avg_loss, 2),
-        "profit_factor":    round(pf, 2),
-        "avg_rr":           avg_rr,
-        "sharpe_ratio":     sharpe,
-        "max_drawdown":     round(max_dd, 2),
-        "strategy_version": weights.get("update_count", 0),
-        "win_rate_30d":     weights.get("win_rate_30d"),
-        "bias":             weights.get("bias", "neutral"),
-        "agents_active":    _AGENTS_AVAILABLE,
-    }
-
-
-@app.get("/api/regime")
-def get_regime():
-    default = {
-        "regime":      "neutral",
-        "vix_level":   15.0,
-        "spy_day_chg": 0.0,
-        "qqq_day_chg": 0.0,
-        "rationale":   "Waiting for first market scan...",
-        "timestamp":   datetime.utcnow().isoformat(),
-    }
-    data = _load(REGIME_FILE, default)
-    # Ensure all required keys exist (backwards compat)
-    for k, v in default.items():
-        data.setdefault(k, v)
-    return data
-
-
-@app.get("/api/sectors")
-def get_sectors():
-    recs = _load(RECS_FILE, [])
-    now  = datetime.utcnow()
-    active = [r for r in recs if not r.get("expires_at") or datetime.fromisoformat(r["expires_at"]) > now]
-    bucket_score: Dict[str, List[float]] = {}
-    bucket_chg:   Dict[str, List[float]] = {}
-    for r in active:
-        sec = r.get("sector", "Other")
-        bucket_score.setdefault(sec, []).append(float(r.get("composite_score", 50)))
-        bucket_chg.setdefault(sec, []).append(float(r.get("chg_pct", 0)))
-    return sorted(
-        [
-            {
-                "sector": s,
-                "score":  round(sum(bucket_score[s]) / len(bucket_score[s]), 1),
-                "change": round(sum(bucket_chg.get(s, [0])) / max(len(bucket_chg.get(s, [1])), 1), 2),
-                "count":  len(bucket_score[s]),
-            }
-            for s in bucket_score
-        ],
-        key=lambda x: x["score"], reverse=True,
-    )
 
 
 @app.post("/api/execute")
 def execute_trade(body: ExecuteBody):
-    trades = _load(TRADES_FILE, [])
-    record = {
+    trade = {
         "id":              body.recommendation_id or str(uuid.uuid4()),
+        "order_id":        body.order_id or "",
         "ticker":          body.ticker,
         "direction":       body.direction,
-        "entry":           body.entry,
         "qty":             body.qty,
+        "entry":           body.entry,
         "stop_loss":       body.stop_loss,
         "take_profit":     body.take_profit,
-        "order_id":        body.order_id,
-        "composite_score": body.score,
-        "status":          "open",
+        "composite_score": body.composite_score or body.score,
+        "risk_reward":     round(abs(body.take_profit - body.entry) / max(abs(body.entry - body.stop_loss), 0.01), 2),
         "executed_at":     datetime.utcnow().isoformat(),
+        "status":          "open",
         "pnl":             None,
-        "pnl_pct":         None,
-        "exit":            None,
-        "exit_reason":     None,
-        "closed_at":       None,
     }
-    trades.append(record)
-    _save(TRADES_FILE, trades)
-    logger.info("Recorded trade: %s %s qty=%d entry=%.2f",
-                body.direction, body.ticker, body.qty, body.entry)
-    return {"ok": True, "trade_id": record["id"]}
+    history = _load(HISTORY_FILE)
+    if not isinstance(history, list):
+        history = []
+    history.append(trade)
+    _save(HISTORY_FILE, history)
 
+    # Store TP/SL context for auto-close detection
+    ctx_data = _load(CONTEXT_FILE)
+    if not isinstance(ctx_data, dict):
+        ctx_data = {}
+    ctx_data[body.order_id or trade["id"]] = {
+        "ticker":      body.ticker,
+        "direction":   body.direction,
+        "entry":       body.entry,
+        "stop_loss":   body.stop_loss,
+        "take_profit": body.take_profit,
+        "qty":         body.qty,
+        "executed_at": trade["executed_at"],
+    }
+    _save(CONTEXT_FILE, ctx_data)
 
-@app.get("/api/open")
-def get_open_positions():
-    """Return open trades with their TP/SL context.
-    Used by the dashboard PositionsTable to show target/stop overlays
-    without relying on browser localStorage.
-    """
-    trades = _load(TRADES_FILE, [])
-    open_trades = [t for t in trades if t.get("status") == "open"]
-    return [
-        {
-            "ticker":          t["ticker"],
-            "direction":       t.get("direction", "LONG"),
-            "entry":           t.get("entry"),
-            "stop_loss":       t.get("stop_loss"),
-            "take_profit":     t.get("take_profit"),
-            "qty":             t.get("qty", 1),
-            "composite_score": t.get("composite_score"),
-            "order_id":        t.get("order_id"),
-            "executed_at":     t.get("executed_at"),
-        }
-        for t in open_trades
-    ]
+    return {"status": "recorded", "trade_id": trade["id"]}
 
 
 @app.post("/api/scan")
 async def trigger_scan():
     asyncio.create_task(_run_market_scan())
-    return {"ok": True, "message": "Scan started"}
+    return {"status": "scan_triggered", "timestamp": datetime.utcnow().isoformat()}
 
 
-@app.get("/health")
+@app.get("/api/health")
 def health():
     return {"status": "ok", "agents": _AGENTS_AVAILABLE, "timestamp": datetime.utcnow().isoformat()}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("api_server:app", host="0.0.0.0", port=8000, reload=False)

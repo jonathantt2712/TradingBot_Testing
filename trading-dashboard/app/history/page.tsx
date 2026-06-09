@@ -1,3 +1,4 @@
+export const dynamic = 'force-dynamic'
 import { HistoryTable } from '@/components/history/HistoryTable'
 import { getOrders }    from '@/lib/alpaca'
 import { botGet }       from '@/lib/bot-api'
