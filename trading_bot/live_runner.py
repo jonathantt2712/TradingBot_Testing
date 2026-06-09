@@ -170,13 +170,28 @@ async def main(tickers: Sequence[str]) -> None:
     if not execute:
         logger.warning("EXECUTE_LIVE!=true -> DRY RUN (analysis only, no orders sent)")
 
-    broker: BaseBroker = AlpacaBroker(
-        settings.alpaca_key_id, settings.alpaca_secret, paper=True
-    )
+    if settings.broker == "ibkr":
+        logger.info(
+            "Broker: IBKR (host=%s port=%d clientId=%d)",
+            settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id,
+        )
+        broker: BaseBroker = IBKRBroker(
+            host=settings.ibkr_host,
+            port=settings.ibkr_port,
+            client_id=settings.ibkr_client_id,
+        )
+    else:
+        logger.info("Broker: Alpaca (paper=%s)", settings.alpaca_paper)
+        broker: BaseBroker = AlpacaBroker(
+            settings.alpaca_key_id, settings.alpaca_secret,
+            paper=settings.alpaca_paper,
+        )
 
     universe: UniverseScanner | None = None
     tickers_list: list[str] = list(tickers)
 
+    # UniverseScanner always uses Alpaca data feed for market scanning
+    # regardless of execution broker (IBKR or Alpaca)
     if not tickers_list and settings.scanner.enabled:
         universe = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
         logger.info("No tickers provided -- running UniverseScanner...")

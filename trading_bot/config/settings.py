@@ -80,6 +80,7 @@ class Settings:
     alpaca_secret: str  = field(default_factory=lambda: _env("ALPACA_API_SECRET"))
     alpaca_paper:  bool = field(default_factory=lambda: _env_bool("ALPACA_PAPER", True))
 
+    broker:         str = field(default_factory=lambda: _env("BROKER", "alpaca").lower())
     ibkr_host:      str = field(default_factory=lambda: _env("IBKR_HOST", "127.0.0.1"))
     ibkr_port:      int = field(default_factory=lambda: int(_env("IBKR_PORT", "7497")))
     ibkr_client_id: int = field(default_factory=lambda: int(_env("IBKR_CLIENT_ID", "1")))
