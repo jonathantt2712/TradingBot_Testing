@@ -70,6 +70,9 @@ class PortfolioManager:
         self._kill_switch_date: Optional[date] = None
         self._halted: bool = False
 
+        # Strong refs to fire-and-forget tasks (else the event loop may GC them)
+        self._bg_tasks: set = set()
+
     def set_regime(self, regime: RegimeSnapshot) -> None:
         """Inject the current market regime (called once per scan cycle)."""
         self._regime = regime
@@ -224,7 +227,9 @@ class PortfolioManager:
             logger.info("ORDER %s %s -> %s (%s)",
                         decision.decision.value, decision.ticker,
                         receipt.order_id, receipt.status)
-            asyncio.create_task(self._track_fill(decision, receipt))
+            task = asyncio.create_task(self._track_fill(decision, receipt))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
         return receipt
 
     async def run_once(self, ctx: AnalysisContext, *, execute: bool = True) -> TradeDecision:

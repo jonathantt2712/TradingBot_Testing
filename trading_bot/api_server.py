@@ -105,7 +105,7 @@ try:
     import numpy as np
     from agents.technical_agent import TechnicalAgent
     from agents.risk_agent import RiskAgent
-    from config.settings import RiskConfig
+    from config.settings import RiskConfig, load_settings
     from core.models import AnalysisContext
     from core.enums import Decision
 
@@ -114,6 +114,8 @@ try:
     _risk_agent = RiskAgent(_risk_cfg, weight=0.0)
     _Decision   = Decision
     _AGENTS_AVAILABLE = True
+    # Single source of truth: same weights (incl. env overrides) as the bot
+    _AGENT_WEIGHTS.update(load_settings().weights.as_map())
     logger.info("Agent pipeline loaded -- TechnicalAgent + RiskAgent active")
 
     # ── FundamentalAgent (news sentiment via Alpaca news + optional Claude LLM) ──
@@ -246,7 +248,8 @@ async def _run_all_agents(ctx: "AnalysisContext") -> tuple:
 
     results = await asyncio.gather(*[_safe_eval(n, a) for n, a in agents_to_run])
 
-    # Weighted composite — only count agents with confidence > 0.15
+    # Weighted composite — same formula as PortfolioManager._composite
+    # (weight × confidence) so dashboard scores match what the bot trades.
     evaluations = []
     total_w = 0.0
     weighted_sum = 0.0
@@ -254,10 +257,9 @@ async def _run_all_agents(ctx: "AnalysisContext") -> tuple:
         if ev is None:
             continue
         evaluations.append(ev)
-        if ev.confidence > 0.15:
-            w = _AGENT_WEIGHTS.get(name, 0.10)
-            weighted_sum += ev.score * w
-            total_w += w
+        w = _AGENT_WEIGHTS.get(name, 0.10) * max(ev.confidence, 0.05)
+        weighted_sum += ev.score * w
+        total_w += w
 
     composite = weighted_sum / total_w if total_w > 0 else 50.0
 
@@ -327,22 +329,26 @@ def _kelly_qty(
     take_profit: float,
     composite_score: float,
 ) -> int:
+    # Fail closed: no verified equity or a degenerate plan -> no size.
+    # (qty=0 recs still show direction/levels; they just aren't tradeable.)
     risk_per_share   = abs(entry - stop_loss)
     reward_per_share = abs(take_profit - entry)
-    if risk_per_share < 0.0001:
-        return max(1, int(2000 / max(entry, 1)))
+    if equity <= 0 or risk_per_share < 0.0001:
+        return 0
 
     b = reward_per_share / risk_per_share
     p = min(max(composite_score / 100.0, 0.05), 0.95)
     q = 1.0 - p
-    kelly_f    = (b * p - q) / b if b > 0 else 0.0
-    half_kelly = max(kelly_f / 2, 0.0)
+    kelly_f = (b * p - q) / b if b > 0 else 0.0
+    if kelly_f <= 0:
+        return 0  # negative edge — Kelly says don't bet
+    half_kelly = kelly_f / 2
 
     base_risk   = 0.01 * equity
     scaled_risk = base_risk * (half_kelly / 0.25)
     qty         = int(scaled_risk / risk_per_share)
     max_qty     = int((0.15 * equity) / max(entry, 1))
-    return max(1, min(qty, max_qty))
+    return max(0, min(qty, max_qty))
 
 
 # === Strategy weights ===
@@ -385,6 +391,10 @@ def _save_weights(w: Dict[str, Any]) -> None:
 # === Account equity ===
 
 async def _get_account_equity(session: aiohttp.ClientSession) -> float:
+    """Return verified account equity, or 0.0 when unknown (fail closed).
+
+    Never substitute fake equity — sizing code treats 0 as "do not size".
+    """
     try:
         async with session.get(
             f"{_BROKER_BASE}/v2/account",
@@ -393,10 +403,10 @@ async def _get_account_equity(session: aiohttp.ClientSession) -> float:
         ) as r:
             if r.status == 200:
                 data = await r.json()
-                return float(data.get("equity") or data.get("cash") or 10_000)
+                return float(data.get("equity") or data.get("cash") or 0.0)
     except Exception as exc:
-        logger.warning("Could not fetch account equity: %s", exc)
-    return 10_000.0
+        logger.error("Could not fetch account equity — recs will be unsized: %s", exc)
+    return 0.0
 
 
 # === Bar data helpers ===
@@ -750,8 +760,18 @@ async def _run_market_scan() -> None:
         return
 
     if not _is_market_open():
+        # Off-hours: throttle to one scan per hour. Each scan runs LLM agents
+        # on ~20 symbols; every 5 min all night burns quota for stale signals.
+        last = _scan_stats.get("last_scan_at")
+        if last:
+            try:
+                age_min = (datetime.utcnow() - datetime.fromisoformat(last)).total_seconds() / 60
+                if age_min < 60:
+                    return
+            except Exception:
+                pass
         _scan_stats["market_closed_skips"] += 1
-        logger.info("Market closed — scanning anyway (off-hours scan #%d today)", _scan_stats["market_closed_skips"])
+        logger.info("Market closed — hourly off-hours scan (#%d today)", _scan_stats["market_closed_skips"])
 
     open_trades = [t for t in _load(TRADES_FILE, []) if t.get("status") == "open"]
     if len(open_trades) >= MAX_OPEN_POSITIONS:
@@ -920,7 +940,7 @@ async def _run_market_scan() -> None:
                     entry       = round(plan.entry, 2)
                     stop_loss   = round(plan.stop_loss, 2)
                     take_profit = round(plan.take_profit, 2)
-                    qty         = max(1, int(plan.qty))
+                    qty         = int(plan.qty)   # 0 when unsizable — never fabricate
                     rr          = round(plan.risk_reward, 2)
                 else:
                     entry = round(price, 2)
