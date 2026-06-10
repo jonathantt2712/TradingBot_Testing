@@ -37,10 +37,11 @@ if exist ".env" (
 )
 
 REM [1] API server (dashboard backend) — output shown live AND teed to logs\
-start "API Server" /D "%~dp0trading_bot" cmd /k python -u api_server.py 2^>^&1 ^| powershell -NoProfile -Command "$input | Tee-Object -FilePath '%~dp0logs\api_server.log' -Append"
+REM     (tee via python: PowerShell's Tee-Object writes UTF-16 and garbles logs)
+start "API Server" /D "%~dp0trading_bot" cmd /k python -u -X utf8 api_server.py 2^>^&1 ^| python -u -X utf8 -c "import sys; sys.stdin.reconfigure(errors='replace'); f=open(r'%~dp0logs\api_server.log','a',encoding='utf-8',buffering=1); [(sys.stdout.write(l), f.write(l)) for l in sys.stdin]"
 
 REM [2] Trading bot (analysis + orders; dry-run by default)
-start "Trading Bot" /D "%~dp0trading_bot" cmd /k python -u live_runner.py 2^>^&1 ^| powershell -NoProfile -Command "$input | Tee-Object -FilePath '%~dp0logs\bot.log' -Append"
+start "Trading Bot" /D "%~dp0trading_bot" cmd /k python -u -X utf8 live_runner.py 2^>^&1 ^| python -u -X utf8 -c "import sys; sys.stdin.reconfigure(errors='replace'); f=open(r'%~dp0logs\bot.log','a',encoding='utf-8',buffering=1); [(sys.stdout.write(l), f.write(l)) for l in sys.stdin]"
 
 REM [3] Dashboard UI (install deps automatically on first run)
 if not exist "%~dp0trading-dashboard\node_modules" (
@@ -49,7 +50,7 @@ if not exist "%~dp0trading-dashboard\node_modules" (
     call npm install
     popd
 )
-start "Dashboard" /D "%~dp0trading-dashboard" cmd /k npm run dev 2^>^&1 ^| powershell -NoProfile -Command "$input | Tee-Object -FilePath '%~dp0logs\dashboard.log' -Append"
+start "Dashboard" /D "%~dp0trading-dashboard" cmd /k npm run dev 2^>^&1 ^| python -u -X utf8 -c "import sys; sys.stdin.reconfigure(errors='replace'); f=open(r'%~dp0logs\dashboard.log','a',encoding='utf-8',buffering=1); [(sys.stdout.write(l), f.write(l)) for l in sys.stdin]"
 
 REM [4] Tunnel for the Vercel dashboard (optional — needs NGROK_DOMAIN in .env)
 REM     tunnel.bat keeps itself alive across network drops.

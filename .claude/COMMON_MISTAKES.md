@@ -25,7 +25,15 @@ defensively — keep that, and prefer typing values interactively.
 Gives LMT offsets (~4 min off). Use `zoneinfo.ZoneInfo` everywhere; build
 market-hours boundaries from `datetime.now(ET)`, not from a bar's timestamp.
 
-## 6. Duplicated wiring drifts
+## 6. aiodns turns DNS blips into total bot blindness
+With aiodns installed, aiohttp >= 3.11 auto-uses AsyncResolver (c-ares), which
+bypasses the Windows resolver cache and intermittently fails with "Could not
+contact DNS servers" while browsers keep working. `core/__init__.py` pins
+aiohttp to ThreadedResolver (OS resolver) process-wide — don't remove that,
+and don't trust "internet is down" reports from the bot without checking
+whether only c-ares is failing. (aiodns itself stays installed — ccxt needs it.)
+
+## 7. Duplicated wiring drifts
 main.py and live_runner.py once had separate broker/agent construction — live
 mode silently lost regime gating and SPY relative strength. All composition
 lives in `trading_bot/bootstrap.py`; never duplicate it.
