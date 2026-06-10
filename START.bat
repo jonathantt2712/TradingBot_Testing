@@ -10,6 +10,9 @@ REM    [4] Tunnel       — ngrok (only if NGROK_DOMAIN is set in .env);
 REM                       lets your Vercel dashboard reach this PC.
 REM  Browser opens http://localhost:3000 once the dashboard is up.
 REM
+REM  Every window also writes to logs\  (api_server.log, bot.log,
+REM  dashboard.log, tunnel.log) so crashes can be debugged after the fact.
+REM
 REM  To stop everything: close the windows.
 REM ─────────────────────────────────────────────────────────────────────
 setlocal
@@ -19,17 +22,25 @@ echo.
 echo  Starting the trading stack...
 echo.
 
+REM Debug logs — one file per component, appended across runs
+if not exist "logs" mkdir logs
+echo [%date% %time%] START.bat launched >> "logs\start.log"
+for %%F in (api_server bot dashboard) do (
+    echo. >> "logs\%%F.log"
+    echo ======== session start %date% %time% ======== >> "logs\%%F.log"
+)
+
 REM Read NGROK_DOMAIN from .env (used by the Vercel-facing tunnel)
 set "NGROK_DOMAIN="
 if exist ".env" (
     for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b "NGROK_DOMAIN=" .env`) do set "NGROK_DOMAIN=%%B"
 )
 
-REM [1] API server (dashboard backend)
-start "API Server" cmd /k "cd /d "%~dp0trading_bot" && python api_server.py"
+REM [1] API server (dashboard backend) — output shown live AND teed to logs\
+start "API Server" /D "%~dp0trading_bot" cmd /k python -u api_server.py 2^>^&1 ^| powershell -NoProfile -Command "$input | Tee-Object -FilePath '%~dp0logs\api_server.log' -Append"
 
 REM [2] Trading bot (analysis + orders; dry-run by default)
-start "Trading Bot" cmd /k "cd /d "%~dp0trading_bot" && python live_runner.py"
+start "Trading Bot" /D "%~dp0trading_bot" cmd /k python -u live_runner.py 2^>^&1 ^| powershell -NoProfile -Command "$input | Tee-Object -FilePath '%~dp0logs\bot.log' -Append"
 
 REM [3] Dashboard UI (install deps automatically on first run)
 if not exist "%~dp0trading-dashboard\node_modules" (
@@ -38,7 +49,7 @@ if not exist "%~dp0trading-dashboard\node_modules" (
     call npm install
     popd
 )
-start "Dashboard" cmd /k "cd /d "%~dp0trading-dashboard" && npm run dev"
+start "Dashboard" /D "%~dp0trading-dashboard" cmd /k npm run dev 2^>^&1 ^| powershell -NoProfile -Command "$input | Tee-Object -FilePath '%~dp0logs\dashboard.log' -Append"
 
 REM [4] Tunnel for the Vercel dashboard (optional — needs NGROK_DOMAIN in .env)
 REM     tunnel.bat keeps itself alive across network drops.

@@ -27,11 +27,14 @@ echo Tunnel: https://%NGROK_DOMAIN%  -^>  this PC :8000
 echo (Keep this window open. Ctrl+C twice to stop.)
 echo.
 
+if not exist "logs" mkdir logs
+echo [%date% %time%] tunnel.bat launched >> "logs\tunnel.log"
+
 :loop
 if exist "%NGROK_CFG%" (
-    "%NGROK_EXE%" http --config "%NGROK_CFG%" --url=%NGROK_DOMAIN% 8000
+    "%NGROK_EXE%" http --config "%NGROK_CFG%" --url=%NGROK_DOMAIN% 8000 --log "%~dp0logs\tunnel.log" --log-level info
 ) else (
-    "%NGROK_EXE%" http --url=%NGROK_DOMAIN% 8000
+    "%NGROK_EXE%" http --url=%NGROK_DOMAIN% 8000 --log "%~dp0logs\tunnel.log" --log-level info
 )
 echo.
 echo Tunnel stopped (no internet?) — retrying in 15 seconds...  Ctrl+C to quit.
