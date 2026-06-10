@@ -1,12 +1,13 @@
 'use client'
 import { useEffect, useState } from 'react'
-import { ArrowUpRight, ArrowDownLeft, Flame, Zap, TrendingUp, TrendingDown, Clock, RefreshCw } from 'lucide-react'
+import { ArrowUpRight, ArrowDownLeft, Flame, Zap, TrendingUp, TrendingDown, Clock, RefreshCw, Info } from 'lucide-react'
 import { cn, formatPrice, bgColorForScore } from '@/lib/utils'
 import type { TradeRecommendation } from '@/types/trading'
 
 interface Props {
   trade:         TradeRecommendation
   onExecute:     (trade: TradeRecommendation) => void
+  onInfo:        (trade: TradeRecommendation) => void
   currentPrice?: number
 }
 
@@ -50,7 +51,7 @@ function CountdownBadge({ secondsLeft }: { secondsLeft: number | null }) {
   )
 }
 
-export function TradeCard({ trade, onExecute, currentPrice }: Props) {
+export function TradeCard({ trade, onExecute, onInfo, currentPrice }: Props) {
   const isLong   = trade.direction === 'LONG'
   const dirColor = isLong ? 'text-bull' : 'text-bear'
   const dirBg    = isLong ? 'bg-bull/10 border-bull/25' : 'bg-bear/10 border-bear/25'
@@ -72,28 +73,35 @@ export function TradeCard({ trade, onExecute, currentPrice }: Props) {
       isExpiring && 'ring-1 ring-caution/30',
       isExpired  && 'opacity-70',
     )}>
-      <div className="flex items-start justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <div className={cn('flex h-10 w-10 items-center justify-center rounded-xl border', dirBg)}>
+      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2 mb-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border', dirBg)}>
             {isLong
               ? <ArrowUpRight className={cn('h-5 w-5', dirColor)} />
               : <ArrowDownLeft className={cn('h-5 w-5', dirColor)} />
             }
           </div>
-          <div>
-            <div className="flex items-center gap-2">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
               <span className={cn('ticker-mono text-xl', dirColor)}>{trade.ticker}</span>
               {trade.hot_sector && (
                 <span className="flex items-center gap-0.5 rounded-full bg-caution/15 border border-caution/25 px-1.5 py-0.5 text-[10px] font-semibold text-caution">
                   <Flame className="h-2.5 w-2.5" /> HOT
                 </span>
               )}
+              <button
+                onClick={() => onInfo(trade)}
+                title="Why this recommendation?"
+                className="text-muted hover:text-brand-cyan transition-colors"
+              >
+                <Info className="h-3.5 w-3.5" />
+              </button>
             </div>
-            <p className="text-xs text-muted">{trade.sector}</p>
+            <p className="text-xs text-muted truncate">{trade.sector}</p>
           </div>
         </div>
 
-        <div className="flex flex-col items-end gap-1">
+        <div className="flex shrink-0 flex-col items-end gap-1 ml-auto">
           <div className={cn('badge', bgColorForScore(trade.composite_score))}>
             <Zap className="h-3 w-3" />
             {trade.composite_score.toFixed(0)}

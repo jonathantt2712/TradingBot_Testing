@@ -1,5 +1,5 @@
 export type Direction = 'LONG' | 'SHORT'
-export type Regime    = 'risk_on' | 'neutral' | 'risk_off'
+export type Regime    = 'risk_on' | 'neutral' | 'choppy' | 'risk_off'
 export type Decision  = 'LONG' | 'SHORT' | 'PASS'
 
 export interface AgentEvaluation {
@@ -31,6 +31,7 @@ export interface TradeRecommendation {
   timestamp:            string
   expires_at?:          string
   time_window_minutes?: number
+  rationale?:           string
 }
 
 export interface TradeRecord {
