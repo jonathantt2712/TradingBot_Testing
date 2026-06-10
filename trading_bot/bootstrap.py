@@ -65,23 +65,33 @@ def build_broker(settings: Settings, *, force_live: bool = False) -> BaseBroker:
     )
 
 
-def build_news(settings: Settings, ai4: AI4TradeClient) -> NewsSource:
+def build_news(settings: Settings, ai4: AI4TradeClient | None = None) -> NewsSource:
     alpaca_news: NewsSource = (
         AlpacaNewsSource(settings.alpaca_key_id, settings.alpaca_secret)
         if settings.alpaca_key_id
         else PoliStockSource(settings.news_base_url, settings.news_api_key)
     )
+    if ai4 is None:
+        return alpaca_news
     return CombinedNewsSource(alpaca_news, MarketIntelNewsSource(ai4))
 
 
 def build_manager(
     settings: Settings,
-    broker: BaseBroker,
-    ai4: AI4TradeClient,
+    broker: BaseBroker | None,
+    ai4: AI4TradeClient | None = None,
     *,
     publisher: SignalPublisher | None = None,
+    include_live_only_agents: bool = True,
 ) -> PortfolioManager:
+    """Single composition point for every runner, including backtests.
+
+    ``include_live_only_agents=False`` (backtests) drops the social and liquid
+    agents: their data sources report CURRENT platform state, which would leak
+    look-ahead noise into historical evaluations.
+    """
     news = build_news(settings, ai4)
+    live_extras = include_live_only_agents
     return PortfolioManager(
         settings=settings,
         broker=broker,
@@ -93,8 +103,10 @@ def build_manager(
                            model=settings.llm_model),
         technical=TechnicalAgent(weight=settings.weights.technical),
         risk=RiskAgent(settings.risk),
-        liquid=LiquidAgent(weight=settings.weights.liquid) if settings.weights.liquid > 0 else None,
-        social=SocialSentimentAgent(ai4, weight=settings.weights.social) if settings.weights.social > 0 else None,
+        liquid=LiquidAgent(weight=settings.weights.liquid)
+            if live_extras and settings.weights.liquid > 0 else None,
+        social=SocialSentimentAgent(ai4, weight=settings.weights.social)
+            if live_extras and ai4 is not None and settings.weights.social > 0 else None,
         publisher=publisher,
     )
 

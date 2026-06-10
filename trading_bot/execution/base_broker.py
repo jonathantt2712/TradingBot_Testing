@@ -66,6 +66,14 @@ class BaseBroker(ABC):
         """
         return False
 
+    async def get_order(self, order_id: str) -> Optional[dict]:
+        """Return order state ('status', 'filled_avg_price', 'filled_qty').
+
+        Used for post-trade fill/slippage tracking. Brokers that cannot
+        report order state return None.
+        """
+        return None
+
     # ── Order management ──────────────────────────────────────────────────────
 
     @abstractmethod

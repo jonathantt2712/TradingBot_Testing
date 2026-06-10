@@ -169,6 +169,18 @@ class AlpacaBroker(BaseBroker):
             logger.error("get_open_orders failed: %s", exc)
             raise
 
+    async def get_order(self, order_id: str) -> Optional[dict]:
+        try:
+            data = await self._get(f"{self._base}/v2/orders/{order_id}")
+            return {
+                "status":           data.get("status"),
+                "filled_avg_price": data.get("filled_avg_price"),
+                "filled_qty":       data.get("filled_qty"),
+            }
+        except Exception as exc:
+            logger.warning("get_order(%s) failed: %s", order_id, exc)
+            return None
+
     async def close_all_positions(self) -> bool:
         """Cancel all open orders and liquidate all positions (EOD flatten)."""
         try:

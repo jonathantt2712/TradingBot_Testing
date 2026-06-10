@@ -11,8 +11,10 @@ Pipeline per ticker:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
@@ -31,6 +33,9 @@ from execution.base_broker import BaseBroker, OrderReceipt
 logger = logging.getLogger(__name__)
 
 _ET = ZoneInfo("America/New_York")
+
+# Audit trail: one JSON line per decision/fill, next to the other debug logs.
+_AUDIT_FILE = Path(__file__).parents[2] / "logs" / "decisions.jsonl"
 
 
 class PortfolioManager:
@@ -219,16 +224,109 @@ class PortfolioManager:
             logger.info("ORDER %s %s -> %s (%s)",
                         decision.decision.value, decision.ticker,
                         receipt.order_id, receipt.status)
+            asyncio.create_task(self._track_fill(decision, receipt))
         return receipt
 
     async def run_once(self, ctx: AnalysisContext, *, execute: bool = True) -> TradeDecision:
         self._check_daily_loss(ctx.account)
         decision = await self.decide(ctx)
+        receipt = None
         if execute and decision.is_actionable:
-            await self.execute(decision)
+            receipt = await self.execute(decision)
+        self._audit_decision(decision, executed=receipt is not None, receipt=receipt)
         if self.publisher and self.settings.ai4trade_publish:
             await self.publisher.publish(decision)
         return decision
+
+    # ── Audit trail (trade forensics) ─────────────────────────────────────
+
+    def _audit_decision(
+        self,
+        decision: TradeDecision,
+        *,
+        executed: bool,
+        receipt: Optional[OrderReceipt],
+    ) -> None:
+        """Append the full decision (scores, rationales, plan) to decisions.jsonl.
+
+        Answers "why did the bot (not) trade X at time T?" after the fact.
+        Must never interfere with trading — failures are swallowed.
+        """
+        r = decision.risk
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "decision",
+            "ticker": decision.ticker,
+            "decision": decision.decision.value,
+            "composite": decision.composite_score,
+            "halted": self._halted,
+            "regime": self._regime.regime.value if self._regime else None,
+            "agents": [
+                {
+                    "role": e.role.value,
+                    "score": e.score,
+                    "confidence": round(e.confidence, 3),
+                    "veto": e.veto,
+                    "rationale": e.rationale,
+                }
+                for e in decision.evaluations
+            ],
+            "plan": {
+                "entry": r.entry, "stop_loss": r.stop_loss, "take_profit": r.take_profit,
+                "qty": r.qty, "risk_reward": r.risk_reward,
+            } if r else None,
+            "executed": executed,
+            "order_id": receipt.order_id if receipt else None,
+            "order_status": receipt.status if receipt else None,
+        }
+        self._append_audit(record)
+
+    @staticmethod
+    def _append_audit(record: dict) -> None:
+        try:
+            _AUDIT_FILE.parent.mkdir(exist_ok=True)
+            with open(_AUDIT_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, default=str) + "\n")
+        except Exception:
+            logger.debug("audit write failed", exc_info=True)
+
+    async def _track_fill(self, decision: TradeDecision, receipt: OrderReceipt) -> None:
+        """Poll the entry order until filled and record realized slippage.
+
+        Slippage = signed difference between the intended entry (decision time)
+        and the actual fill — the bot's own execution-quality metric.
+        """
+        if self.broker is None or decision.risk is None:
+            return
+        try:
+            for _ in range(12):  # up to ~60s
+                await asyncio.sleep(5)
+                order = await self.broker.get_order(receipt.order_id)
+                if order is None:
+                    return
+                if order.get("status") == "filled" and order.get("filled_avg_price"):
+                    fill = float(order["filled_avg_price"])
+                    side = 1.0 if decision.decision is Decision.LONG else -1.0
+                    slip = (fill - decision.risk.entry) * side  # positive = paid worse
+                    self._append_audit({
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "type": "fill",
+                        "ticker": decision.ticker,
+                        "order_id": receipt.order_id,
+                        "intended_entry": decision.risk.entry,
+                        "fill_price": fill,
+                        "filled_qty": order.get("filled_qty"),
+                        "slippage_per_share": round(slip, 4),
+                        "slippage_bps": round(slip / decision.risk.entry * 10_000, 2),
+                    })
+                    logger.info("%s filled @ %.4f (slippage %+.4f/share, %+.1f bps)",
+                                decision.ticker, fill, slip,
+                                slip / decision.risk.entry * 10_000)
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("fill tracking failed for %s", decision.ticker, exc_info=True)
 
     def _composite(
         self,

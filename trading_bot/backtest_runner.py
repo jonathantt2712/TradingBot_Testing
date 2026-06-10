@@ -34,15 +34,11 @@ load_dotenv()
 import numpy as np
 import pandas as pd
 
+from bootstrap import build_manager
 from config.settings import load_settings
 from core.models import AnalysisContext, TradeDecision
 from core.enums import Decision
 from data.chart_renderer import render_chart
-from data.news_sources import AlpacaNewsSource, PoliStockSource
-from agents.fundamental_agent import FundamentalAgent
-from agents.risk_agent import RiskAgent
-from agents.technical_agent import TechnicalAgent
-from agents.vision_agent import VisionAgent
 from execution.portfolio_manager import PortfolioManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s | %(message)s")
@@ -604,21 +600,10 @@ renderCharts();
 
 async def run(tickers: list[str], days: int, recommend_only: bool) -> None:
     settings = load_settings()
-    news = (
-        AlpacaNewsSource(settings.alpaca_key_id, settings.alpaca_secret)
-        if settings.alpaca_key_id
-        else PoliStockSource(settings.news_base_url, settings.news_api_key)
-    )
-    pm = PortfolioManager(
-        settings=settings,
-        broker=None,  # not used directly in backtest loop
-        fundamental=FundamentalAgent(news, weight=settings.weights.fundamental,
-                                     anthropic_api_key=settings.anthropic_api_key, model=settings.llm_model),
-        vision=VisionAgent(weight=settings.weights.vision,
-                           anthropic_api_key=settings.anthropic_api_key, model=settings.llm_model),
-        technical=TechnicalAgent(weight=settings.weights.technical),
-        risk=RiskAgent(settings.risk),
-    )
+    # Same composition as live (bootstrap) so backtest results reflect the
+    # strategy that actually trades. Social/liquid agents are excluded — their
+    # feeds report current platform state (look-ahead on historical bars).
+    pm = build_manager(settings, broker=None, include_live_only_agents=False)
 
     trades: list[TradeRecord] = []
 
