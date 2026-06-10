@@ -87,6 +87,55 @@ class TechnicalAgent(BaseAgent):
         df = bars.copy()
         signals: dict[str, float] = {}
 
+        # ── Stale-data guard ─────────────────────────────────────────────
+        # If the most recent bar is more than 30 minutes old during RTH,
+        # data is stale (broker connectivity issue) — return neutral.
+        try:
+            from datetime import datetime
+            import pytz
+            _ET = pytz.timezone("America/New_York")
+            last_ts = df.index[-1]
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.tz_localize("UTC")
+            last_ts_et = last_ts.astimezone(_ET)
+            now_et = datetime.now(_ET)
+            age_min = (now_et - last_ts_et).total_seconds() / 60
+            mkt_open  = last_ts_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+            mkt_close = last_ts_et.replace(hour=16, minute=0,  second=0, microsecond=0)
+            is_rth = (now_et.weekday() < 5 and
+                      mkt_open <= now_et.replace(tzinfo=_ET) <= mkt_close)
+            if is_rth and age_min > 30:
+                logger.warning(
+                    "TechnicalAgent: stale data for %s — last bar %.0fmin old",
+                    ctx.ticker, age_min,
+                )
+                return AgentEvaluation(
+                    role=self.role,
+                    score=NEUTRAL_SCORE,
+                    confidence=0.05,
+                    rationale=f"stale data: last bar {age_min:.0f}min old",
+                )
+        except Exception:
+            pass  # pytz not available or tz parse error — skip guard
+
+        # ── Research #1 (PEAD): Opening-noise guard ──────────────────────
+        # Skip scoring during the first 30 min of RTH (9:30–10:00 ET).
+        # Post-earnings announcement drift research shows the open is noisy
+        # and generates many false signals that reverse quickly.
+        if hasattr(df.index, "date") and len(df.index) > 0:
+            today = df.index[-1].date()
+            today_df = df[df.index.map(lambda x: x.date()) == today]
+            if len(today_df) < _OPEN_NOISE_BARS:
+                return AgentEvaluation(
+                    role=self.role,
+                    score=NEUTRAL_SCORE,
+                    confidence=0.15,
+                    rationale=(
+                        f"open-noise guard: {len(today_df)}/{_OPEN_NOISE_BARS} bars "
+                        "since open — waiting for 9:30–10:00 ET noise to clear"
+                    ),
+                )
+
         # ── Original indicators ──────────────────────────────────────────
         rsi = self._rsi(df["close"])
         signals["rsi"] = float(np.interp(rsi, [20, 50, 80], [80, 50, 20]))

@@ -104,6 +104,22 @@ class PortfolioManager:
                         ctx.ticker, risk.score, self._thresholds.min_risk_score)
             decision = Decision.PASS
 
+        # ── Regime-aware LONG cooldown ────────────────────────────────────
+        # Research: when macro regime is RISK_OFF (VIX>25 or SPY waterfall),
+        # only allow LONG entries with very high conviction (composite >= 75).
+        # Shorts are still permitted — they are directionally aligned in selloffs.
+        if (
+            decision is Decision.LONG
+            and self._regime is not None
+            and self._regime.regime.value == "risk_off"
+            and composite < 75.0
+        ):
+            logger.info(
+                "%s LONG blocked by RISK_OFF regime (composite=%.1f < 75)",
+                ctx.ticker, composite,
+            )
+            decision = Decision.PASS
+
         if decision is Decision.PASS:
             return TradeDecision(
                 ticker=ctx.ticker, decision=Decision.PASS,
@@ -193,7 +209,7 @@ class PortfolioManager:
         return Decision.PASS
 
     @staticmethod
-    def summarise(evaluations: Sequence[AgentEvaluation]) -> str:
+    def summarise(evaluations: "Sequence[AgentEvaluation]") -> str:
         return " | ".join(
             f"{e.role.value}:{e.score}({e.confidence:.2f})" for e in evaluations
         )
