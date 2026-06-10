@@ -1,9 +1,15 @@
 # Put the dashboard live on Vercel
 
 > **STATUS: ✅ FULLY SET UP AND VERIFIED (2026-06-10).**
-> Live site: **https://trading-dashboard-sandy-seven.vercel.app**
+> Live site: **https://tradingbot2026.vercel.app**
 > Tunnel domain: `shun-gigolo-grew.ngrok-free.dev` (configured in `.env`)
 > Daily use: double-click START.bat, then open the live site from anywhere.
+>
+> **Deploys are automatic**: the Vercel project is connected to the GitHub
+> repo — every `git push` to `main` redeploys the dashboard. No `npx vercel`
+> commands needed. Env vars live in Vercel → Project → Settings → Environment
+> Variables (type values by hand; piping them in corrupts them with \r\n).
+>
 > The steps below are kept for reference / re-setup only.
 
 How it works: the **website runs on Vercel**, the **bot runs on your PC** (START.bat,

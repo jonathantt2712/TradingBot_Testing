@@ -25,3 +25,5 @@ bot_data/
 trading_bot/data/*.json
 *.log
 push_log.txt
+
+.vercel
