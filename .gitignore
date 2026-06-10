@@ -1,0 +1,27 @@
+# ── Secrets — never commit these ────────────────────────────────────────────
+.env
+.env.local
+*.env
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ── Node / Next.js ──────────────────────────────────────────────────────────
+node_modules/
+.next/
+tsconfig.tsbuildinfo
+
+# ── Vercel project link (contains project IDs; each dev links their own) ────
+.vercel/
+
+# ── Per-machine Claude Code settings ─────────────────────────────────────────
+.claude/settings.local.json
+
+# ── Runtime data & logs (regenerated while the bot runs) ────────────────────
+bot_data/
+trading_bot/data/*.json
+*.log
+push_log.txt
