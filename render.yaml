@@ -1,0 +1,27 @@
+# Render blueprint — deploys the dashboard backend (api_server.py) to the cloud.
+# Connected to the GitHub repo: every push to main auto-deploys.
+# Secret values (sync: false) are entered once in the Render dashboard.
+services:
+  - type: web
+    name: tradingbot-api
+    runtime: python
+    plan: free
+    rootDir: trading_bot
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api_server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      - key: ALPACA_API_KEY_ID
+        sync: false
+      - key: ALPACA_API_SECRET
+        sync: false
+      - key: ALPACA_PAPER
+        value: "true"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CORS_ALLOW_ORIGINS
+        value: https://tradingbot2026.vercel.app,http://localhost:3000
