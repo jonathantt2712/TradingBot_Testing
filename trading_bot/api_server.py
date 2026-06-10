@@ -82,127 +82,51 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 _AGENTS_AVAILABLE = False
-_tech_agent        = None
-_risk_agent        = None
-_fundamental_agent = None
-_vision_agent      = None
-_social_agent      = None
-_liquid_agent      = None
+_pm                = None   # PortfolioManager — the SAME composition live/backtest use
 _ai4trade_client   = None
 _Decision          = None
-
-# Agent composite weights (must sum to 1.0 across active agents)
-_AGENT_WEIGHTS = {
-    "technical":   0.35,
-    "fundamental": 0.20,
-    "vision":      0.15,
-    "social":      0.15,
-    "liquid":      0.15,
-}
 
 try:
     import pandas as pd
     import numpy as np
-    from agents.technical_agent import TechnicalAgent
-    from agents.risk_agent import RiskAgent
-    from config.settings import RiskConfig, load_settings
+    from bootstrap import build_manager
+    from config.settings import load_settings
     from core.models import AnalysisContext
     from core.enums import Decision
+    from data.ai4trade_client import AI4TradeClient as _AI4TC
 
-    _tech_agent = TechnicalAgent(weight=1.0, min_bars=30)
-    _risk_cfg   = RiskConfig()
-    _risk_agent = RiskAgent(_risk_cfg, weight=0.0)
-    _Decision   = Decision
+    _ai4trade_client = _AI4TC(
+        email=os.getenv("AI4TRADE_EMAIL", ""),
+        password=os.getenv("AI4TRADE_PASSWORD", ""),
+    )
+    _pm = build_manager(load_settings(), broker=None, ai4=_ai4trade_client)
+    # Dashboard scans fetch ~100-bar windows (vs 200 live) — keep the lower
+    # bar requirement this endpoint has always used.
+    _pm.technical.min_bars = 30
+    _Decision = Decision
     _AGENTS_AVAILABLE = True
-    # Single source of truth: same weights (incl. env overrides) as the bot
-    _AGENT_WEIGHTS.update(load_settings().weights.as_map())
-    logger.info("Agent pipeline loaded -- TechnicalAgent + RiskAgent active")
-
-    # ── FundamentalAgent (news sentiment via Alpaca news + optional Claude LLM) ──
-    try:
-        from agents.fundamental_agent import FundamentalAgent
-        from data.news_sources import AlpacaNewsSource
-
-        class _NewsAdapter:
-            """Wraps AlpacaNewsSource.fetch_headlines() → .get_news() interface."""
-            def __init__(self, src):
-                self._src = src
-            async def get_news(self, ticker: str, limit: int = 8):
-                try:
-                    headlines = await self._src.fetch_headlines(ticker, limit=limit)
-                    return [{"headline": h.title, "summary": h.summary} for h in headlines]
-                except Exception:
-                    return []
-
-        _alpaca_key_tmp    = os.getenv("ALPACA_API_KEY_ID", "")
-        _alpaca_secret_tmp = os.getenv("ALPACA_API_SECRET", "")
-        _anthropic_key     = os.getenv("ANTHROPIC_API_KEY", "")
-        _gemini_key        = os.getenv("GEMINI_API_KEY", "")
-        _llm_provider      = "gemini" if _gemini_key else ("anthropic" if _anthropic_key else "keyword")
-        _news_adapter      = _NewsAdapter(AlpacaNewsSource(_alpaca_key_tmp, _alpaca_secret_tmp))
-        _fundamental_agent = FundamentalAgent(
-            _news_adapter,
-            weight=0.20,
-            anthropic_api_key=_anthropic_key,
-            gemini_api_key=_gemini_key,
-            max_articles=6,
-        )
-        logger.info("FundamentalAgent loaded (provider=%s)", _llm_provider)
-    except Exception as _e:
-        logger.warning("FundamentalAgent unavailable: %s", _e)
-
-    # ── VisionAgent (chart image → vision LLM) ─────────────────────────────────
-    try:
-        from agents.vision_agent import VisionAgent
-        _anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        _gemini_key    = os.getenv("GEMINI_API_KEY", "")
-        _vision_agent  = VisionAgent(
-            weight=0.15,
-            anthropic_api_key=_anthropic_key,
-            gemini_api_key=_gemini_key,
-        )
-        _vis_provider = "gemini" if _gemini_key else ("anthropic" if _anthropic_key else "none")
-        logger.info("VisionAgent loaded (provider=%s)", _vis_provider)
-    except Exception as _e:
-        logger.warning("VisionAgent unavailable: %s", _e)
-
-    # ── SocialAgent (AI4Trade community feed — public, no auth required) ───────
-    try:
-        from agents.social_agent import SocialSentimentAgent
-        from data.ai4trade_client import AI4TradeClient as _AI4TC
-        _ai4trade_client = _AI4TC(
-            email=os.getenv("AI4TRADE_EMAIL", ""),
-            password=os.getenv("AI4TRADE_PASSWORD", ""),
-        )
-        _social_agent = SocialSentimentAgent(_ai4trade_client, weight=0.15)
-        logger.info("SocialAgent loaded (AI4Trade client ready)")
-    except Exception as _e:
-        logger.warning("SocialAgent unavailable: %s", _e)
-
-    # ── LiquidAgent (crowd positioning / funding rate) ─────────────────────────
-    try:
-        from agents.liquid_agent import LiquidAgent
-        _liquid_agent = LiquidAgent(weight=0.15)
-        logger.info("LiquidAgent loaded")
-    except Exception as _e:
-        logger.warning("LiquidAgent unavailable: %s", _e)
+    logger.info("Agent pipeline loaded via bootstrap.build_manager — unified with live/backtest")
 
 except Exception as _import_err:
     logger.warning("Agent imports failed (%s) -- scanner using fallback formula", _import_err)
 
 
-async def _run_all_agents(ctx: "AnalysisContext") -> tuple:
-    """Run all available agents in parallel and return (composite_score, evaluations).
+async def _evaluate(ctx: "AnalysisContext"):
+    """Run the unified PortfolioManager pipeline on one ticker.
 
-    Only agents that are instantiated and return non-neutral confidence contribute
-    to the weighted composite. Falls back to TechnicalAgent alone if others fail.
+    Same agents, weights, and composite as live trading and backtests
+    (bootstrap.build_manager). Renders the chart for the vision agent,
+    ensures the AI4Trade session is open for the social agent, and bounds
+    total evaluation time so a slow LLM can't stall the scan.
+
+    Returns a TradeDecision, or None on failure/timeout.
     """
-    if not _AGENTS_AVAILABLE:
-        return 50.0, []
+    if not _AGENTS_AVAILABLE or _pm is None:
+        return None
 
     # Build chart image path for VisionAgent (render async in thread)
     chart_path = None
-    if _vision_agent is not None and ctx.bars is not None:
+    if _pm.vision is not None and ctx.bars is not None:
         try:
             from data.chart_renderer import render_chart
             chart_path = await asyncio.to_thread(render_chart, ctx.ticker, ctx.bars)
@@ -215,63 +139,26 @@ async def _run_all_agents(ctx: "AnalysisContext") -> tuple:
         except Exception:
             pass
 
-    # Ensure AI4Trade client session is open
+    # Ensure AI4Trade client session is open (social agent)
     if _ai4trade_client is not None and _ai4trade_client._session is None:
         try:
-            import aiohttp as _aio
-            _ai4trade_client._session = _aio.ClientSession(
-                timeout=_aio.ClientTimeout(total=15.0)
+            _ai4trade_client._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15.0)
             )
         except Exception:
             pass
 
-    # Collect agents to run
-    agents_to_run = []
-    if _tech_agent is not None:
-        agents_to_run.append(("technical", _tech_agent))
-    if _fundamental_agent is not None:
-        agents_to_run.append(("fundamental", _fundamental_agent))
-    if _vision_agent is not None:
-        agents_to_run.append(("vision", _vision_agent))
-    if _social_agent is not None:
-        agents_to_run.append(("social", _social_agent))
-    if _liquid_agent is not None:
-        agents_to_run.append(("liquid", _liquid_agent))
-
-    # Run all in parallel with a per-agent timeout
-    async def _safe_eval(name, agent):
-        try:
-            return name, await asyncio.wait_for(agent.safe_evaluate(ctx), timeout=8.0)
-        except Exception as e:
-            logger.debug("Agent %s failed for %s: %s", name, ctx.ticker, e)
-            return name, None
-
-    results = await asyncio.gather(*[_safe_eval(n, a) for n, a in agents_to_run])
-
-    # Weighted composite — same formula as PortfolioManager._composite
-    # (weight × confidence) so dashboard scores match what the bot trades.
-    evaluations = []
-    total_w = 0.0
-    weighted_sum = 0.0
-    for name, ev in results:
-        if ev is None:
-            continue
-        evaluations.append(ev)
-        w = _AGENT_WEIGHTS.get(name, 0.10) * max(ev.confidence, 0.05)
-        weighted_sum += ev.score * w
-        total_w += w
-
-    composite = weighted_sum / total_w if total_w > 0 else 50.0
-
-    # Clean up temp chart file
-    if chart_path:
-        try:
-            import os as _os
-            _os.unlink(chart_path)
-        except Exception:
-            pass
-
-    return composite, evaluations
+    try:
+        return await asyncio.wait_for(_pm.decide(ctx), timeout=30.0)
+    except Exception as e:
+        logger.debug("decide() failed for %s: %s", ctx.ticker, e)
+        return None
+    finally:
+        if chart_path:
+            try:
+                os.unlink(chart_path)
+            except Exception:
+                pass
 
 
 # === Alpaca credentials & constants ===
@@ -790,9 +677,9 @@ async def _run_market_scan() -> None:
     min_score   = weights.get("min_score",           40)
     win_mins    = weights.get("time_window_minutes", 45)
 
-    if _AGENTS_AVAILABLE and _risk_agent is not None:
-        _risk_agent.cfg.atr_stop_multiple   = weights.get("atr_stop_multiple",   2.0)
-        _risk_agent.cfg.atr_target_multiple = weights.get("atr_target_multiple", 3.0)
+    if _AGENTS_AVAILABLE and _pm is not None:
+        _pm.risk.cfg.atr_stop_multiple   = weights.get("atr_stop_multiple",   2.0)
+        _pm.risk.cfg.atr_target_multiple = weights.get("atr_target_multiple", 3.0)
 
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())) as session:
@@ -829,8 +716,8 @@ async def _run_market_scan() -> None:
 
             bars_map = await _fetch_multi_bars(session, list(set(symbols_raw + ["SPY", "QQQ", "VIXY"])), limit=100)
 
-        if _AGENTS_AVAILABLE and _tech_agent is not None:
-            _tech_agent.spy_bars = bars_map.get("SPY")
+        if _AGENTS_AVAILABLE and _pm is not None:
+            _pm.technical.spy_bars = bars_map.get("SPY")
 
         # Save regime snapshot (vix/spy/qqq daily change)
         def _daily_chg(df: Any) -> float:
@@ -905,8 +792,12 @@ async def _run_market_scan() -> None:
             evaluations_out = []
 
             if _AGENTS_AVAILABLE and df is not None and len(df) >= 20:
-                ctx   = AnalysisContext(ticker=sym, bars=df, account={"equity": equity})
-                score, agent_evals = await _run_all_agents(ctx)
+                ctx      = AnalysisContext(ticker=sym, bars=df, account={"equity": equity})
+                decision = await _evaluate(ctx)
+                if decision is None:
+                    continue
+                score       = decision.composite_score
+                agent_evals = decision.evaluations
                 evaluations_out   = [
                     {
                         "role":       ev.role.value if hasattr(ev.role, "value") else str(ev.role),
@@ -922,6 +813,8 @@ async def _run_market_scan() -> None:
                         rationale = ev.rationale or ""
                         break
 
+                # Dashboard "ideas" gate is looser (55/45 + self-tuned
+                # min_score) than the bot's trade gate — keep it that way.
                 if score > 55:
                     direction = "LONG"
                 elif score < 45:
@@ -934,7 +827,12 @@ async def _run_market_scan() -> None:
 
                 agent_used = True
                 intended   = _Decision.LONG if direction == "LONG" else _Decision.SHORT
-                plan       = _risk_agent.build_plan(ctx, intended=intended)
+                # Reuse the plan pm.decide() already built when it agrees with
+                # the dashboard direction; otherwise build one for this side.
+                if decision.is_actionable and decision.decision.value == direction:
+                    plan = decision.risk
+                else:
+                    plan = _pm.risk.build_plan(ctx, intended=intended)
 
                 if plan is not None and plan.risk_reward >= 1.0:
                     entry       = round(plan.entry, 2)

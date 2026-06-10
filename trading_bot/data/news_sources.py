@@ -28,6 +28,15 @@ class NewsSource(abc.ABC):
     async def fetch_headlines(self, ticker: str, *, limit: int = 20) -> Sequence[Headline]:
         ...
 
+    async def get_news(self, ticker: str, limit: int = 8) -> list[dict]:
+        """Headlines as plain dicts — the interface FundamentalAgent consumes.
+
+        Without this, FundamentalAgent's news fetch raised AttributeError and
+        was silently swallowed, so the live bot never saw a single headline.
+        """
+        headlines = await self.fetch_headlines(ticker, limit=limit)
+        return [{"headline": h.title, "summary": h.summary} for h in headlines]
+
 
 class PoliStockSource(NewsSource):
     """Adapter placeholder. Fill in only with authorised API access."""
