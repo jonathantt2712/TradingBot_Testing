@@ -1,9 +1,11 @@
 # Architecture Map
 
 ```
-Browser ─> Vercel (Next.js dashboard) ─> ngrok tunnel ─> PC :8000 api_server.py
-                                                          PC: live_runner.py (the bot)
+Browser ─> Vercel (Next.js dashboard) ─> Render cloud (api_server.py, 24/7)
+                                          PC: live_runner.py (the bot — trades)
 ```
+Render service: https://tradingbot-api-ql85.onrender.com (free tier; a GitHub
+Action pings it every 10 min during market hours so it never sleeps mid-session)
 
 ## trading_bot/  (Python — the engine)
 - `bootstrap.py`        — ALL composition: env loading, build_broker/build_manager,

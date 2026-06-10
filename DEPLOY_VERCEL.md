@@ -2,15 +2,18 @@
 
 > **STATUS: ✅ FULLY SET UP AND VERIFIED (2026-06-10).**
 > Live site: **https://tradingbot2026.vercel.app**
-> Tunnel domain: `shun-gigolo-grew.ngrok-free.dev` (configured in `.env`)
-> Daily use: double-click START.bat, then open the live site from anywhere.
+> Backend:  **https://tradingbot-api-ql85.onrender.com** (Render free tier,
+> deployed from render.yaml; kept awake during market hours by the
+> keep-awake GitHub Action)
 >
-> **Deploys are automatic**: the Vercel project is connected to the GitHub
-> repo — every `git push` to `main` redeploys the dashboard. No `npx vercel`
-> commands needed. Env vars live in Vercel → Project → Settings → Environment
-> Variables (type values by hand; piping them in corrupts them with \r\n).
+> The ngrok tunnel is RETIRED — the backend runs in the cloud now. The bot
+> (live_runner.py) still runs on the trading PC via START.bat.
 >
-> The steps below are kept for reference / re-setup only.
+> **Deploys are automatic**: every `git push` to `main` redeploys BOTH the
+> dashboard (Vercel) and the backend (Render). Env vars live in each
+> platform's dashboard (type values by hand; piping corrupts them with \r\n).
+>
+> The steps below describe the old tunnel setup — reference only.
 
 How it works: the **website runs on Vercel**, the **bot runs on your PC** (START.bat,
 same as always). A free ngrok tunnel connects them. When START.bat is running,

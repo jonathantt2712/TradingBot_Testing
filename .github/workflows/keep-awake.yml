@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 env:
-  BACKEND_URL: https://RENDER-URL-GOES-HERE.onrender.com
+  BACKEND_URL: https://tradingbot-api-ql85.onrender.com
 
 jobs:
   ping:
