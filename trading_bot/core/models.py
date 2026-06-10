@@ -44,6 +44,7 @@ class AnalysisContext:
     bars:             Optional[pd.DataFrame] = None   # OHLCV, DatetimeIndex
     account:          dict                   = field(default_factory=dict)
     chart_image_path: Optional[str]          = None   # path to rendered PNG
+    as_of:            Optional[pd.Timestamp] = None   # evaluation time (backtests)
 
     @property
     def last_price(self) -> Optional[float]:

@@ -200,9 +200,13 @@ class IBKRBroker(BaseBroker):
                             pass
                 return default
 
-            equity       = _get("NetLiquidation") or _get("TotalCashBalance", 100_000.0)
+            equity       = _get("NetLiquidation") or _get("TotalCashBalance")
             buying_power = _get("BuyingPower") or equity
             cash         = _get("TotalCashBalance") or equity
+
+            if equity <= 0:
+                logger.error("get_account: no usable equity reported — trading disabled this cycle")
+                return {}
 
             return {
                 "equity":          equity,
@@ -211,11 +215,59 @@ class IBKRBroker(BaseBroker):
                 "portfolio_value": equity,
             }
         except Exception as exc:
-            logger.warning("get_account failed: %s", exc)
-            return {
-                "equity": 100_000.0, "buying_power": 100_000.0,
-                "cash":   100_000.0, "portfolio_value": 100_000.0,
+            # Fail closed: empty dict means "equity unknown" → downstream refuses to size.
+            logger.error("get_account failed — trading disabled this cycle: %s", exc)
+            return {}
+
+    # ── Portfolio state ───────────────────────────────────────────────────────
+
+    async def get_positions(self) -> list[dict]:
+        self._require()
+        positions = await self._ib.reqPositionsAsync()
+        return [
+            {
+                "symbol": p.contract.symbol,
+                "qty":    float(p.position),
+                "side":   "long" if p.position > 0 else "short",
             }
+            for p in positions
+            if p.position != 0
+        ]
+
+    async def get_open_orders(self) -> list[dict]:
+        self._require()
+        trades = self._ib.openTrades()
+        return [
+            {
+                "symbol": t.contract.symbol,
+                "id":     str(t.order.orderId),
+                "side":   t.order.action.lower(),
+            }
+            for t in trades
+        ]
+
+    async def close_all_positions(self) -> bool:
+        """Cancel all open orders and flatten every position with market orders."""
+        self._require()
+        from ib_insync import MarketOrder, Stock
+        try:
+            for trade in self._ib.openTrades():
+                self._ib.cancelOrder(trade.order)
+
+            positions = await self._ib.reqPositionsAsync()
+            for p in positions:
+                if p.position == 0:
+                    continue
+                action = "SELL" if p.position > 0 else "BUY"
+                contract = p.contract
+                if not contract.exchange:
+                    contract = Stock(contract.symbol, "SMART", "USD")
+                self._ib.placeOrder(contract, MarketOrder(action, abs(int(p.position))))
+                logger.info("EOD flatten: %s %s ×%d", action, p.contract.symbol, abs(int(p.position)))
+            return True
+        except Exception as exc:
+            logger.error("close_all_positions failed: %s", exc)
+            return False
 
     # ── Order execution ───────────────────────────────────────────────────────
 

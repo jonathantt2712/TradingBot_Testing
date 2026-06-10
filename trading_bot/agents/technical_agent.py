@@ -92,18 +92,17 @@ class TechnicalAgent(BaseAgent):
         # data is stale (broker connectivity issue) — return neutral.
         try:
             from datetime import datetime
-            import pytz
-            _ET = pytz.timezone("America/New_York")
+            from zoneinfo import ZoneInfo
+            _ET = ZoneInfo("America/New_York")
             last_ts = df.index[-1]
             if last_ts.tzinfo is None:
                 last_ts = last_ts.tz_localize("UTC")
             last_ts_et = last_ts.astimezone(_ET)
             now_et = datetime.now(_ET)
             age_min = (now_et - last_ts_et).total_seconds() / 60
-            mkt_open  = last_ts_et.replace(hour=9,  minute=30, second=0, microsecond=0)
-            mkt_close = last_ts_et.replace(hour=16, minute=0,  second=0, microsecond=0)
-            is_rth = (now_et.weekday() < 5 and
-                      mkt_open <= now_et.replace(tzinfo=_ET) <= mkt_close)
+            mkt_open  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+            mkt_close = now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
+            is_rth = now_et.weekday() < 5 and mkt_open <= now_et <= mkt_close
             if is_rth and age_min > 30:
                 logger.warning(
                     "TechnicalAgent: stale data for %s — last bar %.0fmin old",
@@ -116,7 +115,7 @@ class TechnicalAgent(BaseAgent):
                     rationale=f"stale data: last bar {age_min:.0f}min old",
                 )
         except Exception:
-            pass  # pytz not available or tz parse error — skip guard
+            pass  # tz parse error — skip guard
 
         # ── Research #1 (PEAD): Opening-noise guard ──────────────────────
         # Skip scoring during the first 30 min of RTH (9:30–10:00 ET).

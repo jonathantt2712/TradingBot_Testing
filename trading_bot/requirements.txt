@@ -22,3 +22,6 @@ mplfinance>=0.12.10b0
 # --- Dashboard API server ---
 fastapi>=0.111
 uvicorn[standard]>=0.29
+
+# --- Dev / tests ---
+pytest>=8.0

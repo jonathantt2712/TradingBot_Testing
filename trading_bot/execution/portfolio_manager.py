@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import date, datetime
 from typing import Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from config.settings import DecisionThresholds, Settings
 from core.enums import AgentRole, Decision, OrderSide
@@ -27,6 +29,8 @@ from agents.vision_agent import VisionAgent
 from execution.base_broker import BaseBroker, OrderReceipt
 
 logger = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
 
 
 class PortfolioManager:
@@ -55,6 +59,11 @@ class PortfolioManager:
         self._weights = settings.weights.as_map()
         self._thresholds: DecisionThresholds = settings.thresholds
         self._regime: Optional[RegimeSnapshot] = None
+
+        # Daily-loss kill switch state (reset each ET trading day)
+        self._day_start_equity: Optional[float] = None
+        self._kill_switch_date: Optional[date] = None
+        self._halted: bool = False
 
     def set_regime(self, regime: RegimeSnapshot) -> None:
         """Inject the current market regime (called once per scan cycle)."""
@@ -140,8 +149,70 @@ class PortfolioManager:
             side=side, risk=plan, evaluations=evaluations,
         )
 
+    def _check_daily_loss(self, account: dict) -> bool:
+        """Update the kill switch from current equity. Returns True if halted.
+
+        Tracks the first equity reading of each ET day as the baseline; once
+        equity drops more than ``max_daily_loss_pct`` below it, all new entries
+        are blocked until the next trading day.
+        """
+        equity = float(account.get("equity", 0.0) or 0.0)
+        if equity <= 0:
+            return self._halted  # unknown equity — leave state unchanged
+
+        today = datetime.now(_ET).date()
+        if self._kill_switch_date != today:
+            self._kill_switch_date = today
+            self._day_start_equity = equity
+            self._halted = False
+            return False
+
+        limit = self._day_start_equity * (1.0 - self.settings.risk.max_daily_loss_pct)
+        if not self._halted and equity < limit:
+            self._halted = True
+            logger.error(
+                "KILL SWITCH: equity %.2f below daily loss limit %.2f "
+                "(start %.2f, max loss %.1f%%) — no new entries today",
+                equity, limit, self._day_start_equity,
+                self.settings.risk.max_daily_loss_pct * 100,
+            )
+        return self._halted
+
+    async def _entry_allowed(self, ticker: str) -> bool:
+        """Pre-trade gate: no duplicate exposure, respect max open positions.
+
+        Fails closed — if portfolio state cannot be fetched, the entry is
+        skipped rather than risked blind.
+        """
+        try:
+            positions = await self.broker.get_positions()
+            open_orders = await self.broker.get_open_orders()
+        except Exception as exc:
+            logger.error("%s entry blocked: cannot verify portfolio state (%s)", ticker, exc)
+            return False
+
+        symbol = ticker.upper()
+        if any(p.get("symbol", "").upper() == symbol for p in positions):
+            logger.info("%s entry skipped: position already open", ticker)
+            return False
+        if any(o.get("symbol", "").upper() == symbol for o in open_orders):
+            logger.info("%s entry skipped: open order already working", ticker)
+            return False
+        if len(positions) >= self.settings.risk.max_open_positions:
+            logger.info(
+                "%s entry skipped: %d open positions >= max %d",
+                ticker, len(positions), self.settings.risk.max_open_positions,
+            )
+            return False
+        return True
+
     async def execute(self, decision: TradeDecision) -> Optional[OrderReceipt]:
         if not decision.is_actionable or self.broker is None:
+            return None
+        if self._halted:
+            logger.warning("%s entry blocked: daily loss kill switch active", decision.ticker)
+            return None
+        if not await self._entry_allowed(decision.ticker):
             return None
         receipt = await self.broker.submit_bracket(decision)
         if receipt:
@@ -151,6 +222,7 @@ class PortfolioManager:
         return receipt
 
     async def run_once(self, ctx: AnalysisContext, *, execute: bool = True) -> TradeDecision:
+        self._check_daily_loss(ctx.account)
         decision = await self.decide(ctx)
         if execute and decision.is_actionable:
             await self.execute(decision)

@@ -15,72 +15,22 @@ import os
 import sys
 from typing import Sequence
 
-from pathlib import Path
-from dotenv import load_dotenv
-_root = Path(__file__).parent.parent
-for _f in [_root / ".env", _root / ".env.local", _root / "trading-dashboard" / ".env.local"]:
-    if _f.exists(): load_dotenv(_f, override=False)
-
-from config.settings import Settings, load_settings
+import bootstrap  # loads .env files on import — keep first
+from bootstrap import build_broker, build_manager, refresh_market_context
+from config.settings import load_settings
 from core.enums import RunMode
 from core.models import AnalysisContext
 from data.chart_renderer import render_chart
 from data.ai4trade_client import AI4TradeClient
-from data.market_intel_source import CombinedNewsSource, MarketIntelNewsSource
-from data.news_sources import AlpacaNewsSource, NewsSource, PoliStockSource
 from data.sector_scanner import SectorScanner
 from data.dashboard_publisher import push_scan_results
 from data.universe_scanner import UniverseScanner
-from agents.fundamental_agent import FundamentalAgent
-from agents.liquid_agent import LiquidAgent
-from agents.regime_agent import detect_regime
-from agents.risk_agent import RiskAgent
-from agents.social_agent import SocialSentimentAgent
-from agents.technical_agent import TechnicalAgent
-from agents.vision_agent import VisionAgent
-from execution.alpaca_broker import AlpacaBroker
 from execution.base_broker import BaseBroker
-from execution.ibkr_broker import IBKRBroker
-from execution.liquid_broker import LiquidBroker
 from execution.portfolio_manager import PortfolioManager
 from execution.signal_publisher import SignalPublisher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 logger = logging.getLogger("desk")
-
-
-def build_broker(settings: Settings) -> BaseBroker:
-    if settings.run_mode is RunMode.LIVE and settings.use_liquid_broker:
-        return LiquidBroker(settings.liquid_api_key)
-    if settings.run_mode is RunMode.LIVE:
-        return IBKRBroker(settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id)
-    return AlpacaBroker(settings.alpaca_key_id, settings.alpaca_secret, paper=settings.alpaca_paper)
-
-
-def build_manager(settings: Settings, broker: BaseBroker, ai4: AI4TradeClient) -> PortfolioManager:
-    alpaca_news: NewsSource = (
-        AlpacaNewsSource(settings.alpaca_key_id, settings.alpaca_secret)
-        if settings.alpaca_key_id
-        else PoliStockSource(settings.news_base_url, settings.news_api_key)
-    )
-    news = CombinedNewsSource(alpaca_news, MarketIntelNewsSource(ai4))
-    publisher = SignalPublisher(ai4, publish_pass=True) if ai4.token and settings.ai4trade_publish else None
-
-    return PortfolioManager(
-        settings=settings,
-        broker=broker,
-        fundamental=FundamentalAgent(news, weight=settings.weights.fundamental,
-                                     anthropic_api_key=settings.anthropic_api_key,
-                                     model=settings.llm_model),
-        vision=VisionAgent(weight=settings.weights.vision,
-                           anthropic_api_key=settings.anthropic_api_key,
-                           model=settings.llm_model),
-        technical=TechnicalAgent(weight=settings.weights.technical),
-        risk=RiskAgent(settings.risk),
-        liquid=LiquidAgent(weight=settings.weights.liquid) if settings.weights.liquid > 0 else None,
-        social=SocialSentimentAgent(ai4, weight=settings.weights.social) if settings.weights.social > 0 else None,
-        publisher=publisher,
-    )
 
 
 async def evaluate_ticker(pm: PortfolioManager, broker: BaseBroker, ticker: str, *, execute: bool) -> None:
@@ -132,7 +82,8 @@ async def main(tickers: Sequence[str]) -> None:
     await ai4.__aenter__()
 
     broker = build_broker(settings)
-    pm = build_manager(settings, broker, ai4)
+    publisher = SignalPublisher(ai4, publish_pass=True) if ai4.token and settings.ai4trade_publish else None
+    pm = build_manager(settings, broker, ai4, publisher=publisher)
 
     execute = (
         settings.run_mode is RunMode.BACKTEST
@@ -142,9 +93,8 @@ async def main(tickers: Sequence[str]) -> None:
         logger.warning("LIVE mode but EXECUTE_LIVE!=true -> DRY RUN")
 
     async with broker:
-        # 1. Market regime
-        regime = await detect_regime(broker)
-        pm.set_regime(regime)
+        # 1. Market regime + SPY bars for relative strength
+        regime = await refresh_market_context(pm, broker)
 
         # 2. Sector scan
         scanner = SectorScanner(broker)
@@ -154,14 +104,7 @@ async def main(tickers: Sequence[str]) -> None:
             logger.info("Hot tickers (top 2 sectors): %s | sectors: %s",
                         sorted(hot), scan.sector_summary())
 
-        # 3. Inject SPY bars into TechnicalAgent
-        try:
-            spy_bars = await broker.get_bars("SPY", timeframe="5Min", limit=120)
-            pm.technical.spy_bars = spy_bars
-        except Exception:
-            pass
-
-        # 4. Evaluate tickers concurrently
+        # 3. Evaluate tickers concurrently
         results = await asyncio.gather(
             *[evaluate_ticker(pm, broker, t, execute=execute) for t in tickers_list],
             return_exceptions=True,
@@ -173,7 +116,7 @@ async def main(tickers: Sequence[str]) -> None:
                 if ticker.upper() not in hot:
                     logger.info("  %s is in a cold sector -- signal noted but deprioritised", ticker)
 
-        # 5. Push signals to dashboard API
+        # 4. Push signals to dashboard API
         try:
             await push_scan_results(
                 decisions=[],

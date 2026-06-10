@@ -1,11 +1,21 @@
 /**
- * Thin client for the Python bot FastAPI server at localhost:8000.
- * Every request has a 3-second AbortSignal timeout so pages fail fast
- * when the bot server is offline — no hanging requests.
+ * Thin client for the Python bot FastAPI server.
+ * Locally that's localhost:8000; on Vercel set TRADING_BOT_API_URL to the
+ * tunnel URL (e.g. https://your-name.ngrok-free.app) pointing at your PC.
+ * Every request has a timeout so pages fail fast when the bot is offline.
  */
 
-const BOT_URL     = process.env.TRADING_BOT_API_URL ?? process.env.BOT_URL ?? 'http://localhost:8000'
-const BOT_TIMEOUT = 3_000  // ms
+// trim() guards against stray whitespace/CR sneaking into the env var
+// (e.g. `echo url | vercel env add` on Windows appends \r\n).
+const BOT_URL = (process.env.TRADING_BOT_API_URL ?? process.env.BOT_URL ?? 'http://localhost:8000')
+  .trim()
+  .replace(/\/+$/, '')
+// Tunnelled requests (Vercel → ngrok → your PC) need more headroom than localhost.
+const BOT_TIMEOUT = 8_000  // ms
+
+// ngrok's free tier serves an interstitial warning page unless this header is
+// present; harmless when talking to localhost or any other backend.
+const BOT_HEADERS = { 'ngrok-skip-browser-warning': '1' }
 
 function abortAfter(ms: number): AbortSignal {
   const ctrl = new AbortController()
@@ -15,6 +25,7 @@ function abortAfter(ms: number): AbortSignal {
 
 export async function botGet<T>(path: string): Promise<T> {
   const res = await fetch(`${BOT_URL}${path}`, {
+    headers:   BOT_HEADERS,
     signal:    abortAfter(BOT_TIMEOUT),
     cache:     'no-store',
     next:      { revalidate: 0 },
@@ -26,7 +37,7 @@ export async function botGet<T>(path: string): Promise<T> {
 export async function botPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BOT_URL}${path}`, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...BOT_HEADERS },
     body:    JSON.stringify(body),
     signal:  abortAfter(BOT_TIMEOUT),
     cache:   'no-store',

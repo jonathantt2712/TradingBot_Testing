@@ -18,8 +18,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_GEMINI_MODEL    = "gemini-2.0-flash"
-_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+# Defaults — override with GEMINI_MODEL / LLM_MODEL / LLM_VISION_MODEL env vars
+# (LLM_MODEL is the same variable config.settings exposes as Settings.llm_model).
+_GEMINI_MODEL_DEFAULT    = "gemini-2.0-flash"
+_ANTHROPIC_MODEL_DEFAULT = "claude-haiku-4-5-20251001"
+_VISION_MODEL_DEFAULT    = "claude-sonnet-4-6"
 
 
 class LLMAdapter:
@@ -35,9 +38,16 @@ class LLMAdapter:
         self,
         gemini_key:    str = "",
         anthropic_key: str = "",
+        *,
+        gemini_model:    str = "",
+        anthropic_model: str = "",
+        vision_model:    str = "",
     ) -> None:
         self.gemini_key    = gemini_key    or os.getenv("GEMINI_API_KEY",    "")
         self.anthropic_key = anthropic_key or os.getenv("ANTHROPIC_API_KEY", "")
+        self.gemini_model    = gemini_model    or os.getenv("GEMINI_MODEL", _GEMINI_MODEL_DEFAULT)
+        self.anthropic_model = anthropic_model or os.getenv("LLM_MODEL", _ANTHROPIC_MODEL_DEFAULT)
+        self.vision_model    = vision_model    or os.getenv("LLM_VISION_MODEL", _VISION_MODEL_DEFAULT)
 
     @property
     def has_llm(self) -> bool:
@@ -82,7 +92,7 @@ class LLMAdapter:
             import google.generativeai as genai  # type: ignore
             genai.configure(api_key=self.gemini_key)
             model = genai.GenerativeModel(
-                _GEMINI_MODEL,
+                self.gemini_model,
                 system_instruction=system or None,
             )
             full = (system + "\n\n" + prompt).strip() if system and not hasattr(model, "_system_instruction") else prompt
@@ -97,7 +107,7 @@ class LLMAdapter:
             import google.generativeai as genai  # type: ignore
             from google.generativeai.types import Part  # type: ignore
             genai.configure(api_key=self.gemini_key)
-            model = genai.GenerativeModel(_GEMINI_MODEL)
+            model = genai.GenerativeModel(self.gemini_model)
             image_part = {"mime_type": media_type, "data": image_bytes}
             resp = await asyncio.to_thread(model.generate_content, [prompt, image_part])
             return resp.text.strip()
@@ -112,7 +122,7 @@ class LLMAdapter:
             import anthropic  # type: ignore
             client = anthropic.AsyncAnthropic(api_key=self.anthropic_key)
             kwargs: dict = dict(
-                model=_ANTHROPIC_MODEL,
+                model=self.anthropic_model,
                 max_tokens=512,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -130,7 +140,7 @@ class LLMAdapter:
             b64 = base64.standard_b64encode(image_bytes).decode()
             client = anthropic.AsyncAnthropic(api_key=self.anthropic_key)
             resp = await client.messages.create(
-                model="claude-sonnet-4-6",
+                model=self.vision_model,
                 max_tokens=300,
                 messages=[{
                     "role": "user",

@@ -1068,9 +1068,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Trading Bot API", lifespan=lifespan)
+# Locked to the local dashboard by default; set CORS_ALLOW_ORIGINS (comma-separated)
+# if the dashboard is served from elsewhere.
+_cors_origins = [
+    o.strip() for o in os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],    allow_headers=["*"],
 )
 

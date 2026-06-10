@@ -78,12 +78,16 @@ class RiskAgent(BaseAgent):
 
         equity = float(ctx.account.get("equity", 0.0))
         if equity <= 0:
-            logger.warning("no account equity in context; using nominal $100k for sizing")
-            equity = 100_000.0
+            # Fail closed: without verified equity we cannot size a position.
+            # (A broker API hiccup must never trade against fabricated capital.)
+            logger.error("no account equity in context — refusing to build a plan")
+            return None
 
         risk_usd = equity * self.cfg.max_risk_per_trade_pct
         stop_dist = atr * self.cfg.atr_stop_multiple
-        target_dist = atr * self.cfg.atr_target_multiple
+        target_dist = self._target_dist(ctx.bars, intended, price, atr)
+        if target_dist <= 0:
+            return None
 
         if intended is Decision.LONG:
             stop = price - stop_dist
@@ -109,6 +113,40 @@ class RiskAgent(BaseAgent):
             risk_reward=round(rr, 3),
             risk_per_trade_usd=round(risk_usd, 2),
         )
+
+    def _target_dist(
+        self,
+        bars: pd.DataFrame,
+        intended: Decision,
+        price: float,
+        atr: float,
+    ) -> float:
+        """Target distance capped by intraday structure.
+
+        The ATR multiple alone makes R/R a constant (target_mult / stop_mult),
+        which turns the min-R/R gate into a no-op. Instead, cap the target at
+        the session high (LONG) / session low (SHORT): if there is little room
+        before hitting the level, R/R drops and the gate can reject the trade.
+        When price is already at/through the level (breakout territory, within
+        0.25×ATR), there is no overhead structure — use the full ATR target.
+        """
+        atr_dist = atr * self.cfg.atr_target_multiple
+
+        session = bars
+        if hasattr(bars.index, "date") and len(bars.index) > 0:
+            today = bars.index[-1].date()
+            today_df = bars[bars.index.map(lambda x: x.date()) == today]
+            if not today_df.empty:
+                session = today_df
+
+        if intended is Decision.LONG:
+            room = float(session["high"].max()) - price
+        else:
+            room = price - float(session["low"].min())
+
+        if room <= atr * 0.25:          # at/through the level → breakout, full target
+            return atr_dist
+        return min(atr_dist, room)
 
     def _viability_score(self, plan: RiskParameters, ctx: AnalysisContext) -> float:
         rr_score = np.interp(plan.risk_reward, [1.0, self.cfg.min_risk_reward, 3.0], [20, 55, 95])

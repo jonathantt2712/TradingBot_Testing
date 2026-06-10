@@ -50,6 +50,8 @@ class RiskConfig:
     max_position_pct:       float = field(default_factory=lambda: _env_float("MAX_POSITION_PCT", 0.20))
     atr_stop_multiple:      float = field(default_factory=lambda: _env_float("ATR_STOP_MULTIPLE", 2.0))
     atr_target_multiple:    float = field(default_factory=lambda: _env_float("ATR_TARGET_MULTIPLE", 3.0))
+    max_open_positions:     int   = field(default_factory=lambda: int(_env_float("MAX_OPEN_POSITIONS", 5)))
+    max_daily_loss_pct:     float = field(default_factory=lambda: _env_float("MAX_DAILY_LOSS_PCT", 0.03))
 
 
 @dataclass(slots=True)
@@ -79,6 +81,13 @@ class Settings:
     alpaca_key_id: str  = field(default_factory=lambda: _env("ALPACA_API_KEY_ID"))
     alpaca_secret: str  = field(default_factory=lambda: _env("ALPACA_API_SECRET"))
     alpaca_paper:  bool = field(default_factory=lambda: _env_bool("ALPACA_PAPER", True))
+    # "iex" (free, ~2-3% of consolidated volume) or "sip" (paid, full market).
+    # Volume-based signals are calibrated for full volume — prefer sip if available.
+    alpaca_data_feed: str = field(default_factory=lambda: _env("ALPACA_DATA_FEED", "iex").lower())
+
+    # End-of-day flatten: close everything this many minutes before the 16:00 ET close.
+    eod_flatten:             bool = field(default_factory=lambda: _env_bool("EOD_FLATTEN", True))
+    eod_flatten_min_before:  int  = field(default_factory=lambda: int(_env_float("EOD_FLATTEN_MIN_BEFORE", 5)))
 
     broker:         str = field(default_factory=lambda: _env("BROKER", "alpaca").lower())
     ibkr_host:      str = field(default_factory=lambda: _env("IBKR_HOST", "127.0.0.1"))

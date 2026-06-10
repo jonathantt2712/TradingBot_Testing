@@ -7,7 +7,8 @@ export async function GET() {
   try {
     const data = await botGet<{ status: string; agents: boolean; timestamp: string }>('/api/health')
     return NextResponse.json({ ok: true, ...data })
-  } catch {
+  } catch (err) {
+    console.error('bot health check failed:', err instanceof Error ? err.message : err)
     return NextResponse.json({ ok: false, status: 'offline' }, { status: 503 })
   }
 }

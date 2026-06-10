@@ -5,11 +5,13 @@ Instead of evaluating tickers on a fixed interval, the bot:
 
   1. Auto-scans the market for candidates (most-active + gainers/losers)
      OR accepts an explicit ticker list from the CLI.
-  2. Runs an initial evaluation of all candidates on startup.
-  3. Subscribes to the AI4Trade heartbeat loop.
-  4. Re-evaluates any ticker mentioned in incoming platform tasks/messages.
-  5. Re-scans the market universe every RESCAN_INTERVAL_MIN minutes and
-     refreshes the active ticker list.
+  2. Detects the macro regime + injects SPY bars (refreshed every rescan).
+  3. Runs an initial evaluation of all candidates on startup.
+  4. Subscribes to the AI4Trade heartbeat loop.
+  5. Re-evaluates any ticker mentioned in incoming platform tasks/messages.
+  6. Re-scans the market universe every RESCAN_INTERVAL_MIN minutes and
+     refreshes the active ticker list (shared with the heartbeat handler).
+  7. Flattens all positions shortly before the 16:00 ET close (EOD_FLATTEN).
 
 Usage:
     python live_runner.py              # auto-scan (no args needed)
@@ -21,31 +23,16 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime, timezone
 from typing import Sequence
 
-from pathlib import Path
-from dotenv import load_dotenv
-_root = Path(__file__).parent.parent
-for _f in [_root / ".env", _root / ".env.local", _root / "trading-dashboard" / ".env.local"]:
-    if _f.exists(): load_dotenv(_f, override=False)
-
+import bootstrap  # loads .env files on import — keep first
+from bootstrap import build_broker, build_manager, eod_flatten_loop, refresh_market_context
 from config.settings import load_settings
 from core.models import AnalysisContext
 from data.chart_renderer import render_chart
 from data.ai4trade_client import AI4TradeClient
-from data.market_intel_source import CombinedNewsSource, MarketIntelNewsSource
-from data.news_sources import AlpacaNewsSource, PoliStockSource
 from data.universe_scanner import UniverseScanner
-from agents.fundamental_agent import FundamentalAgent
-from agents.liquid_agent import LiquidAgent
-from agents.risk_agent import RiskAgent
-from agents.social_agent import SocialSentimentAgent
-from agents.technical_agent import TechnicalAgent
-from agents.vision_agent import VisionAgent
-from execution.alpaca_broker import AlpacaBroker
 from execution.base_broker import BaseBroker
-from execution.ibkr_broker import IBKRBroker
 from execution.portfolio_manager import PortfolioManager
 from execution.signal_publisher import SignalPublisher
 
@@ -53,6 +40,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("live")
 
 RESCAN_INTERVAL_MIN = int(os.environ.get("RESCAN_INTERVAL_MIN", "30"))
+
+# Used when the universe scanner is unreachable at startup (network blip):
+# deep-liquidity names so the bot stays alive until the scanner recovers.
+FALLBACK_WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA"]
 
 
 async def evaluate_ticker(
@@ -85,12 +76,16 @@ async def handle_heartbeat(
     tasks: list,
     pm: PortfolioManager,
     broker: BaseBroker,
-    default_tickers: list[str],
+    active_tickers: list[str],
     *,
     execute: bool,
     publisher: SignalPublisher | None,
 ) -> None:
-    """React to heartbeat events -- re-evaluate tickers mentioned in messages."""
+    """React to heartbeat events -- re-evaluate tickers mentioned in messages.
+
+    ``active_tickers`` is the live, shared list mutated in place by
+    rescan_loop, so newly scanned symbols are heartbeat-eligible too.
+    """
     triggered: set[str] = set()
 
     for msg in messages:
@@ -101,7 +96,7 @@ async def handle_heartbeat(
         )
         data = msg.get("data") or {}
         symbol = data.get("symbol") or data.get("ticker")
-        if symbol and symbol.upper() in {t.upper() for t in default_tickers}:
+        if symbol and symbol.upper() in {t.upper() for t in active_tickers}:
             triggered.add(symbol.upper())
 
     for task in tasks:
@@ -122,7 +117,7 @@ async def handle_heartbeat(
 async def rescan_loop(
     pm: PortfolioManager,
     broker: BaseBroker,
-    tickers: list[str],
+    active_tickers: list[str],
     *,
     execute: bool,
     publisher: SignalPublisher | None,
@@ -130,8 +125,11 @@ async def rescan_loop(
     universe: UniverseScanner | None = None,
     scanner_cfg=None,
 ) -> None:
-    """Re-evaluate tickers every interval_min minutes."""
-    active = tickers
+    """Refresh market context and re-evaluate tickers every interval_min minutes.
+
+    Mutates ``active_tickers`` in place so the heartbeat handler always sees
+    the current universe.
+    """
     while True:
         await asyncio.sleep(interval_min * 60)
 
@@ -145,20 +143,24 @@ async def rescan_loop(
                     min_change=scanner_cfg.min_change_pct,
                 )
                 if fresh:
-                    added   = set(fresh) - set(active)
-                    removed = set(active) - set(fresh)
-                    active  = fresh
+                    added   = set(fresh) - set(active_tickers)
+                    removed = set(active_tickers) - set(fresh)
+                    active_tickers[:] = fresh
                     if added or removed:
                         logger.info(
                             "Universe refreshed: +%s -%s -> active=%s",
-                            sorted(added), sorted(removed), active
+                            sorted(added), sorted(removed), active_tickers
                         )
             except Exception:
                 logger.exception("Universe refresh failed -- keeping previous list")
 
-        logger.info("Scheduled rescan of %s", active)
+        # Regime + SPY bars go stale over a session — refresh before re-scoring.
+        await refresh_market_context(pm, broker)
+
+        logger.info("Scheduled rescan of %s", active_tickers)
         await asyncio.gather(
-            *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher) for t in active],
+            *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
+              for t in list(active_tickers)],
             return_exceptions=True,
         )
 
@@ -170,95 +172,88 @@ async def main(tickers: Sequence[str]) -> None:
     if not execute:
         logger.warning("EXECUTE_LIVE!=true -> DRY RUN (analysis only, no orders sent)")
 
-    if settings.broker == "ibkr":
-        logger.info(
-            "Broker: IBKR (host=%s port=%d clientId=%d)",
-            settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id,
-        )
-        broker: BaseBroker = IBKRBroker(
-            host=settings.ibkr_host,
-            port=settings.ibkr_port,
-            client_id=settings.ibkr_client_id,
-        )
-    else:
-        logger.info("Broker: Alpaca (paper=%s)", settings.alpaca_paper)
-        broker: BaseBroker = AlpacaBroker(
-            settings.alpaca_key_id, settings.alpaca_secret,
-            paper=settings.alpaca_paper,
-        )
+    broker = build_broker(settings, force_live=True)
+    logger.info("Broker: %s", type(broker).__name__)
 
     universe: UniverseScanner | None = None
-    tickers_list: list[str] = list(tickers)
+    active_tickers: list[str] = list(tickers)
 
     # UniverseScanner always uses Alpaca data feed for market scanning
     # regardless of execution broker (IBKR or Alpaca)
-    if not tickers_list and settings.scanner.enabled:
+    if not active_tickers and settings.scanner.enabled:
         universe = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
         logger.info("No tickers provided -- running UniverseScanner...")
         async with broker:
-            tickers_list = await universe.get_candidates(
-                top_n=settings.scanner.top_n,
-                min_price=settings.scanner.min_price,
-                max_price=settings.scanner.max_price,
-                min_volume=settings.scanner.min_volume,
-                min_change=settings.scanner.min_change_pct,
+            # A startup network blip (DNS down, WiFi waking up) must not kill
+            # the bot: retry a few times, then fall back to a liquid default
+            # watchlist — rescan_loop replaces it once the scanner recovers.
+            for attempt in range(1, 4):
+                try:
+                    active_tickers = await universe.get_candidates(
+                        top_n=settings.scanner.top_n,
+                        min_price=settings.scanner.min_price,
+                        max_price=settings.scanner.max_price,
+                        min_volume=settings.scanner.min_volume,
+                        min_change=settings.scanner.min_change_pct,
+                    )
+                except Exception:
+                    logger.exception("Universe scan attempt %d errored", attempt)
+                    active_tickers = []
+                if active_tickers:
+                    break
+                if attempt < 3:
+                    logger.warning(
+                        "Universe scan attempt %d returned no candidates — retrying in 30s",
+                        attempt,
+                    )
+                    await asyncio.sleep(30)
+        if not active_tickers:
+            active_tickers = FALLBACK_WATCHLIST.copy()
+            logger.warning(
+                "Universe scanner unavailable — starting with fallback watchlist %s "
+                "(auto-refreshes every %d min)",
+                active_tickers, RESCAN_INTERVAL_MIN,
             )
-        if not tickers_list:
-            logger.error("Universe scanner returned no candidates -- exiting")
-            return
-        logger.info("Auto-selected %d tickers: %s", len(tickers_list), tickers_list)
-    elif not tickers_list:
+        else:
+            logger.info("Auto-selected %d tickers: %s", len(active_tickers), active_tickers)
+    elif not active_tickers:
         logger.error("No tickers provided and SCANNER_ENABLED=false -- nothing to do")
         return
 
     ai4 = AI4TradeClient()
     await ai4.__aenter__()
 
-    alpaca_news = AlpacaNewsSource(settings.alpaca_key_id, settings.alpaca_secret) \
-        if settings.alpaca_key_id else PoliStockSource(settings.news_base_url, settings.news_api_key)
-    intel_news = MarketIntelNewsSource(ai4)
-    news = CombinedNewsSource(alpaca_news, intel_news)
-
-    social = SocialSentimentAgent(ai4, weight=settings.weights.social)
-    pm = PortfolioManager(
-        settings=settings,
-        broker=broker,
-        fundamental=FundamentalAgent(news, weight=settings.weights.fundamental,
-                                     anthropic_api_key=settings.anthropic_api_key,
-                                     model=settings.llm_model),
-        vision=VisionAgent(weight=settings.weights.vision,
-                           anthropic_api_key=settings.anthropic_api_key,
-                           model=settings.llm_model),
-        technical=TechnicalAgent(weight=settings.weights.technical),
-        risk=RiskAgent(settings.risk),
-        liquid=LiquidAgent(weight=settings.weights.liquid) if settings.weights.liquid > 0 else None,
-        social=social,
-    )
-
+    pm = build_manager(settings, broker, ai4)
     publisher = SignalPublisher(ai4, publish_pass=True) if ai4.token else None
 
     async with broker:
-        logger.info("Initial scan of %s", tickers_list)
+        await refresh_market_context(pm, broker)
+
+        logger.info("Initial scan of %s", active_tickers)
         await asyncio.gather(
-            *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher) for t in tickers_list],
+            *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
+              for t in active_tickers],
             return_exceptions=True,
         )
 
         async def hb_callback(messages, tasks):
-            await handle_heartbeat(messages, tasks, pm, broker, tickers_list,
+            await handle_heartbeat(messages, tasks, pm, broker, active_tickers,
                                    execute=execute, publisher=publisher)
 
-        await asyncio.gather(
+        loops = [
             ai4.heartbeat_loop(hb_callback),
             rescan_loop(
-                pm, broker, tickers_list,
+                pm, broker, active_tickers,
                 execute=execute,
                 publisher=publisher,
                 interval_min=RESCAN_INTERVAL_MIN,
                 universe=universe,
                 scanner_cfg=settings.scanner if universe else None,
             ),
-        )
+        ]
+        if execute:
+            loops.append(eod_flatten_loop(broker, settings))
+        await asyncio.gather(*loops)
 
     await ai4.__aexit__(None, None, None)
 

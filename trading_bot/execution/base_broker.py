@@ -38,7 +38,33 @@ class BaseBroker(ABC):
 
     @abstractmethod
     async def get_account(self) -> dict:
-        """Return account info dict with at least 'equity' and 'buying_power'."""
+        """Return account info dict with at least 'equity' and 'buying_power'.
+
+        MUST return an empty dict (or one without a positive 'equity') when the
+        account state cannot be fetched. Never fabricate equity — callers treat
+        a missing equity as "do not trade".
+        """
+
+    # ── Portfolio state ───────────────────────────────────────────────────────
+
+    async def get_positions(self) -> list[dict]:
+        """Return open positions as dicts with at least 'symbol' and 'qty'.
+
+        Brokers that cannot report positions return []; the PortfolioManager
+        then has no duplicate-position protection for that broker.
+        """
+        return []
+
+    async def get_open_orders(self) -> list[dict]:
+        """Return open orders as dicts with at least 'symbol'."""
+        return []
+
+    async def close_all_positions(self) -> bool:
+        """Flatten the book: cancel open orders and close every position.
+
+        Returns True if the request was issued successfully.
+        """
+        return False
 
     # ── Order management ──────────────────────────────────────────────────────
 

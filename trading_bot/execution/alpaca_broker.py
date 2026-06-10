@@ -27,10 +27,11 @@ _TF_MAP = {
 class AlpacaBroker(BaseBroker):
     """Thin async wrapper around Alpaca REST v2."""
 
-    def __init__(self, key_id: str, secret: str, *, paper: bool = True) -> None:
+    def __init__(self, key_id: str, secret: str, *, paper: bool = True, feed: str = "iex") -> None:
         self._key    = key_id
         self._secret = secret
         self._paper  = paper
+        self._feed   = feed if feed in ("iex", "sip", "otc") else "iex"
         self._base   = _PAPER_BASE if paper else _LIVE_BASE
         self._headers = {
             "APCA-API-KEY-ID":     key_id,
@@ -83,6 +84,20 @@ class AlpacaBroker(BaseBroker):
             if owned:
                 await session.close()
 
+    async def _delete(self, url: str, params: dict | None = None) -> dict | list:
+        import aiohttp
+        session, owned = self._session_or_new()
+        try:
+            async with session.delete(url, params=params,
+                                      timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                resp.raise_for_status()
+                if resp.content_type == "application/json":
+                    return await resp.json()
+                return {}
+        finally:
+            if owned:
+                await session.close()
+
     # ── Market data ───────────────────────────────────────────────────────────
 
     async def get_bars(
@@ -93,7 +108,7 @@ class AlpacaBroker(BaseBroker):
     ) -> pd.DataFrame:
         tf = _TF_MAP.get(timeframe, timeframe)
         url = f"{_DATA_BASE}/v2/stocks/{symbol}/bars"
-        params = {"timeframe": tf, "limit": limit, "feed": "iex", "adjustment": "raw"}
+        params = {"timeframe": tf, "limit": limit, "feed": self._feed, "adjustment": "raw"}
         try:
             data = await self._get(url, params)
             bars_raw = data.get("bars", [])
@@ -121,8 +136,48 @@ class AlpacaBroker(BaseBroker):
                 "portfolio_value": float(data.get("portfolio_value", 0)),
             }
         except Exception as exc:
-            logger.warning("get_account failed: %s", exc)
-            return {"equity": 100_000.0, "buying_power": 100_000.0, "cash": 100_000.0}
+            # Fail closed: an empty dict means "equity unknown" and downstream
+            # sizing refuses to trade. Never substitute fake equity here.
+            logger.error("get_account failed — trading disabled this cycle: %s", exc)
+            return {}
+
+    async def get_positions(self) -> list[dict]:
+        try:
+            data = await self._get(f"{self._base}/v2/positions")
+            return [
+                {
+                    "symbol": p.get("symbol", ""),
+                    "qty":    float(p.get("qty", 0)),
+                    "side":   p.get("side", ""),
+                    "market_value": float(p.get("market_value", 0) or 0),
+                    "unrealized_pl": float(p.get("unrealized_pl", 0) or 0),
+                }
+                for p in (data if isinstance(data, list) else [])
+            ]
+        except Exception as exc:
+            logger.error("get_positions failed: %s", exc)
+            raise
+
+    async def get_open_orders(self) -> list[dict]:
+        try:
+            data = await self._get(f"{self._base}/v2/orders", {"status": "open", "limit": 500})
+            return [
+                {"symbol": o.get("symbol", ""), "id": o.get("id", ""), "side": o.get("side", "")}
+                for o in (data if isinstance(data, list) else [])
+            ]
+        except Exception as exc:
+            logger.error("get_open_orders failed: %s", exc)
+            raise
+
+    async def close_all_positions(self) -> bool:
+        """Cancel all open orders and liquidate all positions (EOD flatten)."""
+        try:
+            await self._delete(f"{self._base}/v2/positions", {"cancel_orders": "true"})
+            logger.info("close_all_positions: liquidation request accepted")
+            return True
+        except Exception as exc:
+            logger.error("close_all_positions failed: %s", exc)
+            return False
 
     # ── Order management ──────────────────────────────────────────────────────
 
