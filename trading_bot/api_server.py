@@ -180,7 +180,7 @@ try:
     # ── LiquidAgent (crowd positioning / funding rate) ─────────────────────────
     try:
         from agents.liquid_agent import LiquidAgent
-        _liquid_agent = LiquidAgent(weight=0.15, api_key=os.getenv("LIQUID_API_KEY", ""))
+        _liquid_agent = LiquidAgent(weight=0.15)
         logger.info("LiquidAgent loaded")
     except Exception as _e:
         logger.warning("LiquidAgent unavailable: %s", _e)
@@ -421,30 +421,47 @@ async def _fetch_multi_bars(
     timeframe: str = "5Min",
     limit: int = 100,
 ) -> Dict[str, Any]:
+    """Fetch recent bars for many symbols.
+
+    The Alpaca multi-symbol bars endpoint applies `limit` to the TOTAL
+    number of bars in the response (across all symbols, alphabetically),
+    not per symbol. Requesting 100+ symbols with limit=100 silently
+    starves every symbol but the first. To get ~`limit` bars per symbol
+    we chunk the symbol list and request a per-chunk total capped at
+    Alpaca's 10000 max page size.
+    """
     if not _AGENTS_AVAILABLE or not symbols:
         return {}
     start = (datetime.utcnow() - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        async with session.get(
-            f"{_DATA_BASE}/v2/stocks/bars",
-            params={"symbols": ",".join(symbols), "timeframe": timeframe,
-                    "start": start, "limit": str(limit), "feed": "iex"},
-            headers=_ALPACA_HEADERS,
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as r:
-            if r.status != 200:
-                logger.warning("Multi-bars fetch returned %s", r.status)
-                return {}
-            payload = await r.json()
-    except Exception as exc:
-        logger.warning("Multi-bars fetch failed: %s", exc)
-        return {}
+
+    max_page = 10000
+    chunk_size = max(1, min(len(symbols), max_page // limit))
 
     result: Dict[str, Any] = {}
-    for sym, bars_list in (payload.get("bars") or {}).items():
-        df = _bars_to_df(bars_list)
-        if df is not None and len(df) > 0:
-            result[sym] = df
+    for i in range(0, len(symbols), chunk_size):
+        chunk = symbols[i:i + chunk_size]
+        page_limit = min(max_page, limit * len(chunk))
+        try:
+            async with session.get(
+                f"{_DATA_BASE}/v2/stocks/bars",
+                params={"symbols": ",".join(chunk), "timeframe": timeframe,
+                        "start": start, "limit": str(page_limit), "feed": "iex"},
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as r:
+                if r.status != 200:
+                    logger.warning("Multi-bars fetch returned %s", r.status)
+                    continue
+                payload = await r.json()
+        except Exception as exc:
+            logger.warning("Multi-bars fetch failed: %s", exc)
+            continue
+
+        for sym, bars_list in (payload.get("bars") or {}).items():
+            df = _bars_to_df(bars_list)
+            if df is not None and len(df) > 0:
+                result[sym] = df
+
     return result
 
 
@@ -734,8 +751,7 @@ async def _run_market_scan() -> None:
 
     if not _is_market_open():
         _scan_stats["market_closed_skips"] += 1
-        logger.info("Market closed — skipping scan (skip #%d today)", _scan_stats["market_closed_skips"])
-        return
+        logger.info("Market closed — scanning anyway (off-hours scan #%d today)", _scan_stats["market_closed_skips"])
 
     open_trades = [t for t in _load(TRADES_FILE, []) if t.get("status") == "open"]
     if len(open_trades) >= MAX_OPEN_POSITIONS:
@@ -1267,6 +1283,7 @@ class ExecuteBody(BaseModel):
 @app.get("/api/open")
 def get_open_context():
     """Return open trade TP/SL context for PositionsTable."""
+    trades = _load(HISTORY_FILE, [])
     if not isinstance(trades, list):
         trades = []
     open_trades = [t for t in trades if t.get("status") == "open"]

@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { TradeCard }       from '@/components/trades/TradeCard'
 import { ConfirmModal }    from '@/components/trades/ConfirmModal'
+import { RationaleModal }  from '@/components/trades/RationaleModal'
 import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
 import { demoRecommendations, demoRegime, api } from '@/lib/api'
 import type { TradeRecommendation, RegimeInfo } from '@/types/trading'
@@ -66,6 +67,7 @@ export default function TradesPage() {
   const router = useRouter()
 
   const [selected,     setSelected]     = useState<TradeRecommendation | null>(null)
+  const [infoTrade,    setInfoTrade]    = useState<TradeRecommendation | null>(null)
   const [filter,       setFilter]       = useState<'all' | 'LONG' | 'SHORT'>('all')
   const [trades,       setTrades]       = useState<TradeRecommendation[]>(
     () => [...demoRecommendations()].sort(byScore)
@@ -273,6 +275,7 @@ export default function TradesPage() {
                 <TradeCard
                   trade={t}
                   onExecute={setSelected}
+                  onInfo={setInfoTrade}
                   currentPrice={prices[t.ticker]}
                 />
               </div>
@@ -311,6 +314,7 @@ export default function TradesPage() {
                   <TradeCard
                     trade={t}
                     onExecute={() => {}}
+                    onInfo={setInfoTrade}
                     currentPrice={prices[t.ticker]}
                   />
                 </div>
@@ -324,6 +328,11 @@ export default function TradesPage() {
         trade={selected}
         onClose={() => setSelected(null)}
         onDone={() => selected && handleExecuted(selected)}
+      />
+
+      <RationaleModal
+        trade={infoTrade}
+        onClose={() => setInfoTrade(null)}
       />
     </div>
   )

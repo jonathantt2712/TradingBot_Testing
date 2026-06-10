@@ -33,13 +33,14 @@ export function bgColorForScore(score: number): string {
 }
 
 export function regimeLabel(r: string): string {
-  return { risk_on: 'RISK ON', neutral: 'NEUTRAL', risk_off: 'RISK OFF' }[r] ?? r.toUpperCase()
+  return { risk_on: 'RISK ON', neutral: 'NEUTRAL', choppy: 'CHOPPY', risk_off: 'RISK OFF' }[r] ?? r.toUpperCase()
 }
 
 export function regimeColor(r: string): string {
   return {
     risk_on:  'text-bull bg-bull/10 border-bull/30',
     neutral:  'text-caution bg-caution/10 border-caution/30',
+    choppy:   'text-caution bg-caution/10 border-caution/30',
     risk_off: 'text-bear bg-bear/10 border-bear/30',
   }[r] ?? 'text-subtle'
 }
