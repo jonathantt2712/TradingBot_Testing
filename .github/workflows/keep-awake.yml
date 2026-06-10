@@ -1,0 +1,26 @@
+# Pings the Render backend every 10 minutes during US market hours (Mon-Fri)
+# so the free-tier service never sleeps while trading is possible.
+# Cron is UTC: 13:00-20:50 UTC covers 9:30-16:00 ET in both DST states.
+name: Keep backend awake (market hours)
+
+on:
+  schedule:
+    - cron: "*/10 13-20 * * 1-5"
+  workflow_dispatch:
+
+env:
+  BACKEND_URL: https://RENDER-URL-GOES-HERE.onrender.com
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: |
+          if [[ "$BACKEND_URL" == *"RENDER-URL-GOES-HERE"* ]]; then
+            echo "Backend URL not configured yet — skipping."
+            exit 0
+          fi
+          # --max-time 90: allow for cold start if the service did doze off
+          curl -fsS --max-time 90 "$BACKEND_URL/api/health" && echo "" && echo "awake ✓" \
+            || echo "ping failed — service may still be waking up"
