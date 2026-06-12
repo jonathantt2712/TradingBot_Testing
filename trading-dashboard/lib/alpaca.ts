@@ -3,25 +3,31 @@
  * Never import this from client components -- keys stay on the server.
  */
 
-const KEY_ID  = process.env.ALPACA_KEY_ID     ?? ''
-const SECRET  = process.env.ALPACA_SECRET      ?? ''
-const PAPER   = process.env.ALPACA_PAPER !== 'false'
-
-const BROKER_BASE = PAPER
-  ? 'https://paper-api.alpaca.markets'
-  : 'https://api.alpaca.markets'
+export interface AlpacaCreds {
+  keyId:  string
+  secret: string
+  paper:  boolean
+}
 
 const DATA_BASE = 'https://data.alpaca.markets'
 
-const HEADERS = {
-  'APCA-API-KEY-ID':     KEY_ID,
-  'APCA-API-SECRET-KEY': SECRET,
-  'Content-Type':        'application/json',
+function brokerBase(creds: AlpacaCreds): string {
+  return creds.paper
+    ? 'https://paper-api.alpaca.markets'
+    : 'https://api.alpaca.markets'
 }
 
-async function alpacaGet<T>(base: string, path: string, opts?: RequestInit): Promise<T> {
+function headers(creds: AlpacaCreds) {
+  return {
+    'APCA-API-KEY-ID':     creds.keyId,
+    'APCA-API-SECRET-KEY': creds.secret,
+    'Content-Type':        'application/json',
+  }
+}
+
+async function alpacaGet<T>(base: string, path: string, creds: AlpacaCreds, opts?: RequestInit): Promise<T> {
   const res = await fetch(`${base}${path}`, {
-    headers: HEADERS,
+    headers: headers(creds),
     next: { revalidate: 10 },
     ...opts,
   })
@@ -50,8 +56,8 @@ export interface AlpacaAccount {
   pattern_day_trader:  boolean
 }
 
-export function getAccount(): Promise<AlpacaAccount> {
-  return alpacaGet(BROKER_BASE, '/v2/account')
+export function getAccount(creds: AlpacaCreds): Promise<AlpacaAccount> {
+  return alpacaGet(brokerBase(creds), '/v2/account', creds)
 }
 
 // Positions
@@ -68,8 +74,8 @@ export interface AlpacaPosition {
   change_today:     string
 }
 
-export function getPositions(): Promise<AlpacaPosition[]> {
-  return alpacaGet(BROKER_BASE, '/v2/positions', { cache: 'no-store' })
+export function getPositions(creds: AlpacaCreds): Promise<AlpacaPosition[]> {
+  return alpacaGet(brokerBase(creds), '/v2/positions', creds, { cache: 'no-store' })
 }
 
 // Orders
@@ -87,8 +93,8 @@ export interface AlpacaOrder {
   type:             string
 }
 
-export function getOrders(status = 'closed', limit = 50): Promise<AlpacaOrder[]> {
-  return alpacaGet(BROKER_BASE, `/v2/orders?status=${status}&limit=${limit}&direction=desc`)
+export function getOrders(creds: AlpacaCreds, status = 'closed', limit = 50): Promise<AlpacaOrder[]> {
+  return alpacaGet(brokerBase(creds), `/v2/orders?status=${status}&limit=${limit}&direction=desc`, creds)
 }
 
 // Latest quote
@@ -98,9 +104,9 @@ export interface AlpacaQuote {
   quote:  { ap: number; bp: number; as: number; bs: number; t: string }
 }
 
-export async function getLatestQuote(symbol: string): Promise<AlpacaQuote> {
+export async function getLatestQuote(creds: AlpacaCreds, symbol: string): Promise<AlpacaQuote> {
   const data = await alpacaGet<{ quotes: Record<string, any> }>(
-    DATA_BASE, `/v2/stocks/${symbol}/quotes/latest`
+    DATA_BASE, `/v2/stocks/${symbol}/quotes/latest`, creds
   )
   return { symbol, quote: data.quotes?.[symbol] }
 }
@@ -112,9 +118,9 @@ export interface AlpacaBar {
   bar:    { o: number; h: number; l: number; c: number; v: number; t: string }
 }
 
-export async function getLatestBar(symbol: string): Promise<AlpacaBar> {
+export async function getLatestBar(creds: AlpacaCreds, symbol: string): Promise<AlpacaBar> {
   const data = await alpacaGet<{ bars: Record<string, any> }>(
-    DATA_BASE, `/v2/stocks/${symbol}/bars/latest`
+    DATA_BASE, `/v2/stocks/${symbol}/bars/latest`, creds
   )
   return { symbol, bar: data.bars?.[symbol] }
 }
@@ -129,12 +135,22 @@ export interface AlpacaSnapshot {
   prevDailyBar:{ o: number; h: number; l: number; c: number; v: number }
 }
 
-export async function getSnapshots(symbols: string[]): Promise<Record<string, AlpacaSnapshot>> {
+export async function getSnapshots(creds: AlpacaCreds, symbols: string[]): Promise<Record<string, AlpacaSnapshot>> {
   const syms = symbols.join(',')
   const data = await alpacaGet<{ snapshots: Record<string, AlpacaSnapshot> }>(
-    DATA_BASE, `/v2/stocks/snapshots?symbols=${encodeURIComponent(syms)}`
+    DATA_BASE, `/v2/stocks/snapshots?symbols=${encodeURIComponent(syms)}`, creds
   )
   return data.snapshots ?? (data as any)
+}
+
+// Bars (multi-symbol)
+
+export interface AlpacaBarsResponse {
+  bars: Record<string, Array<{ o: number; h: number; l: number; c: number; v: number; t: string }>>
+}
+
+export async function getBars(creds: AlpacaCreds, params: URLSearchParams): Promise<AlpacaBarsResponse> {
+  return alpacaGet<AlpacaBarsResponse>(DATA_BASE, `/v2/stocks/bars?${params}`, creds, { cache: 'no-store' })
 }
 
 // Order submission
@@ -157,7 +173,7 @@ export interface AlpacaOrderResponse {
   created_at:      string
 }
 
-export async function submitBracketOrder(req: BracketOrderRequest): Promise<AlpacaOrderResponse> {
+export async function submitBracketOrder(creds: AlpacaCreds, req: BracketOrderRequest): Promise<AlpacaOrderResponse> {
   const body = {
     symbol:        req.symbol,
     qty:           String(req.qty),
@@ -169,9 +185,9 @@ export async function submitBracketOrder(req: BracketOrderRequest): Promise<Alpa
     take_profit:   { limit_price: req.take_profit.toFixed(2) },
   }
 
-  const res = await fetch(`${BROKER_BASE}/v2/orders`, {
+  const res = await fetch(`${brokerBase(creds)}/v2/orders`, {
     method:  'POST',
-    headers: HEADERS,
+    headers: headers(creds),
     body:    JSON.stringify(body),
     cache:   'no-store',
   })
@@ -185,10 +201,10 @@ export async function submitBracketOrder(req: BracketOrderRequest): Promise<Alpa
 
 // Close a position
 
-export async function closePosition(symbol: string): Promise<AlpacaOrderResponse> {
-  const res = await fetch(`${BROKER_BASE}/v2/positions/${symbol}`, {
+export async function closePosition(creds: AlpacaCreds, symbol: string): Promise<AlpacaOrderResponse> {
+  const res = await fetch(`${brokerBase(creds)}/v2/positions/${symbol}`, {
     method:  'DELETE',
-    headers: HEADERS,
+    headers: headers(creds),
     cache:   'no-store',
   })
   if (!res.ok) {
