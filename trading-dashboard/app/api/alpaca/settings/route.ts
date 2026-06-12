@@ -2,7 +2,7 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
 import { prisma } from '@/lib/prisma'
-import { encrypt } from '@/lib/crypto'
+import { encrypt, decrypt } from '@/lib/crypto'
 
 export async function GET() {
   const session = await auth()
@@ -11,8 +11,10 @@ export async function GET() {
   const user = await prisma.user.findUnique({ where: { id: session.user.id } })
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  const keyId = user.alpacaKeyId ? decrypt(user.alpacaKeyId) : ''
+
   return NextResponse.json({
-    alpacaKeyId: user.alpacaKeyId ? `${session.alpaca.keyId.slice(0, 4)}••••${session.alpaca.keyId.slice(-4)}` : '',
+    alpacaKeyId: keyId ? `${keyId.slice(0, 4)}••••${keyId.slice(-4)}` : '',
     alpacaPaper: user.alpacaPaper,
   })
 }
