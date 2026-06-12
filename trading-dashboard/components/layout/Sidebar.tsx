@@ -1,9 +1,10 @@
 'use client'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import { signOut } from 'next-auth/react'
 import {
   LayoutDashboard, TrendingUp, History, BarChart2,
-  Zap, Settings, ExternalLink, FlaskConical,
+  Zap, Settings, ExternalLink, FlaskConical, LogOut,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -51,7 +52,9 @@ export function MobileNav() {
   )
 }
 
-export function Sidebar() {
+interface SidebarProps { email: string | null }
+
+export function Sidebar({ email }: SidebarProps) {
   const path = usePathname()
   return (
     <aside className="hidden md:flex w-[220px] flex-col border-r border-bg-border bg-bg-card shrink-0">
@@ -96,6 +99,11 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="border-t border-bg-border px-3 py-3 space-y-0.5">
+        {email && (
+          <div className="px-3 py-2 text-xs text-muted truncate" title={email}>
+            {email}
+          </div>
+        )}
         <Link
           href="/settings"
           className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-subtle hover:bg-bg-hover hover:text-primary transition-colors"
@@ -112,6 +120,15 @@ export function Sidebar() {
           <ExternalLink className="h-4 w-4" />
           GitHub
         </a>
+        {email && (
+          <button
+            onClick={() => signOut({ callbackUrl: '/login' })}
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-subtle hover:bg-bg-hover hover:text-primary transition-colors"
+          >
+            <LogOut className="h-4 w-4" />
+            Log out
+          </button>
+        )}
       </div>
     </aside>
   )

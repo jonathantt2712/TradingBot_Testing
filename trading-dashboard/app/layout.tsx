@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import './globals.css'
 import { Sidebar, MobileNav } from '@/components/layout/Sidebar'
 import { Toaster } from 'sonner'
+import { auth } from '@/auth'
 
 export const metadata: Metadata = {
   title: 'Trading Bot Dashboard',
@@ -12,11 +13,14 @@ export const metadata: Metadata = {
   },
 }
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const session = await auth()
+  const email = session?.user?.email ?? null
+
   return (
     <html lang="en" className="dark">
       <body className="flex h-dvh overflow-hidden bg-bg-base text-primary">
-        <Sidebar />
+        <Sidebar email={email} />
         <main className="flex-1 overflow-y-auto pb-16 md:pb-0">
           {children}
         </main>
