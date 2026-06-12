@@ -1,17 +1,21 @@
 import { NextResponse } from 'next/server'
 import { botGet } from '@/lib/bot-api'
 import { getOrders } from '@/lib/alpaca'
+import { getAlpacaCreds } from '@/lib/session'
 import { demoHistory } from '@/lib/api'
 import type { TradeRecord } from '@/types/trading'
 
 /** Merge bot history with real Alpaca orders for full picture. */
 export async function GET() {
+  const creds = await getAlpacaCreds()
+  if (!creds) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
   try {
     // 1. Bot's persisted trade records
     const botTrades = await botGet<TradeRecord[]>('/api/history').catch(() => [])
 
     // 2. Real closed orders from Alpaca (fills broker gaps)
-    const alpacaOrders = await getOrders('closed', 100).catch(() => [])
+    const alpacaOrders = await getOrders(creds, 'closed', 100).catch(() => [])
     const fromAlpaca: TradeRecord[] = alpacaOrders
       .filter(o => o.filled_qty && parseFloat(o.filled_qty) > 0)
       .map(o => ({

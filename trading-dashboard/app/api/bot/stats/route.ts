@@ -1,15 +1,19 @@
 import { NextResponse } from 'next/server'
 import { botGet } from '@/lib/bot-api'
 import { getAccount } from '@/lib/alpaca'
+import { getAlpacaCreds } from '@/lib/session'
 import { demoStats } from '@/lib/api'
 import type { PortfolioStats } from '@/types/trading'
 
 export async function GET() {
+  const creds = await getAlpacaCreds()
+  if (!creds) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
   try {
     // Pull stats from bot + enrich with live Alpaca account data
     const [botStats, account] = await Promise.allSettled([
       botGet<PortfolioStats>('/api/stats'),
-      getAccount(),
+      getAccount(creds),
     ])
 
     const stats: PortfolioStats = botStats.status === 'fulfilled'

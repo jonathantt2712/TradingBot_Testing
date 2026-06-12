@@ -2,7 +2,7 @@
  * POST /api/bot/execute
  *
  * Executes a trade recommendation. Strategy (in order):
- *  1. Submit bracket order directly to Alpaca Paper API (no bot server needed)
+ *  1. Submit bracket order directly to the signed-in user's Alpaca account
  *  2. Also notify bot server if it happens to be running (for its trade log)
  *  3. If Alpaca is unavailable, return a local paper order ID so UI never breaks
  *
@@ -11,6 +11,7 @@
 import { NextResponse }       from 'next/server'
 import { revalidatePath }      from 'next/cache'
 import { submitBracketOrder } from '@/lib/alpaca'
+import { getAlpacaCreds }     from '@/lib/session'
 import { botPost }            from '@/lib/bot-api'
 import type { ExecuteRequest, ExecuteResponse } from '@/types/trading'
 
@@ -32,6 +33,14 @@ function _isDuplicate(recId: string | undefined): boolean {
 }
 
 export async function POST(req: Request) {
+  const creds = await getAlpacaCreds()
+  if (!creds) {
+    return NextResponse.json(
+      { success: false, order_id: '', message: 'Unauthorized' },
+      { status: 401 },
+    )
+  }
+
   let body: ExecuteRequest
   try {
     body = await req.json()
@@ -52,13 +61,13 @@ export async function POST(req: Request) {
 
   const { ticker, direction, qty, stop_loss, take_profit } = body
 
-  // -- 1. Submit to Alpaca Paper
+  // -- 1. Submit to the signed-in user's Alpaca account
   let orderId = `PAPER-${Date.now().toString(36).toUpperCase()}`
   let message = ''
   let alpacaSuccess = false
 
   try {
-    const alpacaOrder = await submitBracketOrder({
+    const alpacaOrder = await submitBracketOrder(creds, {
       symbol:      ticker,
       side:        direction === 'LONG' ? 'buy' : 'sell',
       qty,
@@ -66,7 +75,7 @@ export async function POST(req: Request) {
       take_profit,
     })
     orderId       = alpacaOrder.id
-    message       = `${direction} ${qty}x ${ticker} submitted to Alpaca Paper (order ${orderId})`
+    message       = `${direction} ${qty}x ${ticker} submitted to Alpaca ${creds.paper ? 'Paper' : 'Live'} (order ${orderId})`
     alpacaSuccess = true
   } catch (err: any) {
     message = `${direction} ${qty}x ${ticker} recorded locally (Alpaca: ${err.message})`
