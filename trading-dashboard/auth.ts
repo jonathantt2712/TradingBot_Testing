@@ -26,10 +26,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         if (!email || !password) return null
 
         const user = await prisma.user.findUnique({ where: { email } })
-        if (!user) return null
 
-        const valid = await bcrypt.compare(password, user.passwordHash)
-        if (!valid) return null
+        // Always run bcrypt.compare, even if the user doesn't exist, so the
+        // response time doesn't leak whether the email is registered.
+        const DUMMY_HASH = '$2a$10$CwTycUXWue0Thq9StjUM0uJ8B9d.bHbR0bM4F.RnXi7B22.HEZk7C'
+        const valid = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH)
+        if (!user || !valid) return null
 
         return {
           id:           user.id,

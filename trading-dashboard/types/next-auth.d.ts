@@ -19,6 +19,7 @@ declare module 'next-auth' {
   }
 }
 
+// next-auth/jwt is just a re-export of @auth/core/jwt — augment the real module so the JWT type merge applies
 declare module '@auth/core/jwt' {
   interface JWT {
     userId: string
