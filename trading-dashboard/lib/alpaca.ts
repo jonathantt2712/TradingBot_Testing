@@ -28,7 +28,7 @@ function headers(creds: AlpacaCreds) {
 async function alpacaGet<T>(base: string, path: string, creds: AlpacaCreds, opts?: RequestInit): Promise<T> {
   const res = await fetch(`${base}${path}`, {
     headers: headers(creds),
-    next: { revalidate: 10 },
+    cache: 'no-store',
     ...opts,
   })
   if (!res.ok) {
