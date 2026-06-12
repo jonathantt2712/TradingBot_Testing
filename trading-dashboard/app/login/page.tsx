@@ -21,14 +21,19 @@ export default function LoginPage() {
     e.preventDefault()
     setError(null)
     setLoading(true)
-    const res = await signIn('credentials', { email, password, redirect: false })
-    setLoading(false)
-    if (res?.error) {
-      setError('Invalid email or password')
-      return
+    try {
+      const res = await signIn('credentials', { email, password, redirect: false })
+      if (res?.error) {
+        setError('Invalid email or password')
+        return
+      }
+      router.push('/')
+      router.refresh()
+    } catch {
+      setError('Something went wrong — please try again')
+    } finally {
+      setLoading(false)
     }
-    router.push('/')
-    router.refresh()
   }
 
   async function handleSignUp(e: React.FormEvent) {
@@ -39,26 +44,30 @@ export default function LoginPage() {
       return
     }
     setLoading(true)
-    const res = await fetch('/api/auth/signup', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ email, password, alpacaKeyId, alpacaSecret, alpacaPaper }),
-    })
-    const data = await res.json()
-    if (!res.ok) {
+    try {
+      const res = await fetch('/api/auth/signup', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ email, password, alpacaKeyId, alpacaSecret, alpacaPaper }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setError(data.error ?? 'Could not create account')
+        return
+      }
+      const signInRes = await signIn('credentials', { email, password, redirect: false })
+      if (signInRes?.error) {
+        setError('Account created — please sign in')
+        setMode('signin')
+        return
+      }
+      router.push('/')
+      router.refresh()
+    } catch {
+      setError('Something went wrong — please try again')
+    } finally {
       setLoading(false)
-      setError(data.error ?? 'Could not create account')
-      return
     }
-    const signInRes = await signIn('credentials', { email, password, redirect: false })
-    setLoading(false)
-    if (signInRes?.error) {
-      setError('Account created — please sign in')
-      setMode('signin')
-      return
-    }
-    router.push('/')
-    router.refresh()
   }
 
   return (
