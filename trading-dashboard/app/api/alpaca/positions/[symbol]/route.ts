@@ -1,40 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
-
-const KEY_ID   = process.env.ALPACA_KEY_ID ?? ''
-const SECRET   = process.env.ALPACA_SECRET  ?? ''
-const BASE_URL = 'https://paper-api.alpaca.markets'
+import { closePosition } from '@/lib/alpaca'
+import { getAlpacaCreds } from '@/lib/session'
 
 export async function DELETE(
   _req: NextRequest,
   { params }: { params: { symbol: string } },
 ) {
+  const creds = await getAlpacaCreds()
+  if (!creds) return NextResponse.json({ message: 'Unauthorized' }, { status: 401 })
+
   const symbol = decodeURIComponent(params.symbol).toUpperCase()
 
   try {
-    const res = await fetch(`${BASE_URL}/v2/positions/${symbol}`, {
-      method:  'DELETE',
-      headers: {
-        'APCA-API-KEY-ID':     KEY_ID,
-        'APCA-API-SECRET-KEY': SECRET,
-      },
-    })
-
-    // 204 = position closed successfully (no body)
-    if (res.status === 204) {
-      return NextResponse.json({ ok: true, symbol })
-    }
-
-    const data = await res.json().catch(() => ({}))
-
-    if (!res.ok) {
-      return NextResponse.json(
-        { message: data.message ?? `Alpaca ${res.status}` },
-        { status: res.status },
-      )
-    }
-
-    // 200 = returns an order object
-    return NextResponse.json({ ok: true, symbol, order: data })
+    const order = await closePosition(creds, symbol)
+    return NextResponse.json({ ok: true, symbol, order })
   } catch (err: any) {
     return NextResponse.json({ message: err.message }, { status: 502 })
   }
