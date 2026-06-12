@@ -1,14 +1,15 @@
 export const dynamic = 'force-dynamic'
 import { HistoryTable } from '@/components/history/HistoryTable'
-import { getOrders }    from '@/lib/alpaca'
+import { getOrders, type AlpacaCreds } from '@/lib/alpaca'
+import { getAlpacaCreds } from '@/lib/session'
 import { botGet }       from '@/lib/bot-api'
 import { demoHistory }  from '@/lib/api'
 import type { TradeRecord } from '@/types/trading'
 
-async function loadHistory(): Promise<{ trades: TradeRecord[]; live: boolean }> {
+async function loadHistory(creds: AlpacaCreds | null): Promise<{ trades: TradeRecord[]; live: boolean }> {
   const [botHistory, alpacaOrders] = await Promise.allSettled([
     botGet<TradeRecord[]>('/api/history'),
-    getOrders('closed', 100),
+    creds ? getOrders(creds, 'closed', 100) : Promise.reject(new Error('no creds')),
   ])
 
   const botTrades = botHistory.status === 'fulfilled' ? botHistory.value : []
@@ -46,7 +47,8 @@ async function loadHistory(): Promise<{ trades: TradeRecord[]; live: boolean }> 
 }
 
 export default async function HistoryPage() {
-  const { trades, live } = await loadHistory()
+  const creds = await getAlpacaCreds()
+  const { trades, live } = await loadHistory(creds)
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">

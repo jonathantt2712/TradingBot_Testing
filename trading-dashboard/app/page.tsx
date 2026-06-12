@@ -9,15 +9,16 @@ import { RefreshButton }   from '@/components/layout/RefreshButton'
 import {
   demoStats, demoPnL, demoRegime, demoSectors,
 } from '@/lib/api'
-import { getAccount, getPositions } from '@/lib/alpaca'
+import { getAccount, getPositions, type AlpacaCreds } from '@/lib/alpaca'
+import { getAlpacaCreds } from '@/lib/session'
 import { botGet } from '@/lib/bot-api'
 import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/trading'
 import type { AlpacaAccount } from '@/lib/alpaca'
 
-async function loadDashboard() {
+async function loadDashboard(creds: AlpacaCreds | null) {
   const [account, positions, stats, pnl, regime, sectors] = await Promise.allSettled([
-    getAccount(),
-    getPositions(),
+    creds ? getAccount(creds) : Promise.reject(new Error('no creds')),
+    creds ? getPositions(creds) : Promise.reject(new Error('no creds')),
     botGet<PortfolioStats>('/api/stats'),
     botGet<PnLPoint[]>('/api/pnl'),
     botGet<RegimeInfo>('/api/regime'),
@@ -48,7 +49,8 @@ async function loadDashboard() {
 }
 
 export default async function DashboardPage() {
-  const { stats, account, pnl, regime, sectors, positions, live } = await loadDashboard()
+  const creds = await getAlpacaCreds()
+  const { stats, account, pnl, regime, sectors, positions, live } = await loadDashboard(creds)
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">

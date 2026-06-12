@@ -1,16 +1,17 @@
 export const dynamic = 'force-dynamic'
 import { PnLAnalytics } from '@/components/pnl/PnLAnalytics'
 import { botGet }       from '@/lib/bot-api'
-import { getAccount, getOrders } from '@/lib/alpaca'
+import { getAccount, getOrders, type AlpacaCreds } from '@/lib/alpaca'
+import { getAlpacaCreds } from '@/lib/session'
 import { demoPnL, demoStats, demoHistory } from '@/lib/api'
 import type { PnLPoint, PortfolioStats, TradeRecord } from '@/types/trading'
 
-async function loadPnL() {
+async function loadPnL(creds: AlpacaCreds | null) {
   const [pnl, stats, account, orders] = await Promise.allSettled([
     botGet<PnLPoint[]>('/api/pnl'),
     botGet<PortfolioStats>('/api/stats'),
-    getAccount(),
-    getOrders('closed', 200),
+    creds ? getAccount(creds) : Promise.reject(new Error('no creds')),
+    creds ? getOrders(creds, 'closed', 200) : Promise.reject(new Error('no creds')),
   ])
 
   const resolvedStats = stats.status === 'fulfilled' ? stats.value : demoStats()
@@ -48,6 +49,7 @@ async function loadPnL() {
 }
 
 export default async function PnLPage() {
-  const { pnl, stats, trades, live } = await loadPnL()
+  const creds = await getAlpacaCreds()
+  const { pnl, stats, trades, live } = await loadPnL(creds)
   return <PnLAnalytics pnl={pnl} stats={stats} trades={trades} live={live} />
 }
