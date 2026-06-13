@@ -1,14 +1,30 @@
 // trading-dashboard/app/login/page.tsx
 'use client'
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import { signIn } from 'next-auth/react'
-import { Zap } from 'lucide-react'
+import { Zap, Eye, EyeOff } from 'lucide-react'
 
-export default function LoginPage() {
+const COUNTRY_CODES = [
+  { name: 'Israel',         code: '+972' },
+  { name: 'United States',  code: '+1' },
+  { name: 'United Kingdom', code: '+44' },
+  { name: 'Canada',         code: '+1' },
+  { name: 'Australia',      code: '+61' },
+  { name: 'Germany',        code: '+49' },
+  { name: 'France',         code: '+33' },
+  { name: 'India',          code: '+91' },
+]
+
+const PHONE_REGEX = /^\d{6,14}$/
+
+function LoginForm() {
   const router = useRouter()
   const [mode, setMode]         = useState<'signin' | 'signup'>('signin')
   const [email, setEmail]       = useState('')
+  const [countryCode, setCountryCode] = useState(COUNTRY_CODES[0].code)
+  const [phone, setPhone]       = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm]   = useState('')
   const [alpacaKeyId, setAlpacaKeyId]   = useState('')
@@ -16,6 +32,9 @@ export default function LoginPage() {
   const [alpacaPaper, setAlpacaPaper]   = useState(true)
   const [error, setError]     = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
+  const searchParams = useSearchParams()
+  const resetSuccess = searchParams.get('reset') === 'success'
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault()
@@ -43,12 +62,16 @@ export default function LoginPage() {
       setError('Passwords do not match')
       return
     }
+    if (!PHONE_REGEX.test(phone)) {
+      setError('Enter a valid phone number (digits only, 6-14 digits)')
+      return
+    }
     setLoading(true)
     try {
       const res = await fetch('/api/auth/signup', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ email, password, alpacaKeyId, alpacaSecret, alpacaPaper }),
+        body:    JSON.stringify({ email, phone: `${countryCode}${phone}`, password, alpacaKeyId, alpacaSecret, alpacaPaper }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -83,6 +106,10 @@ export default function LoginPage() {
           </div>
         </div>
 
+        {resetSuccess && (
+          <p className="text-xs text-bull">Password updated — sign in with your new password.</p>
+        )}
+
         <div className="flex rounded-lg bg-bg-base p-1 text-xs font-medium">
           <button
             type="button"
@@ -110,20 +137,60 @@ export default function LoginPage() {
           </div>
           <div>
             <label className="text-xs text-muted">Password</label>
-            <input
-              type="password" required value={password} onChange={e => setPassword(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 text-sm text-primary"
-            />
+            <div className="relative mt-1">
+              <input
+                type={showPassword ? 'text' : 'password'} required value={password} onChange={e => setPassword(e.target.value)}
+                className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 pr-9 text-sm text-primary"
+              />
+              <button
+                type="button" onClick={() => setShowPassword(s => !s)} tabIndex={-1}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-subtle"
+              >
+                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
           </div>
+
+          {mode === 'signin' && (
+            <Link href="/forgot-password" className="block text-right text-xs text-brand-cyan hover:underline">
+              Forgot password?
+            </Link>
+          )}
 
           {mode === 'signup' && (
             <>
               <div>
                 <label className="text-xs text-muted">Confirm password</label>
-                <input
-                  type="password" required value={confirm} onChange={e => setConfirm(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 text-sm text-primary"
-                />
+                <div className="relative mt-1">
+                  <input
+                    type={showPassword ? 'text' : 'password'} required value={confirm} onChange={e => setConfirm(e.target.value)}
+                    className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 pr-9 text-sm text-primary"
+                  />
+                  <button
+                    type="button" onClick={() => setShowPassword(s => !s)} tabIndex={-1}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-subtle"
+                  >
+                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-muted">Phone number</label>
+                <div className="mt-1 flex gap-2">
+                  <select
+                    value={countryCode} onChange={e => setCountryCode(e.target.value)}
+                    className="rounded-lg border border-bg-border bg-bg-base px-2 py-2 text-sm text-primary"
+                  >
+                    {COUNTRY_CODES.map(({ name, code }) => (
+                      <option key={name} value={code}>{name} ({code})</option>
+                    ))}
+                  </select>
+                  <input
+                    type="tel" required value={phone} onChange={e => setPhone(e.target.value)}
+                    pattern="\d{6,14}" title="Digits only, 6-14 digits"
+                    className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 text-sm text-primary"
+                  />
+                </div>
               </div>
               <div>
                 <label className="text-xs text-muted">Alpaca API Key ID</label>
@@ -160,5 +227,13 @@ export default function LoginPage() {
         </form>
       </div>
     </div>
+  )
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   )
 }
