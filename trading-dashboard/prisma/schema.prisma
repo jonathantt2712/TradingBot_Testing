@@ -8,11 +8,14 @@ datasource db {
 }
 
 model User {
-  id           String   @id @default(uuid())
-  email        String   @unique
-  passwordHash String
-  alpacaKeyId  String
-  alpacaSecret String
-  alpacaPaper  Boolean  @default(true)
-  createdAt    DateTime @default(now())
+  id               String    @id @default(uuid())
+  email            String    @unique
+  phone            String?
+  passwordHash     String
+  alpacaKeyId      String
+  alpacaSecret     String
+  alpacaPaper      Boolean   @default(true)
+  resetTokenHash   String?
+  resetTokenExpiry DateTime?
+  createdAt        DateTime  @default(now())
 }
