@@ -5,14 +5,15 @@ import type { AlpacaAccount } from '@/lib/alpaca'
 
 interface Props {
   account: AlpacaAccount | null
+  error?:  string | null
 }
 
-export function AccountBar({ account }: Props) {
+export function AccountBar({ account, error }: Props) {
   if (!account) {
     return (
       <div className="card px-4 py-3 flex items-center gap-2 text-xs text-muted animate-pulse-slow">
         <Wallet className="h-3.5 w-3.5" />
-        <span>Account data unavailable — check Alpaca API credentials</span>
+        <span>Account data unavailable — check Alpaca API credentials{error ? `: ${error}` : ''}</span>
       </div>
     )
   }

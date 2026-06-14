@@ -41,8 +41,9 @@ async function loadDashboard(creds: AlpacaCreds | null) {
   }
 
   return {
-    stats:     resolvedStats,
-    account:   account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
+    stats:       resolvedStats,
+    account:     account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
+    accountError: account.status === 'rejected' ? String((account.reason as Error)?.message ?? account.reason) : null,
     pnl:       pnl.status     === 'fulfilled' ? pnl.value     : demoPnL(),
     regime:    regime.status  === 'fulfilled' ? regime.value  : demoRegime(),
     sectors:   sectors.status === 'fulfilled' ? sectors.value : demoSectors(),
@@ -53,7 +54,7 @@ async function loadDashboard(creds: AlpacaCreds | null) {
 
 export default async function DashboardPage() {
   const creds = await getAlpacaCreds()
-  const { stats, account, pnl, regime, sectors, positions, live } = await loadDashboard(creds)
+  const { stats, account, accountError, pnl, regime, sectors, positions, live } = await loadDashboard(creds)
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">
@@ -73,7 +74,7 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      <AccountBar account={account} />
+      <AccountBar account={account} error={accountError} />
       <StatsCards stats={stats} />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_220px]">
