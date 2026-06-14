@@ -1,6 +1,0 @@
-{
-  "framework": "nextjs",
-  "installCommand": "cd trading-dashboard && npm install",
-  "buildCommand": "cd trading-dashboard && npm run build",
-  "outputDirectory": "trading-dashboard/.next"
-}
