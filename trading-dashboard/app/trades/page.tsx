@@ -4,7 +4,7 @@ import { TradeCard }       from '@/components/trades/TradeCard'
 import { ConfirmModal }    from '@/components/trades/ConfirmModal'
 import { RationaleModal }  from '@/components/trades/RationaleModal'
 import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
-import { demoRecommendations, demoRegime, api } from '@/lib/api'
+import { demoRegime, api } from '@/lib/api'
 import type { TradeRecommendation, RegimeInfo } from '@/types/trading'
 import { RefreshCw, Filter, Wifi, WifiOff, ChevronDown, ChevronUp, CheckCircle2, ShoppingCart, Loader2 } from 'lucide-react'
 import { useRouter } from 'next/navigation'
@@ -63,15 +63,19 @@ function byScore(a: TradeRecommendation, b: TradeRecommendation) {
   return b.composite_score - a.composite_score
 }
 
+/** Recommendation ids are regenerated on every scan, so identify a trade
+ *  by ticker+direction to track "already executed" across re-scans. */
+function tradeKey(t: TradeRecommendation): string {
+  return `${t.ticker}-${t.direction}`
+}
+
 export default function TradesPage() {
   const router = useRouter()
 
   const [selected,     setSelected]     = useState<TradeRecommendation | null>(null)
   const [infoTrade,    setInfoTrade]    = useState<TradeRecommendation | null>(null)
   const [filter,       setFilter]       = useState<'all' | 'LONG' | 'SHORT'>('all')
-  const [trades,       setTrades]       = useState<TradeRecommendation[]>(
-    () => [...demoRecommendations()].sort(byScore)
-  )
+  const [trades,       setTrades]       = useState<TradeRecommendation[]>([])
   const [regime,       setRegime]       = useState<RegimeInfo>(demoRegime())
   const [prices,       setPrices]       = useState<Record<string, number>>({})
   const [loading,      setLoading]      = useState(false)
@@ -109,11 +113,11 @@ export default function TradesPage() {
     setLoading(true)
     try {
       const [recs, reg] = await Promise.allSettled([api.recommendations(), api.regime()])
-      const newRecs = recs.status === 'fulfilled' && recs.value.length > 0
+      const newRecs = recs.status === 'fulfilled'
         ? [...recs.value].sort(byScore)
-        : [...demoRecommendations()].sort(byScore)
+        : []
       setTrades(newRecs)
-      setLive(recs.status === 'fulfilled' && recs.value.length > 0)
+      setLive(recs.status === 'fulfilled')
       if (reg.status === 'fulfilled') setRegime(reg.value)
       fetchPrices(newRecs)
     } catch {
@@ -148,7 +152,7 @@ export default function TradesPage() {
           take_profit:     trade.risk.take_profit,
           composite_score: trade.composite_score,
         })
-        const newIds = new Set(executedIds).add(trade.id)
+        const newIds = new Set(executedIds).add(tradeKey(trade))
         setExecutedIds(newIds)
         saveIds(newIds)
         const newRecs = [trade, ...loadExecRecs()]
@@ -162,7 +166,7 @@ export default function TradesPage() {
         const msg: string = err?.message ?? ''
         if (msg.includes('409')) {
           // Idempotency dedup — already submitted within 30s, mark as executed
-          const newIds = new Set(executedIds).add(trade.id)
+          const newIds = new Set(executedIds).add(tradeKey(trade))
           setExecutedIds(newIds)
           saveIds(newIds)
           toast.info(`${trade.ticker} already submitted`, { description: 'Skipped duplicate within 30s' })
@@ -183,7 +187,7 @@ export default function TradesPage() {
   }
 
   function handleExecuted(trade: TradeRecommendation) {
-    const newIds = new Set(executedIds).add(trade.id)
+    const newIds = new Set(executedIds).add(tradeKey(trade))
     setExecutedIds(newIds)
     saveIds(newIds)
     const newRecs = [trade, ...executedRecs]
@@ -195,7 +199,7 @@ export default function TradesPage() {
   }
 
   const active = trades
-    .filter(t => !executedIds.has(t.id))
+    .filter(t => !executedIds.has(tradeKey(t)))
     .filter(t => filter === 'all' || t.direction === filter)
 
   return (
@@ -259,7 +263,9 @@ export default function TradesPage() {
           {active.length === 0 ? (
             <div className="col-span-full card flex flex-col items-center justify-center py-16 text-center">
               <Filter className="h-8 w-8 text-muted mb-3" />
-              <p className="text-sm text-muted">No signals match the current filter.</p>
+              <p className="text-sm text-muted">
+                {trades.length === 0 ? 'No available data' : 'No signals match the current filter.'}
+              </p>
             </div>
           ) : (
             active.map((t, i) => (

@@ -1,7 +1,7 @@
 'use client'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, BarChart, Bar,
+  Tooltip, ResponsiveContainer, ReferenceLine, BarChart, Bar, Cell,
 } from 'recharts'
 import { useState } from 'react'
 import type { PnLPoint } from '@/types/trading'
@@ -104,13 +104,11 @@ export function PnLChart({ data }: Props) {
               />
               <Tooltip content={<CustomTooltip />} />
               <ReferenceLine y={0} stroke="#334155" />
-              <Bar
-                dataKey="daily_pnl"
-                radius={[2, 2, 0, 0]}
-                fill="#22C55E"
-                // color each bar individually
-                label={false}
-              />
+              <Bar dataKey="daily_pnl" radius={[2, 2, 0, 0]}>
+                {data.map(d => (
+                  <Cell key={d.date} fill={d.daily_pnl >= 0 ? '#22C55E' : '#EF4444'} />
+                ))}
+              </Bar>
             </BarChart>
           )}
         </ResponsiveContainer>

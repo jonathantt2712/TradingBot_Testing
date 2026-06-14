@@ -19,11 +19,16 @@ tsconfig.tsbuildinfo
 
 # ── Per-machine Claude Code settings ─────────────────────────────────────────
 .claude/settings.local.json
+.claude/settings.json
 
 # ── Runtime data & logs (regenerated while the bot runs) ────────────────────
 bot_data/
 trading_bot/data/*.json
 *.log
 push_log.txt
+logs/
+
+# ── Local Playwright MCP debug artifacts ─────────────────────────────────────
+.playwright-mcp/
 
 .vercel

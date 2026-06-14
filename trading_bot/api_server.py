@@ -23,7 +23,7 @@ import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +52,19 @@ def _is_market_open() -> bool:
     open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
     close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
     return open_t <= now <= close_t
+
+
+def _next_market_open() -> datetime:
+    """Return the next US equities market open (09:30 ET Mon–Fri) as a naive UTC datetime."""
+    if _ET is None:
+        return datetime.utcnow() + timedelta(hours=1)
+    now = datetime.now(_ET)
+    candidate = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now >= candidate:
+        candidate += timedelta(days=1)
+    while candidate.weekday() >= 5:  # Saturday=5, Sunday=6
+        candidate += timedelta(days=1)
+    return candidate.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
@@ -321,43 +334,38 @@ async def _fetch_multi_bars(
     """Fetch recent bars for many symbols.
 
     The Alpaca multi-symbol bars endpoint applies `limit` to the TOTAL
-    number of bars in the response (across all symbols, alphabetically),
-    not per symbol. Requesting 100+ symbols with limit=100 silently
-    starves every symbol but the first. To get ~`limit` bars per symbol
-    we chunk the symbol list and request a per-chunk total capped at
-    Alpaca's 10000 max page size.
+    number of bars in the response (across all symbols, alphabetically), not
+    per symbol -- a symbol early in the alphabet with abundant data can
+    consume the whole budget and starve every symbol after it. Fetch each
+    symbol individually (concurrently) so every symbol gets up to `limit`
+    bars.
     """
     if not _AGENTS_AVAILABLE or not symbols:
         return {}
     start = (datetime.utcnow() - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    max_page = 10000
-    chunk_size = max(1, min(len(symbols), max_page // limit))
-
-    result: Dict[str, Any] = {}
-    for i in range(0, len(symbols), chunk_size):
-        chunk = symbols[i:i + chunk_size]
-        page_limit = min(max_page, limit * len(chunk))
+    async def _fetch_one(sym: str):
         try:
             async with session.get(
-                f"{_DATA_BASE}/v2/stocks/bars",
-                params={"symbols": ",".join(chunk), "timeframe": timeframe,
-                        "start": start, "limit": str(page_limit), "feed": "iex"},
+                f"{_DATA_BASE}/v2/stocks/{sym}/bars",
+                params={"timeframe": timeframe, "start": start,
+                        "limit": str(limit), "feed": "iex"},
                 headers=_ALPACA_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=20),
             ) as r:
                 if r.status != 200:
-                    logger.warning("Multi-bars fetch returned %s", r.status)
-                    continue
+                    logger.warning("Bars fetch for %s returned %s", sym, r.status)
+                    return sym, None
                 payload = await r.json()
         except Exception as exc:
-            logger.warning("Multi-bars fetch failed: %s", exc)
-            continue
+            logger.warning("Bars fetch for %s failed: %s", sym, exc)
+            return sym, None
+        return sym, _bars_to_df(payload.get("bars") or [])
 
-        for sym, bars_list in (payload.get("bars") or {}).items():
-            df = _bars_to_df(bars_list)
-            if df is not None and len(df) > 0:
-                result[sym] = df
+    result: Dict[str, Any] = {}
+    for sym, df in await asyncio.gather(*(_fetch_one(s) for s in symbols)):
+        if df is not None and len(df) > 0:
+            result[sym] = df
 
     return result
 
@@ -554,6 +562,11 @@ def _update_strategy_weights() -> None:
 # === Signal revalidation ===
 
 async def _revalidate_expired_recs(session: aiohttp.ClientSession) -> None:
+    if not _is_market_open():
+        # Don't reap recommendations while the market is closed — keep them
+        # available until the next session re-scans.
+        return
+
     recs = _load(RECS_FILE, [])
     if not recs:
         return
@@ -736,7 +749,7 @@ async def _run_market_scan() -> None:
         vix_approx = 0.0
         if vixy_df is not None and len(vixy_df) > 0:
             try:
-                vix_approx = round(float(vixy_df.iloc[-1]["close"]) * 10, 1)
+                vix_approx = round(float(vixy_df.iloc[-1]["close"]), 1)
             except Exception:
                 vix_approx = 0.0
 
@@ -864,7 +877,11 @@ async def _run_market_scan() -> None:
                 rationale   = f"fallback chg={chg_pct:+.1f}% intra={intra_pct:+.1f}%"
 
             dollar_rsk  = round(abs(entry - stop_loss) * qty, 2)
-            expires_iso = (datetime.utcnow() + timedelta(minutes=win_mins)).isoformat()
+            # Off-hours recs stay valid until the next market open (+ the usual
+            # window) so they're still fresh for Monday instead of showing as
+            # "expired" all weekend.
+            expires_base = datetime.utcnow() if _is_market_open() else _next_market_open()
+            expires_iso  = (expires_base + timedelta(minutes=win_mins)).isoformat()
 
             recs.append({
                 "id":              f"{sym}-{int(datetime.utcnow().timestamp())}",
@@ -904,7 +921,10 @@ async def _run_market_scan() -> None:
                 r["hot_sector"] = r["sector"] in top_sectors
 
         recs.sort(key=lambda x: x["composite_score"], reverse=True)
-        _save(RECS_FILE, recs)
+        if recs or _is_market_open():
+            _save(RECS_FILE, recs)
+        # else: market closed and this scan found nothing — keep whatever
+        # recommendations are already on disk available until Monday.
 
         scanned_n = len(symbols_raw)
         skipped_n = scanned_n - len(recs)

@@ -43,7 +43,8 @@ export default function ForgotPasswordPage() {
 
         {submitted ? (
           <p className="text-sm text-subtle">
-            If an account exists for that email, we&apos;ve sent a link to reset your password.
+            If an account exists for that email, we&apos;ve sent a temporary password.
+            Sign in with it and you&apos;ll be asked to choose a new one.
           </p>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-3">

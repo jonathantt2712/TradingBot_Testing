@@ -21,11 +21,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         password: { label: 'Password', type: 'password' },
       },
       async authorize(credentials) {
-        const email    = credentials?.email as string | undefined
+        const email    = (credentials?.email as string | undefined)?.trim()
         const password = credentials?.password as string | undefined
         if (!email || !password) return null
 
-        const user = await prisma.user.findUnique({ where: { email } })
+        const user = await prisma.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } })
 
         // Always run bcrypt.compare, even if the user doesn't exist, so the
         // response time doesn't leak whether the email is registered.
@@ -34,17 +34,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         if (!user || !valid) return null
 
         return {
-          id:           user.id,
-          email:        user.email,
-          alpacaKeyId:  decrypt(user.alpacaKeyId),
-          alpacaSecret: decrypt(user.alpacaSecret),
-          alpacaPaper:  user.alpacaPaper,
+          id:                 user.id,
+          email:              user.email,
+          alpacaKeyId:        decrypt(user.alpacaKeyId),
+          alpacaSecret:       decrypt(user.alpacaSecret),
+          alpacaPaper:        user.alpacaPaper,
+          mustChangePassword: user.mustChangePassword,
         }
       },
     }),
   ],
   callbacks: {
-    async jwt({ token, user }) {
+    async jwt({ token, user, trigger, session }) {
       if (user) {
         token.userId = user.id as string
         token.alpaca = {
@@ -52,11 +53,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           secret: (user as unknown as { alpacaSecret: string }).alpacaSecret,
           paper:  (user as unknown as { alpacaPaper: boolean }).alpacaPaper,
         }
+        token.mustChangePassword = (user as unknown as { mustChangePassword: boolean }).mustChangePassword
+      }
+      if (trigger === 'update' && session?.mustChangePassword === false) {
+        token.mustChangePassword = false
       }
       return token
     },
     async session({ session, token }) {
       session.user.id = token.userId
+      session.user.mustChangePassword = token.mustChangePassword
       session.alpaca  = token.alpaca
       return session
     },

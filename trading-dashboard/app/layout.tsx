@@ -18,6 +18,35 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const session = await auth()
   const email = session?.user?.email ?? null
 
+  const toaster = (
+    <Toaster
+      theme="dark"
+      toastOptions={{
+        style: {
+          background: '#0F172A',
+          border: '1px solid #1E293B',
+          color: '#F1F5F9',
+        },
+      }}
+    />
+  )
+
+  // Unauthenticated requests are redirected to /login by middleware, so a
+  // missing session means this is the login page — render it without the
+  // dashboard chrome.
+  if (!email) {
+    return (
+      <html lang="en" className="dark">
+        <body className="h-dvh bg-bg-base text-primary">
+          <SessionProvider>
+            {children}
+            {toaster}
+          </SessionProvider>
+        </body>
+      </html>
+    )
+  }
+
   return (
     <html lang="en" className="dark">
       <body className="flex h-dvh overflow-hidden bg-bg-base text-primary">
@@ -27,16 +56,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             {children}
           </main>
           <MobileNav />
-          <Toaster
-            theme="dark"
-            toastOptions={{
-              style: {
-                background: '#0F172A',
-                border: '1px solid #1E293B',
-                color: '#F1F5F9',
-              },
-            }}
-          />
+          {toaster}
         </SessionProvider>
       </body>
     </html>

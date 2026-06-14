@@ -2,16 +2,29 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
 
-const PUBLIC_PATHS = ['/login', '/forgot-password', '/reset-password']
+const PUBLIC_PATHS = ['/login', '/forgot-password']
+const RESET_PASSWORD_PATH = '/reset-password'
 
 export default auth((req) => {
   const isLoggedIn = !!req.auth
-  const isPublicPage = PUBLIC_PATHS.includes(req.nextUrl.pathname)
+  const pathname = req.nextUrl.pathname
+  const isPublicPage = PUBLIC_PATHS.includes(pathname)
 
-  if (!isLoggedIn && !isPublicPage) {
-    return NextResponse.redirect(new URL('/login', req.nextUrl))
+  if (!isLoggedIn) {
+    if (pathname === RESET_PASSWORD_PATH || (!isPublicPage)) {
+      return NextResponse.redirect(new URL('/login', req.nextUrl))
+    }
+    return
   }
-  if (isLoggedIn && isPublicPage) {
+
+  const mustChangePassword = req.auth?.user?.mustChangePassword
+  if (mustChangePassword && pathname !== RESET_PASSWORD_PATH) {
+    return NextResponse.redirect(new URL(RESET_PASSWORD_PATH, req.nextUrl))
+  }
+  if (!mustChangePassword && pathname === RESET_PASSWORD_PATH) {
+    return NextResponse.redirect(new URL('/', req.nextUrl))
+  }
+  if (isPublicPage) {
     return NextResponse.redirect(new URL('/', req.nextUrl))
   }
 })

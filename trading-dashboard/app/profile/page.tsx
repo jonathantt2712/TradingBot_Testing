@@ -5,6 +5,7 @@ import { prisma } from '@/lib/prisma'
 import { ProfileCard } from '@/components/profile/ProfileCard'
 import { AccountDetailsCard } from '@/components/profile/AccountDetailsCard'
 import { SecurityCard } from '@/components/profile/SecurityCard'
+import { AlpacaAccountCard } from '@/components/profile/AlpacaAccountCard'
 
 export default async function ProfilePage() {
   const session = await auth()
@@ -42,6 +43,8 @@ export default async function ProfilePage() {
         <AccountDetailsCard initialPhone={user.phone ?? ''} />
 
         <SecurityCard />
+
+        <AlpacaAccountCard />
       </div>
     </div>
   )

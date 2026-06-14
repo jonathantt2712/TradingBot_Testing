@@ -1,6 +1,7 @@
 'use client'
 import { X, ArrowUpRight, ArrowDownLeft, Lightbulb, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { cn, formatPrice, regimeLabel, regimeColor, bgColorForScore } from '@/lib/utils'
+import { humanizeRationale } from '@/lib/explainAgent'
 import type { TradeRecommendation, AgentEvaluation } from '@/types/trading'
 
 interface Props {
@@ -132,7 +133,7 @@ export function RationaleModal({ trade, onClose }: Props) {
           {trade.rationale && (
             <div className="rounded-lg border border-bg-border bg-bg-base px-4 py-3">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-muted mb-1">Signal summary</p>
-              <p className="text-sm text-subtle">{trade.rationale}</p>
+              <p className="text-sm text-subtle">{humanizeRationale('technical', trade.rationale) ?? trade.rationale}</p>
             </div>
           )}
 
@@ -160,7 +161,7 @@ export function RationaleModal({ trade, onClose }: Props) {
                     )}
                   </div>
                   <p className="text-xs text-subtle">
-                    {ev?.rationale || AGENT_BLURBS[role]}
+                    {humanizeRationale(role, ev?.rationale) ?? AGENT_BLURBS[role]}
                   </p>
                 </div>
               )

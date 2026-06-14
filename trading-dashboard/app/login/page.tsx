@@ -1,7 +1,7 @@
 // trading-dashboard/app/login/page.tsx
 'use client'
-import { Suspense, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { signIn } from 'next-auth/react'
 import { Zap, Eye, EyeOff } from 'lucide-react'
@@ -19,7 +19,7 @@ const COUNTRY_CODES = [
 
 const PHONE_REGEX = /^\d{6,14}$/
 
-function LoginForm() {
+export default function LoginPage() {
   const router = useRouter()
   const [mode, setMode]         = useState<'signin' | 'signup'>('signin')
   const [email, setEmail]       = useState('')
@@ -33,8 +33,6 @@ function LoginForm() {
   const [error, setError]     = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
-  const searchParams = useSearchParams()
-  const resetSuccess = searchParams.get('reset') === 'success'
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault()
@@ -105,10 +103,6 @@ function LoginForm() {
             <p className="text-[10px] text-muted leading-tight">AI Intelligence</p>
           </div>
         </div>
-
-        {resetSuccess && (
-          <p className="text-xs text-bull">Password updated — sign in with your new password.</p>
-        )}
 
         <div className="flex rounded-lg bg-bg-base p-1 text-xs font-medium">
           <button
@@ -227,13 +221,5 @@ function LoginForm() {
         </form>
       </div>
     </div>
-  )
-}
-
-export default function LoginPage() {
-  return (
-    <Suspense fallback={null}>
-      <LoginForm />
-    </Suspense>
   )
 }

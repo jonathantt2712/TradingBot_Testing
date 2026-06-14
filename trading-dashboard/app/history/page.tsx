@@ -12,7 +12,11 @@ async function loadHistory(creds: AlpacaCreds | null): Promise<{ trades: TradeRe
     creds ? getOrders(creds, 'closed', 100) : Promise.reject(new Error('no creds')),
   ])
 
-  const botTrades = botHistory.status === 'fulfilled' ? botHistory.value : []
+  // Bot history records use `executed_at`, not `opened_at` — normalize so
+  // sorting/formatting below has a consistent field to work with.
+  const botTrades: TradeRecord[] = botHistory.status === 'fulfilled'
+    ? botHistory.value.map(t => ({ ...t, opened_at: t.opened_at ?? (t as unknown as { executed_at: string }).executed_at }))
+    : []
 
   // Convert Alpaca filled orders → TradeRecord shape
   const fromAlpaca: TradeRecord[] = alpacaOrders.status === 'fulfilled'

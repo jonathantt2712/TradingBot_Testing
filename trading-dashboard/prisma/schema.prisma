@@ -15,7 +15,6 @@ model User {
   alpacaKeyId      String
   alpacaSecret     String
   alpacaPaper      Boolean   @default(true)
-  resetTokenHash   String?
-  resetTokenExpiry DateTime?
+  mustChangePassword Boolean @default(false)
   createdAt        DateTime  @default(now())
 }

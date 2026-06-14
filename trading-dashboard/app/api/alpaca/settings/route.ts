@@ -34,14 +34,28 @@ export async function POST(req: Request) {
 
   const paper = body.alpacaPaper !== false
   const base = paper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets'
+  const otherBase = paper ? 'https://api.alpaca.markets' : 'https://paper-api.alpaca.markets'
 
-  const verify = await fetch(`${base}/v2/account`, {
-    headers: {
-      'APCA-API-KEY-ID':     body.alpacaKeyId,
-      'APCA-API-SECRET-KEY': body.alpacaSecret,
-    },
-  })
+  const alpacaHeaders = {
+    'APCA-API-KEY-ID':     body.alpacaKeyId,
+    'APCA-API-SECRET-KEY': body.alpacaSecret,
+  }
+
+  let verify: Response
+  try {
+    verify = await fetch(`${base}/v2/account`, { headers: alpacaHeaders })
+  } catch {
+    return NextResponse.json({ error: 'Could not reach Alpaca to verify credentials. Please try again.' }, { status: 502 })
+  }
+
   if (!verify.ok) {
+    const otherVerify = await fetch(`${otherBase}/v2/account`, { headers: alpacaHeaders }).catch(() => null)
+    if (otherVerify?.ok) {
+      const hint = paper
+        ? 'These look like live trading keys. Select "Live trading" and try again.'
+        : 'These look like paper trading keys. Select "Paper trading" and try again.'
+      return NextResponse.json({ error: hint }, { status: 400 })
+    }
     return NextResponse.json({ error: 'Could not verify Alpaca credentials' }, { status: 400 })
   }
 

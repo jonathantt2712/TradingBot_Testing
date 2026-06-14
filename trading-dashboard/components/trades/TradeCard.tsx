@@ -68,12 +68,20 @@ export function TradeCard({ trade, onExecute, onInfo, currentPrice }: Props) {
 
   return (
     <div className={cn(
-      'card p-5 animate-slide-up transition-all duration-200 hover:border-bg-hover',
+      'relative card p-5 animate-slide-up transition-all duration-200 hover:border-bg-hover',
       isLong ? 'shadow-glow-bull' : 'shadow-glow-bear',
       isExpiring && 'ring-1 ring-caution/30',
       isExpired  && 'opacity-70',
     )}>
-      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2 mb-4">
+      <button
+        onClick={() => onInfo(trade)}
+        title="Why this recommendation?"
+        className="absolute top-2 right-2 z-10 flex h-7 w-7 items-center justify-center rounded-full text-muted hover:text-brand-cyan hover:bg-bg-hover transition-colors"
+      >
+        <Info className="h-4 w-4" />
+      </button>
+
+      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2 mb-4 pr-7">
         <div className="flex items-center gap-3 min-w-0">
           <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border', dirBg)}>
             {isLong
@@ -89,13 +97,6 @@ export function TradeCard({ trade, onExecute, onInfo, currentPrice }: Props) {
                   <Flame className="h-2.5 w-2.5" /> HOT
                 </span>
               )}
-              <button
-                onClick={() => onInfo(trade)}
-                title="Why this recommendation?"
-                className="text-muted hover:text-brand-cyan transition-colors"
-              >
-                <Info className="h-3.5 w-3.5" />
-              </button>
             </div>
             <p className="text-xs text-muted truncate">{trade.sector}</p>
           </div>
