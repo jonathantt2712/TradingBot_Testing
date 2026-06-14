@@ -304,6 +304,7 @@ async def _get_account_equity(session: aiohttp.ClientSession) -> float:
             if r.status == 200:
                 data = await r.json()
                 return float(data.get("equity") or data.get("cash") or 0.0)
+            logger.error("Account equity fetch -> %s: %s", r.status, await r.text())
     except Exception as exc:
         logger.error("Could not fetch account equity — recs will be unsized: %s", exc)
     return 0.0
