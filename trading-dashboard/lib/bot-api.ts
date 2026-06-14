@@ -28,7 +28,6 @@ export async function botGet<T>(path: string): Promise<T> {
     headers:   BOT_HEADERS,
     signal:    abortAfter(BOT_TIMEOUT),
     cache:     'no-store',
-    next:      { revalidate: 0 },
   })
   if (!res.ok) throw new Error(`Bot API ${path} -> ${res.status}`)
   return res.json()
