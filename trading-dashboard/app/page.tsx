@@ -25,7 +25,10 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     botGet<SectorStat[]>('/api/sectors'),
   ])
 
-  if (account.status === 'rejected')   console.error('getAccount failed:', account.reason)
+  if (account.status === 'rejected') {
+    console.error('getAccount failed:', account.reason)
+    if (creds) console.error('getAccount creds used:', { paper: creds.paper, keyId: `${creds.keyId.slice(0, 4)}...${creds.keyId.slice(-4)}` })
+  }
   if (positions.status === 'rejected') console.error('getPositions failed:', positions.reason)
 
   const resolvedStats: PortfolioStats = stats.status === 'fulfilled' ? stats.value : demoStats()
