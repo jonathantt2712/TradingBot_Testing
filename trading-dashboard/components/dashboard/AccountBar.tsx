@@ -1,5 +1,6 @@
 'use client'
-import { Wallet, TrendingUp, TrendingDown, DollarSign } from 'lucide-react'
+import { useState } from 'react'
+import { Wallet, TrendingUp, TrendingDown, DollarSign, Copy, Check } from 'lucide-react'
 import { cn, formatCurrency } from '@/lib/utils'
 import type { AlpacaAccount } from '@/lib/alpaca'
 
@@ -9,11 +10,28 @@ interface Props {
 }
 
 export function AccountBar({ account, error }: Props) {
+  const [copied, setCopied] = useState(false)
+
   if (!account) {
+    const message = `Account data unavailable — check Alpaca API credentials${error ? `: ${error}` : ''}`
     return (
       <div className="card px-4 py-3 flex items-center gap-2 text-xs text-muted animate-pulse-slow">
-        <Wallet className="h-3.5 w-3.5" />
-        <span>Account data unavailable — check Alpaca API credentials{error ? `: ${error}` : ''}</span>
+        <Wallet className="h-3.5 w-3.5 shrink-0" />
+        <span className="flex-1">{message}</span>
+        {error && (
+          <button
+            type="button"
+            onClick={() => {
+              navigator.clipboard.writeText(message)
+              setCopied(true)
+              setTimeout(() => setCopied(false), 1500)
+            }}
+            className="shrink-0 flex items-center gap-1 rounded-md border border-bg-border px-2 py-1 text-[10px] hover:bg-bg-elevated"
+          >
+            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        )}
       </div>
     )
   }
