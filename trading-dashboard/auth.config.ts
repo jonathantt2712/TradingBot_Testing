@@ -30,6 +30,9 @@ export const authConfig: NextAuthConfig = {
       if (trigger === 'update' && session?.mustChangePassword === false) {
         token.mustChangePassword = false
       }
+      if (trigger === 'update' && session?.alpaca) {
+        token.alpaca = session.alpaca
+      }
       return token
     },
     async session({ session, token }) {

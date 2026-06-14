@@ -1,10 +1,12 @@
 'use client'
 import { useState, useEffect } from 'react'
+import { useSession } from 'next-auth/react'
 import { Key } from 'lucide-react'
 import { toast } from 'sonner'
 import { ProfileCard } from './ProfileCard'
 
 export function AlpacaAccountCard() {
+  const { update } = useSession()
   const [keyId, setKeyId]   = useState('')
   const [secret, setSecret] = useState('')
   const [paper, setPaper]   = useState(true)
@@ -35,7 +37,8 @@ export function AlpacaAccountCard() {
         toast.error(d.error ?? 'Could not save')
         return
       }
-      toast.success('Alpaca credentials updated', { description: 'Sign out and back in for changes to take effect' })
+      await update({ alpaca: { keyId, secret, paper } })
+      toast.success('Alpaca credentials updated')
       setKeyId('')
       setSecret('')
       setCurrent({ alpacaKeyId: keyId, alpacaPaper: paper })
