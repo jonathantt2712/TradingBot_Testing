@@ -1,6 +1,9 @@
 // trading-dashboard/middleware.ts
+import NextAuth from 'next-auth'
 import { NextResponse } from 'next/server'
-import { auth } from '@/auth'
+import { authConfig } from './auth.config'
+
+const { auth } = NextAuth(authConfig)
 
 const PUBLIC_PATHS = ['/login', '/forgot-password']
 const RESET_PASSWORD_PATH = '/reset-password'
