@@ -31,6 +31,10 @@ async function loadDashboard(creds: AlpacaCreds | null) {
   }
   if (positions.status === 'rejected') console.error('getPositions failed:', positions.reason)
 
+  const accountErrorDetail = account.status === 'rejected'
+    ? `${String((account.reason as Error)?.message ?? account.reason)}${creds ? ` (paper=${creds.paper}, keyId=${creds.keyId.slice(0, 4)}...${creds.keyId.slice(-4)})` : ' (no creds on session)'}`
+    : null
+
   const resolvedStats: PortfolioStats = stats.status === 'fulfilled' ? stats.value : demoStats()
   if (account.status === 'fulfilled') {
     const acc = account.value
@@ -46,7 +50,7 @@ async function loadDashboard(creds: AlpacaCreds | null) {
   return {
     stats:       resolvedStats,
     account:     account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
-    accountError: account.status === 'rejected' ? String((account.reason as Error)?.message ?? account.reason) : null,
+    accountError: accountErrorDetail,
     pnl:       pnl.status     === 'fulfilled' ? pnl.value     : demoPnL(),
     regime:    regime.status  === 'fulfilled' ? regime.value  : demoRegime(),
     sectors:   sectors.status === 'fulfilled' ? sectors.value : demoSectors(),
