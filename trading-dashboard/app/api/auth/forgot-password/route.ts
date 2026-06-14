@@ -17,7 +17,9 @@ export async function POST(req: Request) {
         data: { resetTokenHash: hash, resetTokenExpiry: expiresAt },
       })
 
-      const origin = req.headers.get('origin') ?? new URL(req.url).origin
+      const host = req.headers.get('x-forwarded-host') ?? req.headers.get('host')
+      const protocol = req.headers.get('x-forwarded-proto') ?? new URL(req.url).protocol.replace(':', '')
+      const origin = host ? `${protocol}://${host}` : new URL(req.url).origin
       const resetUrl = `${origin}/reset-password?token=${token}`
 
       try {

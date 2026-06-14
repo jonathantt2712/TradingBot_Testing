@@ -19,7 +19,11 @@ import { POST } from '@/app/api/auth/forgot-password/route'
 function makeRequest(body: unknown) {
   return new Request('http://localhost/api/auth/forgot-password', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', origin: 'http://localhost:3000' },
+    headers: {
+      'Content-Type': 'application/json',
+      host: 'localhost:3000',
+      'x-forwarded-proto': 'http',
+    },
     body: JSON.stringify(body),
   })
 }
