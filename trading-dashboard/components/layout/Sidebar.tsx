@@ -4,7 +4,7 @@ import { usePathname } from 'next/navigation'
 import { signOut } from 'next-auth/react'
 import {
   LayoutDashboard, TrendingUp, History, BarChart2,
-  Zap, Settings, ExternalLink, FlaskConical, LogOut,
+  Zap, Settings, ExternalLink, FlaskConical, LogOut, User,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -38,6 +38,16 @@ export function MobileNav() {
           </Link>
         )
       })}
+      <Link
+        href="/profile"
+        className={cn(
+          'flex flex-col items-center gap-0.5 px-2 py-2 rounded-lg text-[10px] font-medium transition-colors min-w-0',
+          path === '/profile' ? 'text-brand-cyan' : 'text-muted hover:text-primary',
+        )}
+      >
+        <User className="h-5 w-5 shrink-0" />
+        <span>Profile</span>
+      </Link>
       <Link
         href="/settings"
         className={cn(
@@ -100,9 +110,14 @@ export function Sidebar({ email }: SidebarProps) {
       {/* Footer */}
       <div className="border-t border-bg-border px-3 py-3 space-y-0.5">
         {email && (
-          <div className="px-3 py-2 text-xs text-muted truncate" title={email}>
-            {email}
-          </div>
+          <Link
+            href="/profile"
+            className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-subtle hover:bg-bg-hover hover:text-primary transition-colors"
+            title={email}
+          >
+            <User className="h-4 w-4 shrink-0" />
+            <span className="truncate">{email}</span>
+          </Link>
         )}
         <Link
           href="/settings"
