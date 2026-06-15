@@ -7,6 +7,7 @@ export interface AgentEvaluation {
   score:      number   // 1-100
   confidence: number   // 0-1
   rationale?: string
+  reasoning?: Record<string, any>
 }
 
 export interface RiskPlan {
@@ -75,6 +76,7 @@ export interface RegimeInfo {
   qqq_day_chg: number
   rationale:  string
   timestamp:  string
+  reasoning?: Record<string, any>
 }
 
 export interface SectorStat {
