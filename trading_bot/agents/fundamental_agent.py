@@ -7,14 +7,12 @@ Provider priority (automatic, based on available env keys):
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any
 
 from core.base_agent import NEUTRAL_SCORE, BaseAgent, clamp_score
 from core.enums import AgentRole
-from core.llm_adapter import LLMAdapter
+from core.llm_adapter import LLMAdapter, parse_llm_json
 from core.models import AgentEvaluation, AnalysisContext
 
 logger = logging.getLogger(__name__)
@@ -29,36 +27,6 @@ _SYSTEM_PROMPT = (
     "M&A, regulatory events, macro catalysts. "
     "If there is no news, return score=50 confidence=0.1 rationale='no news'."
 )
-
-# Regex to extract JSON object from LLM response (handles preamble, markdown fences, etc.)
-_JSON_RE = re.compile(r'\{[^{}]*"score"\s*:\s*\d+[^{}]*\}', re.DOTALL)
-
-
-def _parse_llm_response(raw: str) -> "dict[str, Any] | None":
-    """Robustly extract JSON from LLM response — handles markdown fences and preamble."""
-    if not raw:
-        return None
-    text = raw.strip()
-    # Strip markdown code fences
-    if "```" in text:
-        parts = text.split("```")
-        text = parts[1] if len(parts) > 1 else text
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    # Try direct parse first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # Fallback: find the JSON object containing "score"
-    m = _JSON_RE.search(raw)
-    if m:
-        try:
-            return json.loads(m.group())
-        except json.JSONDecodeError:
-            pass
-    return None
 
 
 class FundamentalAgent(BaseAgent):
@@ -80,6 +48,7 @@ class FundamentalAgent(BaseAgent):
         self._llm         = LLMAdapter(
             gemini_key=gemini_api_key,
             anthropic_key=anthropic_api_key,
+            anthropic_model=model,
         )
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
@@ -105,7 +74,7 @@ class FundamentalAgent(BaseAgent):
             user_msg = f"Ticker: {ctx.ticker}\n\nRecent news:\n{news_text}"
             try:
                 raw = await self._llm.chat(user_msg, system=_SYSTEM_PROMPT)
-                data = _parse_llm_response(raw)
+                data = parse_llm_json(raw)
                 if data is not None:
                     score      = clamp_score(float(data.get("score", 50)))
                     confidence = float(max(0.1, min(1.0, data.get("confidence", 0.6))))
