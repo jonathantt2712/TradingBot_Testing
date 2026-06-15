@@ -77,12 +77,22 @@ class VisionAgent(BaseAgent):
             parsed = parse_llm_json(text)
             if parsed is None:
                 raise ValueError(f"unparseable vision response: {text[:120]!r}")
+            raw_score = clamp_score(int(parsed["score"]))
+            pattern   = parsed.get("pattern", "")
+            reason    = parsed.get("reason", "")
             return AgentEvaluation(
                 role=self.role,
-                score=clamp_score(int(parsed["score"])),
+                score=raw_score,
                 confidence=0.7,
-                rationale=f"[{self._llm.provider}] {parsed.get('pattern', '')}: {parsed.get('reason', '')}",
+                rationale=f"[{self._llm.provider}] {pattern}: {reason}",
                 data=parsed,
+                reasoning={
+                    "provider": self._llm.provider,
+                    "pattern_identified": pattern,
+                    "analysis": reason,
+                    "raw_score": raw_score,
+                    "note": "Score 1=strong bearish chart setup, 50=neutral, 100=strong bullish chart setup",
+                },
             )
         except Exception as exc:
             logger.debug("VisionAgent failed for %s: %s", ctx.ticker, exc)

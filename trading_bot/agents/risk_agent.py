@@ -50,6 +50,19 @@ class RiskAgent(BaseAgent):
 
         score = self._viability_score(plan, ctx)
         veto = plan.risk_reward < self.cfg.min_risk_reward or plan.qty <= 0
+
+        veto_reason: Optional[str] = None
+        if plan.qty <= 0:
+            veto_reason = "Position size rounds to zero — trade not viable at current equity/price"
+        elif plan.risk_reward < self.cfg.min_risk_reward:
+            veto_reason = (
+                f"R/R {plan.risk_reward:.2f} below minimum {self.cfg.min_risk_reward:.1f} — "
+                "not enough reward for the risk taken"
+            )
+
+        atr = self._atr(ctx.bars)
+        equity = float(ctx.account.get("equity", 0.0))
+
         return AgentEvaluation(
             role=self.role,
             score=clamp_score(score),
@@ -61,6 +74,37 @@ class RiskAgent(BaseAgent):
                 + (" VETO" if veto else "")
             ),
             data={"plan": plan},
+            reasoning={
+                "veto": veto,
+                "veto_reason": veto_reason,
+                "plan": {
+                    "entry":              round(plan.entry, 4),
+                    "stop_loss":          round(plan.stop_loss, 4),
+                    "take_profit":        round(plan.take_profit, 4),
+                    "qty":                plan.qty,
+                    "risk_reward":        round(plan.risk_reward, 3),
+                    "risk_per_trade_usd": round(plan.risk_per_trade_usd, 2),
+                },
+                "sizing": {
+                    "account_equity":        round(equity, 2),
+                    "max_risk_pct":          self.cfg.max_risk_per_trade_pct,
+                    "risk_usd":              round(plan.risk_per_trade_usd, 2),
+                    "max_position_pct":      self.cfg.max_position_pct,
+                    "atr":                   round(atr, 4),
+                    "atr_stop_multiple":     self.cfg.atr_stop_multiple,
+                    "atr_target_multiple":   self.cfg.atr_target_multiple,
+                },
+                "thresholds": {
+                    "min_risk_reward":    self.cfg.min_risk_reward,
+                    "max_open_positions": self.cfg.max_open_positions,
+                    "max_daily_loss_pct": self.cfg.max_daily_loss_pct,
+                },
+                "note": (
+                    "Stop distance = ATR × stop_multiple. "
+                    "Target capped at session high (LONG) or low (SHORT) to keep R/R variable. "
+                    "Position sized at 1% equity risk per trade, capped at 20% of equity."
+                ),
+            },
         )
 
     # --- planning -------------------------------------------------------

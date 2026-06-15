@@ -20,6 +20,7 @@ class AgentEvaluation:
     rationale:  str   = ""         # human-readable explanation
     veto:       bool  = False      # True → PortfolioManager ignores all other scores
     data:       Optional[Any] = None  # extra structured data (signals dict, plan, etc.)
+    reasoning:  Optional[dict] = None  # structured verbose explanation for dashboard/audit
 
 
 # ── Risk plan ─────────────────────────────────────────────────────────────────

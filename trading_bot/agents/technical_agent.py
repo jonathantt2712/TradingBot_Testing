@@ -265,6 +265,96 @@ class TechnicalAgent(BaseAgent):
         if retail_surcharge > 0:
             rationale += " [RETAIL-DRIVEN +5thr]"
 
+        # ── Elaborate reasoning for dashboard/audit ──────────────────────────
+        def _dir(s: float) -> str:
+            return "bullish" if s > 60 else ("bearish" if s < 40 else "neutral")
+
+        signal_details = []
+        _meta: dict = {
+            "rsi": (
+                "RSI (14)",
+                f"{rsi:.1f}",
+                f"RSI {rsi:.1f} — {'oversold, potential reversal up' if rsi < 35 else 'overbought, potential reversal down' if rsi > 65 else 'neutral momentum zone'}",
+            ),
+            "macd": (
+                "MACD Histogram",
+                f"{macd_hist:.4f}",
+                f"Histogram {'positive → upward momentum' if macd_hist > 0 else 'negative → downward momentum'}",
+            ),
+            "ema_cross": (
+                "EMA Cross (9/21)",
+                f"{ema_spread_pct:+.2f}%",
+                f"Fast EMA {'above' if ema_fast > ema_slow else 'below'} slow EMA by {abs(ema_spread_pct):.2f}% — {'bullish' if ema_fast > ema_slow else 'bearish'} cross",
+            ),
+            "vwap": (
+                "VWAP Deviation",
+                f"price {vwap_spread_pct:+.2f}% vs VWAP",
+                f"Price {'above' if last > vwap else 'below'} session VWAP ({vwap:.2f}) by {abs(vwap_spread_pct):.2f}%",
+            ),
+            "rel_strength": (
+                "Relative Strength vs SPY",
+                f"{rs:.2f}x" if rs is not None else "N/A (SPY flat)",
+                f"{'Outperforming' if rs is not None and rs > 1 else 'Underperforming'} SPY by ratio {rs:.2f}" if rs is not None else "SPY too flat to compute RS",
+            ),
+            "volume_surge": (
+                "Volume Surge",
+                f"{vol_ratio:.1f}x 20-day avg" if vol_ratio is not None else "N/A",
+                f"Today's projected volume is {vol_ratio:.1f}x the 20-day average — {'unusual activity' if vol_ratio is not None and vol_ratio >= 1.5 else 'normal volume'}" if vol_ratio is not None else "Insufficient history for volume comparison",
+            ),
+            "intraday_mom": (
+                "Intraday Momentum",
+                f"{day_chg_pct:+.1f}% from open",
+                f"Stock is {'up' if day_chg_pct > 0 else 'down'} {abs(day_chg_pct):.1f}% from today's open",
+            ),
+            "day_range_pos": (
+                "Day Range Position",
+                f"{drp:.2f}" if drp is not None else "N/A",
+                f"Price at {drp*100:.0f}% of today's high-low range (0%=at low, 100%=at high)" if drp is not None else "N/A",
+            ),
+            "orb": (
+                "Opening Range Breakout",
+                f"score {clean.get('orb', 50):.0f}",
+                f"Price {'above ORB high → breakout' if clean.get('orb', 50) > 55 else 'below ORB low → breakdown' if clean.get('orb', 50) < 45 else 'inside opening range — no directional edge'}",
+            ),
+            "vol_confirm": (
+                "Volume Confirmation",
+                f"score {clean.get('vol_confirm', 50):.0f}",
+                f"Current bar volume {'confirms' if clean.get('vol_confirm', 50) >= 60 else 'does NOT confirm'} the move (threshold: 1.3x rolling avg)",
+            ),
+            "patterns": (
+                "Candlestick Patterns",
+                f"score {clean.get('patterns', 50):.0f}",
+                "Bullish patterns outweigh bearish" if clean.get("patterns", 50) > 55 else ("Bearish patterns outweigh bullish" if clean.get("patterns", 50) < 45 else "No significant candlestick pattern"),
+            ),
+        }
+        for key, sig_score in clean.items():
+            if key not in _meta:
+                continue
+            display, raw_str, note = _meta[key]
+            signal_details.append({
+                "name": key,
+                "display": display,
+                "raw": raw_str,
+                "score": round(sig_score, 1),
+                "weight_pct": round(_WEIGHTS.get(key, 0.05) * 100, 1),
+                "direction": _dir(sig_score),
+                "note": note,
+            })
+
+        reasoning = {
+            "signals": signal_details,
+            "price": round(last, 4),
+            "vwap": round(vwap, 4),
+            "rsi": round(rsi, 1),
+            "day_change_pct": round(day_chg_pct, 2),
+            "flags": {
+                "lottery_stock": lottery_penalty > 0,
+                "lottery_penalty": round(lottery_penalty, 1) if lottery_penalty > 0 else None,
+                "retail_driven": retail_surcharge > 0,
+                "retail_surcharge": retail_surcharge if retail_surcharge > 0 else None,
+            },
+        }
+
         return AgentEvaluation(
             role=self.role,
             score=score,
@@ -277,6 +367,7 @@ class TechnicalAgent(BaseAgent):
                 "retail_surcharge": retail_surcharge,
                 "retail_driven":    retail_surcharge > 0,
             },
+            reasoning=reasoning,
         )
 
     # ── Day-trading signal helpers ────────────────────────────────────────

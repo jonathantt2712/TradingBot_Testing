@@ -8,7 +8,6 @@ Provider priority (automatic, based on available env keys):
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from core.base_agent import NEUTRAL_SCORE, BaseAgent, clamp_score
 from core.enums import AgentRole
@@ -79,11 +78,23 @@ class FundamentalAgent(BaseAgent):
                     score      = clamp_score(float(data.get("score", 50)))
                     confidence = float(max(0.1, min(1.0, data.get("confidence", 0.6))))
                     rationale  = str(data.get("rationale", ""))
+                    headlines  = [
+                        a.get("headline", a.get("title", "")) for a in articles[:5]
+                    ]
                     return AgentEvaluation(
                         role=self.role,
                         score=score,
                         confidence=confidence,
                         rationale=f"[{self._llm.provider}] {rationale}",
+                        reasoning={
+                            "provider": self._llm.provider,
+                            "articles_analyzed": len(articles),
+                            "headlines_sample": headlines,
+                            "llm_rationale": rationale,
+                            "score": score,
+                            "confidence": round(confidence, 3),
+                            "note": "Score 1=strongly bearish, 50=neutral, 100=strongly bullish based on recent news catalysts",
+                        },
                     )
                 logger.warning(
                     "Fundamental: could not parse LLM response for %s: %r",
@@ -145,22 +156,38 @@ class FundamentalAgent(BaseAgent):
             for a in articles
         )
         # Multi-word phrases first (worth 2 hits each — more specific signal)
-        bull = sum(2 for p in self._BULL_PHRASES if p in text)
-        bear = sum(2 for p in self._BEAR_PHRASES if p in text)
-        # Single keywords
-        bull += sum(1 for w in self._BULL if w in text)
-        bear += sum(1 for w in self._BEAR if w in text)
+        bull_phrases_hit = [p for p in self._BULL_PHRASES if p in text]
+        bear_phrases_hit = [p for p in self._BEAR_PHRASES if p in text]
+        bull_words_hit   = [w for w in self._BULL if w in text]
+        bear_words_hit   = [w for w in self._BEAR if w in text]
+
+        bull = sum(2 for _ in bull_phrases_hit) + sum(1 for _ in bull_words_hit)
+        bear = sum(2 for _ in bear_phrases_hit) + sum(1 for _ in bear_words_hit)
 
         total = bull + bear
         if total == 0:
             score = NEUTRAL_SCORE
-            conf  = 0.15   # no signal found — not reliable
+            conf  = 0.15
         else:
             score = clamp_score(50 + (bull - bear) / total * 30)
-            conf  = min(0.45, 0.1 + total * 0.04)  # capped at 0.45: less reliable than LLM
+            conf  = min(0.45, 0.1 + total * 0.04)
+
+        headlines = [a.get("headline", a.get("title", "")) for a in articles[:5]]
         return AgentEvaluation(
             role=self.role,
             score=score,
             confidence=conf,
             rationale=f"[keyword] +{bull}/-{bear} signals",
+            reasoning={
+                "provider": "keyword_fallback",
+                "articles_analyzed": len(articles),
+                "headlines_sample": headlines,
+                "bull_signals": bull,
+                "bear_signals": bear,
+                "bull_phrases_matched": bull_phrases_hit,
+                "bear_phrases_matched": bear_phrases_hit,
+                "bull_keywords_matched": bull_words_hit[:10],
+                "bear_keywords_matched": bear_words_hit[:10],
+                "note": "No LLM available — scoring via keyword matching. Confidence capped at 0.45.",
+            },
         )
