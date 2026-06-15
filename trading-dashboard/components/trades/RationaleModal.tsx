@@ -2,31 +2,12 @@
 import { X, ArrowUpRight, ArrowDownLeft, Lightbulb, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { cn, formatPrice, regimeLabel, regimeColor, bgColorForScore } from '@/lib/utils'
 import { humanizeRationale } from '@/lib/explainAgent'
+import { AGENT_ORDER, AGENT_LABELS, AGENT_BLURBS } from '@/lib/agents'
 import type { TradeRecommendation, AgentEvaluation } from '@/types/trading'
 
 interface Props {
   trade:   TradeRecommendation | null
   onClose: () => void
-}
-
-const AGENT_ORDER = ['technical', 'fundamental', 'vision', 'risk', 'social', 'liquid'] as const
-
-const AGENT_LABELS: Record<string, string> = {
-  technical:   'Technical',
-  fundamental: 'Fundamental',
-  vision:      'Vision (Chart)',
-  risk:        'Risk',
-  social:      'Social Sentiment',
-  liquid:      'Liquidity Flow',
-}
-
-const AGENT_BLURBS: Record<string, string> = {
-  technical:   'Price action, VWAP, relative strength & volume',
-  fundamental: 'News & earnings keyword signals',
-  vision:      'Chart pattern recognition',
-  risk:        'Position sizing, stop placement & R/R viability',
-  social:      'Community / social sentiment chatter',
-  liquid:      'Order flow & liquidity dynamics',
 }
 
 /** bullish (score >= 55), bearish (<= 45), neutral otherwise */
