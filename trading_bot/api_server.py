@@ -815,6 +815,22 @@ async def _run_market_scan() -> None:
             "qqq_day_chg": qqq_chg,
             "rationale":   regime_rationale,
             "timestamp":   datetime.utcnow().isoformat(),
+            "reasoning": {
+                "regime": regime_label,
+                "rationale": regime_rationale,
+                "inputs": {
+                    "vix": vix_level,
+                    "vix_label": vix_label,
+                    "spy_day_chg_pct": spy_chg,
+                    "qqq_day_chg_pct": qqq_chg,
+                },
+                "rules": {
+                    "risk_on":  "SPY and QQQ both up > 0.5% intraday and VIX < 25",
+                    "risk_off": "SPY down > 0.5% intraday or VIX > 35",
+                    "choppy":   "SPY and QQQ both within ±0.3% intraday",
+                    "neutral":  "All other conditions",
+                },
+            },
         })
 
         recs: List[Dict[str, Any]] = []
@@ -859,6 +875,7 @@ async def _run_market_scan() -> None:
                         "score":      round(float(ev.score), 1),
                         "confidence": round(float(ev.confidence), 2),
                         "rationale":  ev.rationale or "",
+                        "reasoning":  ev.reasoning,
                     }
                     for ev in agent_evals
                 ]
