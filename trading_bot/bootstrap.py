@@ -83,12 +83,17 @@ def build_manager(
     *,
     publisher: SignalPublisher | None = None,
     include_live_only_agents: bool = True,
+    include_vision: bool = True,
 ) -> PortfolioManager:
     """Single composition point for every runner, including backtests.
 
     ``include_live_only_agents=False`` (backtests) drops the social and liquid
     agents: their data sources report CURRENT platform state, which would leak
     look-ahead noise into historical evaluations.
+
+    ``include_vision=False`` (backtests) skips VisionAgent's LLM chart analysis.
+    Historical backtests evaluate hundreds of windows; each LLM call costs money
+    and time, making it impractical to include vision in offline simulations.
     """
     news = build_news(settings, ai4)
     live_extras = include_live_only_agents
@@ -102,7 +107,7 @@ def build_manager(
         vision=VisionAgent(weight=settings.weights.vision,
                            anthropic_api_key=settings.anthropic_api_key,
                            gemini_api_key=settings.gemini_api_key,
-                           model=settings.llm_model),
+                           model=settings.llm_model) if include_vision else None,
         technical=TechnicalAgent(weight=settings.weights.technical),
         risk=RiskAgent(settings.risk),
         liquid=LiquidAgent(weight=settings.weights.liquid)

@@ -135,7 +135,7 @@ def simulate_fill(
     take_profit: float,
     qty: float,
     max_bars: int = 288,  # ~1 trading day of 5-min bars
-) -> TradeRecord | None:
+) -> tuple | None:
     """Walk forward bar-by-bar and check if TP or SL is hit."""
     for i, (ts, bar) in enumerate(bars_after_entry.head(max_bars).iterrows()):
         high = float(bar["high"])
@@ -603,7 +603,10 @@ async def run(tickers: list[str], days: int, recommend_only: bool) -> None:
     # Same composition as live (bootstrap) so backtest results reflect the
     # strategy that actually trades. Social/liquid agents are excluded — their
     # feeds report current platform state (look-ahead on historical bars).
-    pm = build_manager(settings, broker=None, include_live_only_agents=False)
+    # Vision is also excluded — each LLM chart call costs money and a 60-day
+    # backtest would make hundreds of calls; use technical+fundamental only.
+    pm = build_manager(settings, broker=None, include_live_only_agents=False,
+                       include_vision=False)
 
     trades: list[TradeRecord] = []
 
