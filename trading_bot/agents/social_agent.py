@@ -110,15 +110,15 @@ class SocialSentimentAgent(BaseAgent):
         if total_w < 1e-9:
             score = NEUTRAL_SCORE
             rationale = f"no directional signals ({len(signals)} signals parsed)"
+            sentiment_ratio = 0.5
         else:
-            ratio = bull_w / total_w
-            score = clamp_score(1 + ratio * 99)
+            sentiment_ratio = bull_w / total_w
+            score = clamp_score(1 + sentiment_ratio * 99)
             rationale = (
                 f"bull_w={bull_w:.1f} bear_w={bear_w:.1f} "
                 f"({n_action} trades, {n_strategy} strategies)"
             )
 
-        # Confidence rises with signal volume, capped at 0.75
         confidence = min(0.75, 0.1 + 0.03 * len(signals))
 
         return AgentEvaluation(
@@ -127,4 +127,18 @@ class SocialSentimentAgent(BaseAgent):
             confidence=confidence,
             rationale=rationale,
             data={"n_signals": len(signals), "bull_w": round(bull_w, 2), "bear_w": round(bear_w, 2)},
+            reasoning={
+                "signals_analyzed": len(signals),
+                "trade_signals": n_action,
+                "strategy_signals": n_strategy,
+                "bull_weight": round(bull_w, 2),
+                "bear_weight": round(bear_w, 2),
+                "sentiment_ratio": round(sentiment_ratio, 3),
+                "note": (
+                    "Signals sourced from AI4Trade community feed. "
+                    "Trade signals (position/trade) are full-weight; "
+                    "strategy/discussion signals are half-weight. "
+                    "All signals decay exponentially with a 24h half-life."
+                ),
+            },
         )

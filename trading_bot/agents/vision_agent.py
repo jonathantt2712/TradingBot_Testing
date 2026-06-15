@@ -10,14 +10,13 @@ Renders a candlestick chart PNG and asks the model to score the setup 1-100.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import mimetypes
 from pathlib import Path
 
 from core.base_agent import NEUTRAL_SCORE, BaseAgent, clamp_score
 from core.enums import AgentRole
-from core.llm_adapter import LLMAdapter
+from core.llm_adapter import LLMAdapter, parse_llm_json
 from core.models import AgentEvaluation, AnalysisContext
 
 logger = logging.getLogger(__name__)
@@ -46,6 +45,7 @@ class VisionAgent(BaseAgent):
         self._llm = LLMAdapter(
             gemini_key=gemini_api_key,
             anthropic_key=anthropic_api_key,
+            anthropic_model=model,
         )
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
@@ -74,17 +74,25 @@ class VisionAgent(BaseAgent):
             text = await self._llm.vision(raw_bytes, prompt, media_type)
             if not text:
                 raise ValueError("empty response")
-            if "```" in text:
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            parsed = json.loads(text.strip())
+            parsed = parse_llm_json(text)
+            if parsed is None:
+                raise ValueError(f"unparseable vision response: {text[:120]!r}")
+            raw_score = clamp_score(int(parsed["score"]))
+            pattern   = parsed.get("pattern", "")
+            reason    = parsed.get("reason", "")
             return AgentEvaluation(
                 role=self.role,
-                score=clamp_score(int(parsed["score"])),
+                score=raw_score,
                 confidence=0.7,
-                rationale=f"[{self._llm.provider}] {parsed.get('pattern', '')}: {parsed.get('reason', '')}",
+                rationale=f"[{self._llm.provider}] {pattern}: {reason}",
                 data=parsed,
+                reasoning={
+                    "provider": self._llm.provider,
+                    "pattern_identified": pattern,
+                    "analysis": reason,
+                    "raw_score": raw_score,
+                    "note": "Score 1=strong bearish chart setup, 50=neutral, 100=strong bullish chart setup",
+                },
             )
         except Exception as exc:
             logger.debug("VisionAgent failed for %s: %s", ctx.ticker, exc)

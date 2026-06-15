@@ -66,6 +66,37 @@ class RegimeSnapshot:
     qqq_day_chg:    Optional[float]
     rationale:      str
 
+    @property
+    def reasoning(self) -> dict:
+        """Structured explanation for dashboard/audit output."""
+        return {
+            "regime": self.regime.value,
+            "rationale": self.rationale,
+            "inputs": {
+                "vix": round(self.vix_level, 2) if self.vix_level is not None else None,
+                "spy_vs_vwap_pct": round(self.spy_vs_vwap, 3) if self.spy_vs_vwap is not None else None,
+                "spy_day_chg_pct": round(self.spy_day_chg, 3) if self.spy_day_chg is not None else None,
+                "qqq_vs_vwap_pct": round(self.qqq_vs_vwap, 3) if self.qqq_vs_vwap is not None else None,
+                "qqq_day_chg_pct": round(self.qqq_day_chg, 3) if self.qqq_day_chg is not None else None,
+            },
+            "threshold_shifts": {
+                "long_delta": self.long_delta,
+                "short_delta": self.short_delta,
+                "effect": (
+                    "Easier to go long, harder to short"
+                    if self.regime is MarketRegime.RISK_ON else
+                    "Harder to go long, easier to short"
+                    if self.regime is MarketRegime.RISK_OFF else
+                    "No threshold adjustment"
+                ),
+            },
+            "rules": {
+                "risk_on": "VIX < 18 AND SPY + QQQ both above VWAP and up ≥ 0.1%",
+                "risk_off": "VIX > 25 OR SPY below VWAP and down > 0.8%",
+                "neutral": "All other conditions",
+            },
+        }
+
     # Threshold deltas to apply (signed integers)
     @property
     def long_delta(self) -> float:

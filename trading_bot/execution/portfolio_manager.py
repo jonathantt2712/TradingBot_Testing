@@ -266,6 +266,7 @@ class PortfolioManager:
             "composite": decision.composite_score,
             "halted": self._halted,
             "regime": self._regime.regime.value if self._regime else None,
+            "regime_reasoning": self._regime.reasoning if self._regime else None,
             "agents": [
                 {
                     "role": e.role.value,
@@ -273,6 +274,7 @@ class PortfolioManager:
                     "confidence": round(e.confidence, 3),
                     "veto": e.veto,
                     "rationale": e.rationale,
+                    "reasoning": e.reasoning,
                 }
                 for e in decision.evaluations
             ],
