@@ -75,12 +75,18 @@ if /i "%ALPACA_PAPER%"=="false" (
     exit /b 1
 )
 
-REM ── Step 5: Start the bot ──────────────────────────────────────────────────
-echo  Starting api_server.py  (Ctrl+C to stop)
+REM ── Step 5: Start the bot, auto-restarting on crash ───────────────────────
+REM     The background loop inside api_server.py (auto-close trades, market
+REM     scans, etc.) only runs while this process is alive. If it crashes,
+REM     restart it automatically so trade monitoring doesn't go stale.
+REM     To stop for good, close this window.
+echo  Starting api_server.py  (close this window to stop)
 echo  ─────────────────────────────────────
 echo.
-python api_server.py
 
+:run
+python api_server.py
 echo.
-echo  Bot server stopped.
-pause
+echo  [%date% %time%] Bot server exited — restarting in 5 seconds...
+timeout /t 5 /nobreak >nul
+goto run

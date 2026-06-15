@@ -38,7 +38,9 @@ if exist ".env" (
 
 REM [1] API server (dashboard backend) — output shown live AND teed to logs\
 REM     (tee via python: PowerShell's Tee-Object writes UTF-16 and garbles logs)
-start "API Server" /D "%~dp0trading_bot" cmd /k python -u -X utf8 api_server.py 2^>^&1 ^| python -u -X utf8 -c "import sys; sys.stdin.reconfigure(errors='replace'); f=open(r'%~dp0logs\api_server.log','a',encoding='utf-8',buffering=1); [(sys.stdout.write(l), f.write(l)) for l in sys.stdin]"
+REM     run_api_server_loop.bat auto-restarts api_server.py if it crashes,
+REM     so the trade-monitoring background loop doesn't go stale silently.
+start "API Server" /D "%~dp0trading_bot" cmd /k run_api_server_loop.bat
 
 REM [2] Trading bot (analysis + orders; dry-run by default)
 start "Trading Bot" /D "%~dp0trading_bot" cmd /k python -u -X utf8 live_runner.py 2^>^&1 ^| python -u -X utf8 -c "import sys; sys.stdin.reconfigure(errors='replace'); f=open(r'%~dp0logs\bot.log','a',encoding='utf-8',buffering=1); [(sys.stdout.write(l), f.write(l)) for l in sys.stdin]"

@@ -115,7 +115,7 @@ export function RegimeIndicator({ regime }: Props) {
 
             <div className="px-6 py-4 space-y-4 max-h-[70vh] overflow-y-auto text-sm text-subtle">
               <p>
-                Once per scan cycle, the bot pulls fresh SPY, QQQ and a VIX proxy (VIXY) and re-runs the checks
+                Once per scan cycle, the bot pulls fresh SPY, QQQ and the VIX index and re-runs the checks
                 below. The result decides today&apos;s regime label and feeds the rationale shown on the dashboard:
               </p>
               <div className="rounded-lg border border-bg-border bg-bg-base px-4 py-3 text-xs font-mono text-subtle">
@@ -127,7 +127,7 @@ export function RegimeIndicator({ regime }: Props) {
 
                 <div className="rounded-lg border border-bg-border bg-bg-base px-4 py-3 space-y-1">
                   <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-primary">VIX proxy (VIXY &times; 10)</span>
+                    <span className="text-sm font-semibold text-primary">VIX index</span>
                     <span className="font-mono text-sm text-subtle">{regime.vix_level.toFixed(1)}</span>
                   </div>
                   <p className="text-xs text-muted">
@@ -177,8 +177,8 @@ export function RegimeIndicator({ regime }: Props) {
               <div className="space-y-2">
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Decision path (checked in order)</p>
                 {([
-                  ['risk_on',  'RISK ON',  'SPY > +0.5% AND QQQ > +0.5% AND VIX proxy < 25'],
-                  ['risk_off', 'RISK OFF', 'SPY < −0.5% OR VIX proxy > 35'],
+                  ['risk_on',  'RISK ON',  'SPY > +0.5% AND QQQ > +0.5% AND VIX < 25'],
+                  ['risk_off', 'RISK OFF', 'SPY < −0.5% OR VIX > 35'],
                   ['choppy',   'CHOPPY',   '|SPY| < 0.3% AND |QQQ| < 0.3%'],
                   ['neutral',  'NEUTRAL',  'none of the above (mixed signals)'],
                 ] as const).map(([key, label, desc]) => {

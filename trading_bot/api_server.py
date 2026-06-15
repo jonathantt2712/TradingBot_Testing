@@ -371,6 +371,34 @@ async def _fetch_multi_bars(
     return result
 
 
+async def _fetch_vix_index(session: aiohttp.ClientSession) -> float:
+    """Fetch the real CBOE VIX index level.
+
+    Alpaca has no index-data endpoint (only stock/ETF bars), so the actual
+    VIX index isn't available from `_fetch_multi_bars`. Yahoo Finance's
+    public chart endpoint serves ^VIX without an API key. Returns 0.0 on
+    any failure so callers can fall back to the VIXY ETF proxy.
+    """
+    try:
+        async with session.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX",
+            params={"interval": "1d", "range": "5d"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status != 200:
+                logger.warning("VIX index fetch returned %s", r.status)
+                return 0.0
+            payload = await r.json()
+        closes = payload["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        for c in reversed(closes):
+            if c is not None:
+                return round(float(c), 1)
+    except Exception as exc:
+        logger.warning("VIX index fetch failed: %s", exc)
+    return 0.0
+
+
 # === Close trade detection -- bracket order child leg fix (Task #71) ===
 
 async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
@@ -729,6 +757,7 @@ async def _run_market_scan() -> None:
                 snaps: Dict[str, Any] = await r.json()
 
             bars_map = await _fetch_multi_bars(session, list(set(symbols_raw + ["SPY", "QQQ", "VIXY"])), limit=100)
+            vix_index = await _fetch_vix_index(session)
 
         if _AGENTS_AVAILABLE and _pm is not None:
             _pm.technical.spy_bars = bars_map.get("SPY")
@@ -754,12 +783,24 @@ async def _run_market_scan() -> None:
             except Exception:
                 vix_approx = 0.0
 
-        if spy_chg > 0.5 and qqq_chg > 0.5 and vix_approx < 25:
+        # Prefer the real CBOE VIX index; fall back to the VIXY ETF price
+        # (a related but differently-scaled proxy) if Yahoo is unreachable.
+        if vix_index > 0:
+            vix_level = vix_index
+            vix_label = "VIX"
+        elif vix_approx > 0:
+            vix_level = vix_approx
+            vix_label = "VIX-proxy"
+        else:
+            vix_level = 15.0
+            vix_label = "VIX"
+
+        if spy_chg > 0.5 and qqq_chg > 0.5 and vix_level < 25:
             regime_label = "risk_on"
-            regime_rationale = f"SPY +{spy_chg:.2f}%, QQQ +{qqq_chg:.2f}%, VIX-proxy {vix_approx:.1f} — bullish"
-        elif spy_chg < -0.5 or vix_approx > 35:
+            regime_rationale = f"SPY +{spy_chg:.2f}%, QQQ +{qqq_chg:.2f}%, {vix_label} {vix_level:.1f} — bullish"
+        elif spy_chg < -0.5 or vix_level > 35:
             regime_label = "risk_off"
-            regime_rationale = f"SPY {spy_chg:.2f}%, VIX-proxy {vix_approx:.1f} — bearish"
+            regime_rationale = f"SPY {spy_chg:.2f}%, {vix_label} {vix_level:.1f} — bearish"
         elif abs(spy_chg) < 0.3 and abs(qqq_chg) < 0.3:
             regime_label = "choppy"
             regime_rationale = f"SPY {spy_chg:.2f}%, QQQ {qqq_chg:.2f}% — low momentum"
@@ -769,7 +810,7 @@ async def _run_market_scan() -> None:
 
         _save(REGIME_FILE, {
             "regime":      regime_label,
-            "vix_level":   vix_approx if vix_approx > 0 else 15.0,
+            "vix_level":   vix_level,
             "spy_day_chg": spy_chg,
             "qqq_day_chg": qqq_chg,
             "rationale":   regime_rationale,

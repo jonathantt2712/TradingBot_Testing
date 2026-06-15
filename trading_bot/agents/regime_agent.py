@@ -3,6 +3,14 @@
 Runs ONCE per scan cycle (not per ticker). Outputs a MarketRegime that
 PortfolioManager uses to tighten/widen LONG and SHORT thresholds.
 
+VIX source
+----------
+The real CBOE VIX index (^VIX) is fetched from Yahoo Finance, since Alpaca
+only serves stock/ETF bars. If that fetch fails, falls back to the VIXY ETF
+price as a proxy — but VIXY trades on a completely different scale than the
+VIX index (VIXY ~$24 vs VIX ~16), so the proxy uses its own, higher
+thresholds (see _VIXY_THRESHOLDS) rather than the real-VIX cutoffs below.
+
 Regime logic
 ------------
 RISK_ON   : VIX < 18  AND  SPY + QQQ both above VWAP and up >= 0.1% on day
@@ -25,14 +33,21 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
+import aiohttp
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# ── VIX ETF proxy (VIXY) used when broker can't fetch the index itself ─────
+# ── VIX ETF proxy (VIXY) used when the real VIX index can't be fetched ─────
 _VIX_PROXY = "VIXY"
 _SPY = "SPY"
 _QQQ = "QQQ"
+
+# Cutoffs for the real CBOE VIX index (RISK_ON < x, RISK_OFF > y)
+_VIX_THRESHOLDS = (18.0, 25.0)
+# Cutoffs for the VIXY ETF price proxy — VIXY trades on a different scale
+# (~$24 when VIX ~16), so it needs its own thresholds.
+_VIXY_THRESHOLDS = (26.0, 38.0)
 
 
 class MarketRegime(str, Enum):
@@ -44,7 +59,7 @@ class MarketRegime(str, Enum):
 @dataclass
 class RegimeSnapshot:
     regime:         MarketRegime
-    vix_level:      Optional[float]   # last close of VIX or VIXY
+    vix_level:      Optional[float]   # real VIX index, or VIXY price if VIX unavailable
     spy_vs_vwap:    Optional[float]   # spy price relative to its session VWAP, %
     spy_day_chg:    Optional[float]   # spy % change from open
     qqq_vs_vwap:    Optional[float]
@@ -84,15 +99,44 @@ def _day_change_pct(df: pd.DataFrame) -> float:
     return (last_price - open_price) / open_price * 100
 
 
+async def _fetch_vix_index() -> float:
+    """Fetch the real CBOE VIX index level from Yahoo Finance.
+
+    Alpaca has no index-data endpoint (only stock/ETF bars). Yahoo's public
+    chart endpoint serves ^VIX without an API key. Returns 0.0 on any
+    failure so the caller falls back to the VIXY ETF proxy.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX",
+                params={"interval": "1d", "range": "5d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status != 200:
+                    logger.warning("VIX index fetch returned %s", r.status)
+                    return 0.0
+                payload = await r.json()
+        closes = payload["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        for c in reversed(closes):
+            if c is not None:
+                return round(float(c), 1)
+    except Exception as exc:
+        logger.warning("VIX index fetch failed: %s", exc)
+    return 0.0
+
+
 async def detect_regime(broker) -> RegimeSnapshot:
     """Fetch SPY, QQQ, and VIX data concurrently and return a RegimeSnapshot."""
     try:
         spy_task = broker.get_bars(_SPY,  timeframe="5Min", limit=100)
         qqq_task = broker.get_bars(_QQQ,  timeframe="5Min", limit=100)
         vix_task = broker.get_bars(_VIX_PROXY, timeframe="1Day", limit=5)
+        vix_index_task = _fetch_vix_index()
 
-        spy_bars, qqq_bars, vix_bars = await asyncio.gather(
-            spy_task, qqq_task, vix_task, return_exceptions=True
+        spy_bars, qqq_bars, vix_bars, vix_index = await asyncio.gather(
+            spy_task, qqq_task, vix_task, vix_index_task, return_exceptions=True
         )
     except Exception as exc:
         logger.warning("regime: fetch error — defaulting to NEUTRAL: %s", exc)
@@ -103,10 +147,15 @@ async def detect_regime(broker) -> RegimeSnapshot:
             rationale="data unavailable — defaulting to NEUTRAL",
         )
 
-    # ── VIX proxy ──────────────────────────────────────────────────────────
+    # ── VIX: real index preferred, VIXY price as fallback proxy ────────────
     vix_level: Optional[float] = None
-    if isinstance(vix_bars, pd.DataFrame) and not vix_bars.empty:
+    vix_thresholds = _VIX_THRESHOLDS
+    if isinstance(vix_index, (int, float)) and vix_index > 0:
+        vix_level = float(vix_index)
+        vix_thresholds = _VIX_THRESHOLDS
+    elif isinstance(vix_bars, pd.DataFrame) and not vix_bars.empty:
         vix_level = float(vix_bars["close"].iloc[-1])
+        vix_thresholds = _VIXY_THRESHOLDS
 
     # ── SPY ────────────────────────────────────────────────────────────────
     spy_vs_vwap: Optional[float] = None
@@ -131,10 +180,12 @@ async def detect_regime(broker) -> RegimeSnapshot:
     risk_on_signals  = []
 
     if vix_level is not None:
-        if vix_level > 25:
-            risk_off_triggers.append(f"VIX={vix_level:.1f} (>25)")
-        elif vix_level < 18:
-            risk_on_signals.append(f"VIX={vix_level:.1f} (<18)")
+        risk_on_cut, risk_off_cut = vix_thresholds
+        label = "VIX" if vix_thresholds is _VIX_THRESHOLDS else "VIXY"
+        if vix_level > risk_off_cut:
+            risk_off_triggers.append(f"{label}={vix_level:.1f} (>{risk_off_cut:.0f})")
+        elif vix_level < risk_on_cut:
+            risk_on_signals.append(f"{label}={vix_level:.1f} (<{risk_on_cut:.0f})")
 
     if spy_vs_vwap is not None:
         if spy_vs_vwap < 0 and spy_day_chg is not None and spy_day_chg < -0.8:
