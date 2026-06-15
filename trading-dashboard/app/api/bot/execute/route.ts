@@ -10,9 +10,10 @@
  */
 import { NextResponse }       from 'next/server'
 import { revalidatePath }      from 'next/cache'
-import { submitBracketOrder } from '@/lib/alpaca'
+import { submitBracketOrder, getAccount } from '@/lib/alpaca'
 import { getAlpacaCreds }     from '@/lib/session'
 import { botPost }            from '@/lib/bot-api'
+import { sizePosition }       from '@/lib/risk'
 import type { ExecuteRequest, ExecuteResponse } from '@/types/trading'
 
 // ── Idempotency guard ──────────────────────────────────────────────────────
@@ -36,7 +37,7 @@ export async function POST(req: Request) {
   const creds = await getAlpacaCreds()
   if (!creds) {
     return NextResponse.json(
-      { success: false, order_id: '', message: 'Unauthorized' },
+      { success: false, order_id: '', qty: 0, message: 'Unauthorized' },
       { status: 401 },
     )
   }
@@ -46,7 +47,7 @@ export async function POST(req: Request) {
     body = await req.json()
   } catch {
     return NextResponse.json(
-      { success: false, order_id: '', message: 'Invalid request body' },
+      { success: false, order_id: '', qty: 0, message: 'Invalid request body' },
       { status: 400 },
     )
   }
@@ -54,12 +55,32 @@ export async function POST(req: Request) {
   // Idempotency check — 409 if same rec_id arrives within 30s
   if (_isDuplicate(body.recommendation_id)) {
     return NextResponse.json(
-      { success: false, order_id: '', message: `Duplicate: '${body.recommendation_id}' already executed within 30s` },
+      { success: false, order_id: '', qty: 0, message: `Duplicate: '${body.recommendation_id}' already executed within 30s` },
       { status: 409 },
     )
   }
 
-  const { ticker, direction, qty, stop_loss, take_profit } = body
+  const { ticker, direction, entry, stop_loss, take_profit } = body
+
+  // -- 0. Size the position to the EXECUTING USER's own account equity
+  let equity: number
+  try {
+    const account = await getAccount(creds)
+    equity = parseFloat(account.equity)
+  } catch (err: any) {
+    return NextResponse.json(
+      { success: false, order_id: '', qty: 0, message: `Could not fetch your Alpaca account: ${err.message}` },
+      { status: 401 },
+    )
+  }
+
+  const qty = sizePosition(equity, entry, stop_loss)
+  if (qty <= 0) {
+    return NextResponse.json(
+      { success: false, order_id: '', qty: 0, message: 'Your account balance is too small to size this trade within risk limits' },
+      { status: 422 },
+    )
+  }
 
   // -- 1. Submit to the signed-in user's Alpaca account
   let orderId = `PAPER-${Date.now().toString(36).toUpperCase()}`
@@ -81,9 +102,10 @@ export async function POST(req: Request) {
     message = `${direction} ${qty}x ${ticker} recorded locally (Alpaca: ${err.message})`
   }
 
-  // -- 2. Notify bot server (best-effort) — include resolved order_id and score
+  // -- 2. Notify bot server (best-effort) — include resolved order_id, qty, and score
   botPost('/api/execute', {
     ...body,
+    qty,
     order_id: orderId,
     score:    body.composite_score ?? null,
   }).catch(() => {})
@@ -97,6 +119,7 @@ export async function POST(req: Request) {
   return NextResponse.json({
     success:  true,
     order_id: orderId,
+    qty,
     message,
     alpaca:   alpacaSuccess,
   } as ExecuteResponse & { alpaca: boolean })
