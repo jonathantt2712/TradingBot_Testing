@@ -7,14 +7,11 @@ Provider priority (automatic, based on available env keys):
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
-from typing import Any
 
 from core.base_agent import NEUTRAL_SCORE, BaseAgent, clamp_score
 from core.enums import AgentRole
-from core.llm_adapter import LLMAdapter
+from core.llm_adapter import LLMAdapter, parse_llm_json
 from core.models import AgentEvaluation, AnalysisContext
 
 logger = logging.getLogger(__name__)
@@ -29,36 +26,6 @@ _SYSTEM_PROMPT = (
     "M&A, regulatory events, macro catalysts. "
     "If there is no news, return score=50 confidence=0.1 rationale='no news'."
 )
-
-# Regex to extract JSON object from LLM response (handles preamble, markdown fences, etc.)
-_JSON_RE = re.compile(r'\{[^{}]*"score"\s*:\s*\d+[^{}]*\}', re.DOTALL)
-
-
-def _parse_llm_response(raw: str) -> "dict[str, Any] | None":
-    """Robustly extract JSON from LLM response — handles markdown fences and preamble."""
-    if not raw:
-        return None
-    text = raw.strip()
-    # Strip markdown code fences
-    if "```" in text:
-        parts = text.split("```")
-        text = parts[1] if len(parts) > 1 else text
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    # Try direct parse first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # Fallback: find the JSON object containing "score"
-    m = _JSON_RE.search(raw)
-    if m:
-        try:
-            return json.loads(m.group())
-        except json.JSONDecodeError:
-            pass
-    return None
 
 
 class FundamentalAgent(BaseAgent):
@@ -80,6 +47,7 @@ class FundamentalAgent(BaseAgent):
         self._llm         = LLMAdapter(
             gemini_key=gemini_api_key,
             anthropic_key=anthropic_api_key,
+            anthropic_model=model,
         )
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
@@ -105,16 +73,28 @@ class FundamentalAgent(BaseAgent):
             user_msg = f"Ticker: {ctx.ticker}\n\nRecent news:\n{news_text}"
             try:
                 raw = await self._llm.chat(user_msg, system=_SYSTEM_PROMPT)
-                data = _parse_llm_response(raw)
+                data = parse_llm_json(raw)
                 if data is not None:
                     score      = clamp_score(float(data.get("score", 50)))
                     confidence = float(max(0.1, min(1.0, data.get("confidence", 0.6))))
                     rationale  = str(data.get("rationale", ""))
+                    headlines  = [
+                        a.get("headline", a.get("title", "")) for a in articles[:5]
+                    ]
                     return AgentEvaluation(
                         role=self.role,
                         score=score,
                         confidence=confidence,
                         rationale=f"[{self._llm.provider}] {rationale}",
+                        reasoning={
+                            "provider": self._llm.provider,
+                            "articles_analyzed": len(articles),
+                            "headlines_sample": headlines,
+                            "llm_rationale": rationale,
+                            "score": score,
+                            "confidence": round(confidence, 3),
+                            "note": "Score 1=strongly bearish, 50=neutral, 100=strongly bullish based on recent news catalysts",
+                        },
                     )
                 logger.warning(
                     "Fundamental: could not parse LLM response for %s: %r",
@@ -176,22 +156,38 @@ class FundamentalAgent(BaseAgent):
             for a in articles
         )
         # Multi-word phrases first (worth 2 hits each — more specific signal)
-        bull = sum(2 for p in self._BULL_PHRASES if p in text)
-        bear = sum(2 for p in self._BEAR_PHRASES if p in text)
-        # Single keywords
-        bull += sum(1 for w in self._BULL if w in text)
-        bear += sum(1 for w in self._BEAR if w in text)
+        bull_phrases_hit = [p for p in self._BULL_PHRASES if p in text]
+        bear_phrases_hit = [p for p in self._BEAR_PHRASES if p in text]
+        bull_words_hit   = [w for w in self._BULL if w in text]
+        bear_words_hit   = [w for w in self._BEAR if w in text]
+
+        bull = sum(2 for _ in bull_phrases_hit) + sum(1 for _ in bull_words_hit)
+        bear = sum(2 for _ in bear_phrases_hit) + sum(1 for _ in bear_words_hit)
 
         total = bull + bear
         if total == 0:
             score = NEUTRAL_SCORE
-            conf  = 0.15   # no signal found — not reliable
+            conf  = 0.15
         else:
             score = clamp_score(50 + (bull - bear) / total * 30)
-            conf  = min(0.45, 0.1 + total * 0.04)  # capped at 0.45: less reliable than LLM
+            conf  = min(0.45, 0.1 + total * 0.04)
+
+        headlines = [a.get("headline", a.get("title", "")) for a in articles[:5]]
         return AgentEvaluation(
             role=self.role,
             score=score,
             confidence=conf,
             rationale=f"[keyword] +{bull}/-{bear} signals",
+            reasoning={
+                "provider": "keyword_fallback",
+                "articles_analyzed": len(articles),
+                "headlines_sample": headlines,
+                "bull_signals": bull,
+                "bear_signals": bear,
+                "bull_phrases_matched": bull_phrases_hit,
+                "bear_phrases_matched": bear_phrases_hit,
+                "bull_keywords_matched": bull_words_hit[:10],
+                "bear_keywords_matched": bear_words_hit[:10],
+                "note": "No LLM available — scoring via keyword matching. Confidence capped at 0.45.",
+            },
         )
