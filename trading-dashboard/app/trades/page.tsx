@@ -142,7 +142,7 @@ export default function TradesPage() {
     let failed    = 0
     for (const trade of active) {
       try {
-        await api.execute({
+        const res = await api.execute({
           recommendation_id: trade.id,
           ticker:          trade.ticker,
           direction:       trade.direction,
@@ -160,19 +160,22 @@ export default function TradesPage() {
         setExecutedRecs(newRecs)
         succeeded++
         toast.success(`${trade.direction} ${trade.ticker}`, {
-          description: `${trade.risk.qty} shares @ ${trade.risk.entry}`,
+          description: `${res.qty} shares @ ${trade.risk.entry}`,
         })
       } catch (err: any) {
-        const msg: string = err?.message ?? ''
-        if (msg.includes('409')) {
+        if (err?.status === 409) {
           // Idempotency dedup — already submitted within 30s, mark as executed
           const newIds = new Set(executedIds).add(tradeKey(trade))
           setExecutedIds(newIds)
           saveIds(newIds)
           toast.info(`${trade.ticker} already submitted`, { description: 'Skipped duplicate within 30s' })
+        } else if (err?.status === 422) {
+          // Account too small to size this trade — skip, not a hard failure
+          failed++
+          toast.error(`${trade.ticker} skipped`, { description: err.message })
         } else {
           failed++
-          toast.error(`Failed: ${trade.ticker}`, { description: msg || undefined })
+          toast.error(`Failed: ${trade.ticker}`, { description: err?.message || undefined })
         }
       }
     }

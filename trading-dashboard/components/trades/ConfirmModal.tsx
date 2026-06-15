@@ -35,7 +35,7 @@ export function ConfirmModal({ trade, onClose, onDone }: Props) {
         composite_score: trade.composite_score,
       })
       setConfirmed(true)
-      toast.success(`Trade executed: ${trade.direction} ${trade.risk.qty}x ${trade.ticker}`, {
+      toast.success(`Trade executed: ${trade.direction} ${res.qty}x ${trade.ticker}`, {
         description: `Order ID: ${res.order_id}`,
       })
       setTimeout(() => { onDone(); onClose() }, 1500)
@@ -120,6 +120,10 @@ export function ConfirmModal({ trade, onClose, onDone }: Props) {
               <p className="font-mono font-semibold text-bear mt-0.5">${trade.risk.dollar_risk.toFixed(0)}</p>
             </div>
           </div>
+
+          <p className="text-center text-[10px] text-muted">
+            Quantity will be resized to your account balance at execution.
+          </p>
 
           <div className={cn('flex items-center gap-2 rounded-lg border px-3 py-2 text-xs', regimeColor(trade.regime))}>
             <AlertTriangle className="h-3 w-3 shrink-0" />
