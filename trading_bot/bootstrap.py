@@ -30,6 +30,7 @@ load_env()  # must run before config.settings is imported by callers
 
 from config.settings import Settings  # noqa: E402
 from core.enums import RunMode  # noqa: E402
+from agents.decision_agent import DecisionAgent  # noqa: E402
 from agents.fundamental_agent import FundamentalAgent  # noqa: E402
 from agents.liquid_agent import LiquidAgent  # noqa: E402
 from agents.regime_agent import detect_regime  # noqa: E402
@@ -115,6 +116,11 @@ def build_manager(
         social=SocialSentimentAgent(ai4, weight=settings.weights.social)
             if live_extras and ai4 is not None and settings.weights.social > 0 else None,
         publisher=publisher,
+        decision_agent=DecisionAgent(
+            anthropic_api_key=settings.anthropic_api_key,
+            gemini_api_key=settings.gemini_api_key,
+            model=settings.llm_model,
+        ),
     )
 
 

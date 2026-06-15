@@ -65,6 +65,7 @@ class TradeDecision:
     evaluations:     Tuple[AgentEvaluation, ...]  = field(default_factory=tuple)
     side:            Optional[OrderSide]          = None
     risk:            Optional[RiskParameters]     = None
+    decision_meta:   Optional[dict]               = None
 
     @property
     def is_actionable(self) -> bool:
