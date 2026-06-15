@@ -123,6 +123,52 @@ class UniverseScanner:
         )
         return result
 
+    async def get_breakouts(
+        self,
+        existing_tickers: "set[str]",
+        min_change_pct: float = 3.0,
+        min_volume:     int   = MIN_VOLUME,
+        min_price:      float = MIN_PRICE,
+        top:            int   = 10,
+    ) -> "list[str]":
+        """Return tickers with a sudden large move not already in the watchlist.
+
+        Runs every 5 minutes between full scans to catch news-driven eruptions
+        that the 30-minute rescan would otherwise miss.
+        """
+        async with aiohttp.ClientSession(headers=self._headers) as session:
+            movers_raw = await self._fetch_market_movers(session, top=25)
+
+        if not isinstance(movers_raw, dict):
+            return []
+
+        candidates: list[tuple[str, float]] = []
+        for item in movers_raw.get("gainers", []) + movers_raw.get("losers", []):
+            sym = item.get("symbol", "").upper()
+            if not sym or sym in existing_tickers or sym in _ETF_TICKERS:
+                continue
+            if "/" in sym or "." in sym:
+                continue
+            name = item.get("name", "") or item.get("company_name", "") or ""
+            if _ETF_KEYWORDS.search(name):
+                continue
+
+            chg   = abs(float(item.get("percent_change") or item.get("change_percent") or 0))
+            price = float(item.get("price") or item.get("close") or item.get("last_price") or 0)
+            vol   = int(item.get("volume") or item.get("trade_volume") or 0)
+
+            if chg < min_change_pct:
+                continue
+            if price > 0 and (price < min_price or price > MAX_PRICE):
+                continue
+            if vol > 0 and vol < min_volume:
+                continue
+
+            candidates.append((sym, self._momentum_score(item)))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return [sym for sym, _ in candidates[:top]]
+
     # ── Alpaca endpoints ──────────────────────────────────────────────────────
 
     async def _fetch_most_active(

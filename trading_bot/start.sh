@@ -5,6 +5,10 @@
 # immediately visible to api_server's reads.
 set -e
 
+# Ensure CWD is the script's own directory (trading_bot/) regardless of
+# where the caller invoked us from (Railway runs from the repo root).
+cd "$(dirname "$0")"
+
 python live_runner.py 2>&1 | sed -u 's/^/[live_runner] /' &
 
 exec python api_server.py

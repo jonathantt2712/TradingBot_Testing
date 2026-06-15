@@ -1,11 +1,8 @@
 export const dynamic = 'force-dynamic'
-import { StatsCards }     from '@/components/dashboard/StatsCards'
-import { AccountBar }      from '@/components/dashboard/AccountBar'
-import { PnLChart }        from '@/components/dashboard/PnLChart'
-import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
-import { SectorHeatmap }   from '@/components/dashboard/SectorHeatmap'
-import { PositionsTable }  from '@/components/dashboard/PositionsTable'
-import { RefreshButton }   from '@/components/layout/RefreshButton'
+
+import { AccountBar }     from '@/components/dashboard/AccountBar'
+import { LiveDashboard }  from '@/components/dashboard/LiveDashboard'
+import { RefreshButton }  from '@/components/layout/RefreshButton'
 import {
   demoStats, demoPnL, demoRegime, demoSectors,
 } from '@/lib/api'
@@ -29,7 +26,6 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     console.error('getAccount failed:', account.reason)
     if (creds) console.error('getAccount creds used:', { paper: creds.paper, keyId: `${creds.keyId.slice(0, 4)}...${creds.keyId.slice(-4)}` })
   }
-  if (positions.status === 'rejected') console.error('getPositions failed:', positions.reason)
 
   const accountErrorDetail = account.status === 'rejected'
     ? `${String((account.reason as Error)?.message ?? account.reason)}${creds ? ` (paper=${creds.paper}, keyId=${creds.keyId.slice(0, 4)}...${creds.keyId.slice(-4)})` : ' (no creds on session)'}`
@@ -38,8 +34,8 @@ async function loadDashboard(creds: AlpacaCreds | null) {
   const resolvedStats: PortfolioStats = stats.status === 'fulfilled' ? stats.value : demoStats()
   if (account.status === 'fulfilled') {
     const acc = account.value
-    const livePnl   = parseFloat(acc.unrealized_pl) + parseFloat(acc.realized_pl ?? '0')
-    const todayPnl  = parseFloat(acc.equity) - parseFloat(acc.last_equity)
+    const livePnl  = parseFloat(acc.unrealized_pl) + parseFloat(acc.realized_pl ?? '0')
+    const todayPnl = parseFloat(acc.equity) - parseFloat(acc.last_equity)
     if (!isNaN(livePnl))  resolvedStats.total_pnl = +livePnl.toFixed(2)
     if (!isNaN(todayPnl)) resolvedStats.today_pnl = +todayPnl.toFixed(2)
   }
@@ -48,14 +44,14 @@ async function loadDashboard(creds: AlpacaCreds | null) {
   }
 
   return {
-    stats:       resolvedStats,
-    account:     account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
+    stats:        resolvedStats,
+    account:      account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
     accountError: accountErrorDetail,
-    pnl:       pnl.status     === 'fulfilled' ? pnl.value     : demoPnL(),
-    regime:    regime.status  === 'fulfilled' ? regime.value  : demoRegime(),
-    sectors:   sectors.status === 'fulfilled' ? sectors.value : demoSectors(),
-    positions: positions.status === 'fulfilled' ? positions.value : [],
-    live:      account.status === 'fulfilled',
+    pnl:          pnl.status      === 'fulfilled' ? pnl.value      : demoPnL(),
+    regime:       regime.status   === 'fulfilled' ? regime.value   : demoRegime(),
+    sectors:      sectors.status  === 'fulfilled' ? sectors.value  : demoSectors(),
+    positions:    positions.status === 'fulfilled' ? positions.value : [],
+    live:         account.status === 'fulfilled',
   }
 }
 
@@ -82,17 +78,14 @@ export default async function DashboardPage() {
       </div>
 
       <AccountBar account={account} error={accountError} />
-      <StatsCards stats={stats} />
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_220px]">
-        <PnLChart data={pnl} />
-        <RegimeIndicator regime={regime} />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
-        <SectorHeatmap sectors={sectors} />
-        <PositionsTable positions={positions} />
-      </div>
+      <LiveDashboard
+        initialStats={stats}
+        initialPnl={pnl}
+        initialRegime={regime}
+        initialSectors={sectors}
+        initialPositions={positions}
+      />
     </div>
   )
 }

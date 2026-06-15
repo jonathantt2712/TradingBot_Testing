@@ -88,18 +88,48 @@ class LiquidAgent(BaseAgent):
         spread_std = float(np.std(list(signals.values()))) if len(signals) > 1 else 0.0
         confidence = max(0.25, min(0.75, 0.4 - spread_std / 80.0))
 
-        # Boost confidence when relative volume is high (more reliable signal)
         rv_raw = self._relative_volume_raw(df)
         if rv_raw is not None and rv_raw > 2.0:
             confidence = min(0.75, confidence + 0.15)
 
         label_parts = [f"{k}={v:.0f}" for k, v in signals.items()]
+
+        intraday_dir = self._intraday_direction(df)
+        dir_str = {1: "up", -1: "down", 0: "flat"}[intraday_dir]
+
+        def _dir(s: float) -> str:
+            return "bullish" if s > 60 else ("bearish" if s < 40 else "neutral")
+
+        _signal_meta = {
+            "rel_vol":   ("Relative Volume",        f"{rv_raw:.2f}x 20-day avg" if rv_raw else "N/A", f"Today's volume is {rv_raw:.1f}x the 20-day average daily volume; price is {dir_str}" if rv_raw else "N/A"),
+            "vwap_dev":  ("VWAP Deviation",          "see score",                                       "Price deviation from session VWAP — positive=above VWAP (bullish), negative=below (bearish)"),
+            "mom_accel": ("Momentum Acceleration",   "last 3 bars",                                     "Slope of last 3 bars — positive=price speeding up, negative=decelerating"),
+            "spread":    ("Spread Quality (H-L/C)",  "last 5 bars avg",                                 "Tight spread in trend direction=healthy flow; wide spread against trend=distribution"),
+        }
+        signal_details = []
+        for key, sig_score in signals.items():
+            display, raw_str, note = _signal_meta.get(key, (key, "N/A", ""))
+            signal_details.append({
+                "name": key,
+                "display": display,
+                "raw": raw_str,
+                "score": round(sig_score, 1),
+                "direction": _dir(sig_score),
+                "note": note,
+            })
+
         return AgentEvaluation(
             role=self.role,
             score=score,
             confidence=round(confidence, 2),
             rationale=" | ".join(label_parts),
             data={"signals": signals},
+            reasoning={
+                "signals": signal_details,
+                "relative_volume": round(rv_raw, 2) if rv_raw is not None else None,
+                "intraday_direction": dir_str,
+                "note": "Equity flow quality: high relative volume + trend-aligned signals = institutional conviction",
+            },
         )
 
     # ── Sub-signals ───────────────────────────────────────────────────────────
