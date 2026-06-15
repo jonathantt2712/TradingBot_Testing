@@ -98,5 +98,6 @@ export interface ExecuteRequest {
 export interface ExecuteResponse {
   success:  boolean
   order_id: string
+  qty:      number
   message:  string
 }

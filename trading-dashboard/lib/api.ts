@@ -25,8 +25,13 @@ async function clientPost<T>(path: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error(`POST ${path} → ${res.status}`)
-  return res.json()
+  const data = await res.json().catch(() => null)
+  if (!res.ok) {
+    const err = new Error(data?.message ?? `POST ${path} → ${res.status}`)
+    Object.assign(err, { status: res.status })
+    throw err
+  }
+  return data as T
 }
 
 export const api = {
