@@ -24,7 +24,7 @@ export async function GET(req: Request) {
       let date: string
       if (intraday) {
         const d = new Date(ts * 1000)
-        const h = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' })
+        const h = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Jerusalem' })
         date = h
       } else {
         date = new Date(ts * 1000).toISOString().slice(0, 10)

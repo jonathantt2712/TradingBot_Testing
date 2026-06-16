@@ -63,7 +63,7 @@ export function PnLChart({ data }: Props) {
         <div>
           <h2 className="text-sm font-semibold text-primary">Equity Curve</h2>
           <p className="text-xs text-muted mt-0.5">
-            {view === 'today' ? 'Intraday — market hours (ET)' : '30-day rolling P&L'}
+            {view === 'today' ? 'Intraday — שעון ישראל' : '30-day rolling P&L'}
           </p>
         </div>
         <div className="flex items-center gap-1 rounded-lg border border-bg-border p-0.5">
