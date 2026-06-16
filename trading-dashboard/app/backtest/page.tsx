@@ -37,6 +37,23 @@ interface BacktestPayload {
   configText: string | null
 }
 
+interface BacktestHealth {
+  last_run_at: string | null
+  last_status: 'ok' | 'failed' | 'timeout' | null
+  error_count: number
+  last_error:  string | null
+}
+
+function relativeTime(iso: string): string {
+  const ms   = Date.now() - new Date(iso + (iso.endsWith('Z') ? '' : 'Z')).getTime()
+  const mins = Math.floor(ms / 60000)
+  if (mins < 1)  return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24)  return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
+}
+
 function StatCard({
   label, value, sub, color = 'text-primary', icon: Icon,
 }: {
@@ -169,7 +186,18 @@ export default function BacktestPage() {
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
   const [running, setRunning] = useState(false)
+  const [health,  setHealth]  = useState<BacktestHealth | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  async function loadHealth() {
+    try {
+      const res = await fetch('/api/bot/health', { cache: 'no-store' })
+      if (res.ok) {
+        const d = await res.json()
+        setHealth(d.backtest ?? null)
+      }
+    } catch { /* bot offline */ }
+  }
 
   async function load() {
     setLoading(true); setError(null)
@@ -182,6 +210,7 @@ export default function BacktestPage() {
     } finally {
       setLoading(false)
     }
+    loadHealth()
   }
 
   async function runBacktest() {
@@ -196,6 +225,7 @@ export default function BacktestPage() {
       if (res.ok) {
         const fresh = await res.json()
         setData(fresh)
+        loadHealth()
         if (fresh.results || fresh.optimal) {
           if (pollRef.current) clearInterval(pollRef.current)
           setRunning(false)
@@ -233,6 +263,35 @@ export default function BacktestPage() {
             Refresh
           </button>
         </div>
+      </div>
+
+      {/* Auto-backtest status — shows the 24/7 scheduler is running */}
+      <div className="rounded-xl border border-bg-border bg-bg-card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+        <span className="flex items-center gap-1.5 font-medium text-primary">
+          <span className={cn(
+            'h-2 w-2 rounded-full',
+            running ? 'bg-brand-cyan animate-pulse'
+              : health?.last_status === 'ok' ? 'bg-bull'
+              : health?.last_status ? 'bg-bear' : 'bg-muted',
+          )} />
+          Auto-backtest
+        </span>
+        <span className="text-muted">Runs automatically every day after market close (server runs 24/7).</span>
+        {running ? (
+          <span className="text-brand-cyan font-medium">Running now…</span>
+        ) : health?.last_run_at ? (
+          <span className="text-subtle">
+            Last run: {relativeTime(health.last_run_at)}
+            {health.last_status === 'ok'
+              ? <span className="text-bull ml-1">· ok</span>
+              : <span className="text-bear ml-1">· {health.last_status}</span>}
+          </span>
+        ) : (
+          <span className="text-muted">No run recorded yet — first run happens on next server start or close.</span>
+        )}
+        {(health?.error_count ?? 0) > 0 && (
+          <span className="text-bear font-semibold">Failures: {health!.error_count}</span>
+        )}
       </div>
 
       {loading && (

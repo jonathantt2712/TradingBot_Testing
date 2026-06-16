@@ -139,7 +139,7 @@ function RecBadge({ rec }: { rec: Recommendation }) {
 function PositionRow({ position, tradeRec, onClose, closing }: {
   position: AlpacaPosition; tradeRec?: TradeRecommendation | null; onClose: (sym: string) => void; closing: string | null
 }) {
-  const [expanded,    setExpanded]    = useState(true)
+  const [expanded,    setExpanded]    = useState(false)
   const [bars,        setBars]        = useState<Bar[]>([])
   const [loadingBars, setLoadingBars] = useState(false)
 

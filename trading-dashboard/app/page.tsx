@@ -6,16 +6,17 @@ import { RefreshButton }  from '@/components/layout/RefreshButton'
 import {
   demoStats, demoPnL, demoRegime, demoSectors,
 } from '@/lib/api'
-import { getAccount, getPositions, type AlpacaCreds } from '@/lib/alpaca'
+import { getAccount, getPositions, getPortfolioHistory, type AlpacaCreds } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { botGet } from '@/lib/bot-api'
 import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/trading'
 import type { AlpacaAccount } from '@/lib/alpaca'
 
 async function loadDashboard(creds: AlpacaCreds | null) {
-  const [account, positions, stats, pnl, regime, sectors] = await Promise.allSettled([
+  const [account, positions, history, stats, pnl, regime, sectors] = await Promise.allSettled([
     creds ? getAccount(creds) : Promise.reject(new Error('no creds')),
     creds ? getPositions(creds) : Promise.reject(new Error('no creds')),
+    creds ? getPortfolioHistory(creds, '1A', '1D') : Promise.reject(new Error('no creds')),
     botGet<PortfolioStats>('/api/stats'),
     botGet<PnLPoint[]>('/api/pnl'),
     botGet<RegimeInfo>('/api/regime'),
@@ -34,10 +35,17 @@ async function loadDashboard(creds: AlpacaCreds | null) {
   const resolvedStats: PortfolioStats = stats.status === 'fulfilled' ? stats.value : demoStats()
   if (account.status === 'fulfilled') {
     const acc = account.value
-    const livePnl  = parseFloat(acc.unrealized_pl) + parseFloat(acc.realized_pl ?? '0')
     const todayPnl = parseFloat(acc.equity) - parseFloat(acc.last_equity)
-    if (!isNaN(livePnl))  resolvedStats.total_pnl = +livePnl.toFixed(2)
     if (!isNaN(todayPnl)) resolvedStats.today_pnl = +todayPnl.toFixed(2)
+
+    // Real account total P&L = current equity − account value at start of period.
+    // (Alpaca's /v2/account does NOT return unrealized_pl/realized_pl, so we use
+    // portfolio history's base_value, which is the genuine account baseline.)
+    if (history.status === 'fulfilled') {
+      const base = history.value.base_value
+      const totalPnl = parseFloat(acc.equity) - base
+      if (base > 0 && !isNaN(totalPnl)) resolvedStats.total_pnl = +totalPnl.toFixed(2)
+    }
   }
   if (positions.status === 'fulfilled') {
     resolvedStats.open_positions = positions.value.length
