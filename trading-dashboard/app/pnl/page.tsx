@@ -18,12 +18,15 @@ function histToPnL(h: PortfolioHistory): PnLPoint[] {
 }
 
 async function loadPnL(creds: AlpacaCreds | null) {
-  const [pnl, stats, account, history, botHistory] = await Promise.allSettled([
+  const [pnl, stats, account, history, botHistory, attrResult, mcResult, regimeResult] = await Promise.allSettled([
     botGet<PnLPoint[]>('/api/pnl'),
     botGet<PortfolioStats>('/api/stats'),
     creds ? getAccount(creds) : Promise.reject(new Error('no creds')),
     creds ? getPortfolioHistory(creds, '1A', '1D') : Promise.reject(new Error('no creds')),
     botGet<TradeRecord[]>('/api/history'),
+    botGet<Record<string, { wins: number; losses: number; total: number; win_rate: number; total_pnl: number }>>('/api/agent-attribution'),
+    botGet<{ actual_win_rate: number; ci_95_lo: number; ci_95_hi: number; pnl_p5: number; pnl_p50: number; pnl_p95: number; n_trades: number; skill_signal: boolean; error?: string }>('/api/monte-carlo'),
+    botGet<Record<string, { trades: number; wins: number; win_rate: number; total_pnl: number; avg_pnl: number }>>('/api/regime-performance'),
   ])
 
   const resolvedStats = stats.status === 'fulfilled' ? stats.value : demoStats()
@@ -73,12 +76,15 @@ async function loadPnL(creds: AlpacaCreds | null) {
       : demoHistory()
 
   const live = history.status === 'fulfilled' || account.status === 'fulfilled' || pnl.status === 'fulfilled'
+  const attribution  = attrResult.status   === 'fulfilled' ? attrResult.value   : undefined
+  const monteCarlo   = mcResult.status     === 'fulfilled' ? mcResult.value     : undefined
+  const regimePerf   = regimeResult.status === 'fulfilled' ? regimeResult.value : undefined
 
-  return { pnl: resolvedPnl, stats: resolvedStats, trades: resolvedTrades, live }
+  return { pnl: resolvedPnl, stats: resolvedStats, trades: resolvedTrades, live, attribution, monteCarlo, regimePerf }
 }
 
 export default async function PnLPage() {
   const creds = await getAlpacaCreds()
-  const { pnl, stats, trades, live } = await loadPnL(creds)
-  return <PnLAnalytics pnl={pnl} stats={stats} trades={trades} live={live} />
+  const { pnl, stats, trades, live, attribution, monteCarlo, regimePerf } = await loadPnL(creds)
+  return <PnLAnalytics pnl={pnl} stats={stats} trades={trades} live={live} attribution={attribution} monteCarlo={monteCarlo} regimePerf={regimePerf} />
 }
