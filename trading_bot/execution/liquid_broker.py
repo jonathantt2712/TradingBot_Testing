@@ -112,7 +112,7 @@ class LiquidBroker(BaseBroker):
 
         except Exception:
             logger.exception("LiquidBroker.get_bars failed for %s", symbol)
-            return None
+            raise
 
     async def submit_bracket(self, decision: TradeDecision) -> Optional[OrderReceipt]:
         """Submit a bracket order (entry + TP/SL) to Liquid.
@@ -143,7 +143,7 @@ class LiquidBroker(BaseBroker):
             order_id = str(data.get("order_id", ""))
             status = data.get("status", "pending_confirmation")
             logger.info("Liquid order submitted: %s %s %s -> %s", side, r.qty, decision.ticker, status)
-            return OrderReceipt(order_id=order_id, status=status)
+            return OrderReceipt(order_id=order_id, status=status, ticker=decision.ticker, side=side, qty=r.qty)
         except Exception:
             logger.exception("LiquidBroker.submit_bracket failed for %s", decision.ticker)
             return None

@@ -99,15 +99,6 @@ export function AccountBar({ account, error }: Props) {
           </div>
         </div>
       ))}
-
-      {/* Day-trade count */}
-      <div className="ml-auto text-right">
-        <p className="text-[10px] text-muted">Day Trades</p>
-        <p className="text-xs font-mono font-bold text-primary">{account.daytrade_count}/3</p>
-        {account.pattern_day_trader && (
-          <p className="text-[9px] text-bull hidden sm:block">PDT Account</p>
-        )}
-      </div>
     </div>
   )
 }

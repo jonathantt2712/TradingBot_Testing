@@ -1,6 +1,6 @@
-# Pings the Render backend every 10 minutes during US market hours (Mon-Fri)
-# so the free-tier service never sleeps while trading is possible.
+# Pings the Railway backend every 10 minutes during US market hours (Mon-Fri).
 # Cron is UTC: 13:00-20:50 UTC covers 9:30-16:00 ET in both DST states.
+# Set RAILWAY_BACKEND_URL as a repo secret (Settings → Secrets → Actions).
 name: Keep backend awake (market hours)
 
 on:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 env:
-  BACKEND_URL: https://tradingbot-api-ql85.onrender.com
+  BACKEND_URL: ${{ secrets.RAILWAY_BACKEND_URL }}
 
 jobs:
   ping:

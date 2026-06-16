@@ -61,6 +61,7 @@ class RiskAgent(BaseAgent):
             )
 
         atr = self._atr(ctx.bars)
+        price = float(ctx.last_price or 0.0)
         equity = float(ctx.account.get("equity", 0.0))
 
         return AgentEvaluation(
@@ -91,6 +92,8 @@ class RiskAgent(BaseAgent):
                     "risk_usd":              round(plan.risk_per_trade_usd, 2),
                     "max_position_pct":      self.cfg.max_position_pct,
                     "atr":                   round(atr, 4),
+                    "atr_pct":               round(atr / max(price, 0.01) * 100, 3),
+                    "volatility_multiplier": round(self._volatility_multiplier(atr, price), 3),
                     "atr_stop_multiple":     self.cfg.atr_stop_multiple,
                     "atr_target_multiple":   self.cfg.atr_target_multiple,
                 },
@@ -127,7 +130,8 @@ class RiskAgent(BaseAgent):
             logger.error("no account equity in context — refusing to build a plan")
             return None
 
-        risk_usd = equity * self.cfg.max_risk_per_trade_pct
+        vol_mult = self._volatility_multiplier(atr, price)
+        risk_usd = equity * self.cfg.max_risk_per_trade_pct * vol_mult
         stop_dist = atr * self.cfg.atr_stop_multiple
         target_dist = self._target_dist(ctx.bars, intended, price, atr)
         if target_dist <= 0:
@@ -157,6 +161,21 @@ class RiskAgent(BaseAgent):
             risk_reward=round(rr, 3),
             risk_per_trade_usd=round(risk_usd, 2),
         )
+
+    @staticmethod
+    def _volatility_multiplier(atr: float, price: float) -> float:
+        """Scale position size inversely to ATR/price ratio.
+
+        Baseline ATR% = 1.5% (moderate volatility → 1.0x size).
+        High ATR% (>4%) → smaller position (floor 0.5x).
+        Low ATR% (<0.5%) → larger position (cap 1.5x).
+        """
+        if price <= 0 or atr <= 0:
+            return 1.0
+        atr_pct = atr / price
+        # Normalize: 1.5% ATR = neutral (1.0x), scale inversely
+        multiplier = 0.015 / atr_pct
+        return float(np.clip(multiplier, 0.5, 1.5))
 
     def _target_dist(
         self,

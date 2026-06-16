@@ -23,11 +23,13 @@ def _env_bool(key: str, default: bool = False) -> bool:
 
 @dataclass(slots=True)
 class AgentWeights:
-    fundamental: float = 0.20
-    vision:      float = 0.15
-    technical:   float = 0.35
-    liquid:      float = 0.15
-    social:      float = 0.15
+    fundamental: float = 0.18
+    vision:      float = 0.14
+    technical:   float = 0.32
+    liquid:      float = 0.13
+    social:      float = 0.13
+    insider:     float = 0.10   # congressional trading intelligence
+    squeeze:     float = 0.08   # FINRA short volume squeeze detector
 
     def as_map(self) -> Mapping[str, float]:
         raw = {
@@ -36,6 +38,8 @@ class AgentWeights:
             "technical":   self.technical,
             "liquid":      self.liquid,
             "social":      self.social,
+            "insider":     self.insider,
+            "squeeze":     self.squeeze,
         }
         total = sum(raw.values())
         if total <= 0:
@@ -64,7 +68,7 @@ class DecisionThresholds:
 @dataclass(slots=True)
 class ScannerConfig:
     enabled:         bool  = field(default_factory=lambda: _env_bool("SCANNER_ENABLED", True))
-    top_n:           int   = field(default_factory=lambda: int(_env_float("SCANNER_TOP_N", 20)))
+    top_n:           int   = field(default_factory=lambda: int(_env_float("SCANNER_TOP_N", 50)))
     min_price:       float = field(default_factory=lambda: _env_float("SCANNER_MIN_PRICE", 5.0))
     max_price:       float = field(default_factory=lambda: _env_float("SCANNER_MAX_PRICE", 2000.0))
     min_volume:      int   = field(default_factory=lambda: int(_env_float("SCANNER_MIN_VOLUME", 500000)))

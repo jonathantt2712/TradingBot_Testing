@@ -20,6 +20,7 @@ tsconfig.tsbuildinfo
 # ── Per-machine Claude Code settings ─────────────────────────────────────────
 .claude/settings.local.json
 .claude/settings.json
+.claude/worktrees/
 
 # ── Runtime data & logs (regenerated while the bot runs) ────────────────────
 bot_data/
@@ -32,3 +33,4 @@ logs/
 .playwright-mcp/
 
 .vercel
+.claude/worktrees/

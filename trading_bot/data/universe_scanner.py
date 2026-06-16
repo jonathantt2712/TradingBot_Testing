@@ -78,8 +78,8 @@ class UniverseScanner:
         momentum, and returns the best candidates.
         """
         async with aiohttp.ClientSession(headers=self._headers) as session:
-            active_task  = self._fetch_most_active(session, top=50)
-            movers_task  = self._fetch_market_movers(session, top=25)
+            active_task  = self._fetch_most_active(session, top=100)
+            movers_task  = self._fetch_market_movers(session, top=50)
 
             active_raw, movers_raw = await asyncio.gather(
                 active_task, movers_task, return_exceptions=True
@@ -262,6 +262,11 @@ class UniverseScanner:
 
         if volume > 0 and volume < min_volume:
             return f"volume {volume:,} < {min_volume:,}"
+
+        # Proxy market-cap filter: price × daily volume > $50M (avoids micro-caps with wide spreads)
+        market_cap_proxy = price * volume
+        if market_cap_proxy > 0 and market_cap_proxy < 50_000_000:
+            return f"market-cap proxy ${market_cap_proxy/1e6:.1f}M < $50M"
 
         # Must be moving
         chg = abs(data.get("percent_change") or data.get("change_percent") or 0.0)

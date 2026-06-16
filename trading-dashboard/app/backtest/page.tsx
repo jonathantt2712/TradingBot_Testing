@@ -1,8 +1,8 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   TrendingUp, TrendingDown, BarChart2, Target, AlertTriangle,
-  RefreshCw, CheckCircle2, XCircle, Clock, Activity,
+  RefreshCw, CheckCircle2, XCircle, Clock, Activity, Play, Loader2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -35,6 +35,31 @@ interface BacktestPayload {
   results:    BacktestData | null
   optimal:    BacktestData | null
   configText: string | null
+}
+
+interface BacktestHealth {
+  last_run_at: string | null
+  last_status: 'ok' | 'failed' | 'timeout' | null
+  error_count: number
+  last_error:  string | null
+}
+
+interface RejectionRecord {
+  ts:              string
+  ticker:          string
+  reason:          string
+  composite_score: number
+  [key: string]:   unknown
+}
+
+function relativeTime(iso: string): string {
+  const ms   = Date.now() - new Date(iso + (iso.endsWith('Z') ? '' : 'Z')).getTime()
+  const mins = Math.floor(ms / 60000)
+  if (mins < 1)  return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24)  return `${hrs}h ago`
+  return `${Math.floor(hrs / 24)}d ago`
 }
 
 function StatCard({
@@ -165,9 +190,33 @@ function DatasetPanel({ data, title, badge }: { data: BacktestData; title: strin
 }
 
 export default function BacktestPage() {
-  const [data,    setData]    = useState<BacktestPayload | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState<string | null>(null)
+  const [data,       setData]       = useState<BacktestPayload | null>(null)
+  const [loading,    setLoading]    = useState(true)
+  const [error,      setError]      = useState<string | null>(null)
+  const [running,    setRunning]    = useState(false)
+  const [health,     setHealth]     = useState<BacktestHealth | null>(null)
+  const [rejections, setRejections] = useState<RejectionRecord[]>([])
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  async function loadHealth() {
+    try {
+      const res = await fetch('/api/bot/health', { cache: 'no-store' })
+      if (res.ok) {
+        const d = await res.json()
+        setHealth(d.backtest ?? null)
+      }
+    } catch { /* bot offline */ }
+  }
+
+  async function loadRejections() {
+    try {
+      const res = await fetch('/api/bot/rejections')
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) setRejections(data.slice(-10).reverse())
+      }
+    } catch { /* ignore */ }
+  }
 
   async function load() {
     setLoading(true); setError(null)
@@ -180,9 +229,33 @@ export default function BacktestPage() {
     } finally {
       setLoading(false)
     }
+    loadHealth()
+    loadRejections()
+  }
+
+  async function runBacktest() {
+    if (running) return
+    setRunning(true)
+    try {
+      await fetch('/api/backtest/run', { method: 'POST' })
+    } catch { /* ignore trigger errors — bot may queue it */ }
+    // Poll for updated results every 10s while running
+    pollRef.current = setInterval(async () => {
+      const res = await fetch('/api/backtest', { cache: 'no-store' })
+      if (res.ok) {
+        const fresh = await res.json()
+        setData(fresh)
+        loadHealth()
+        if (fresh.results || fresh.optimal) {
+          if (pollRef.current) clearInterval(pollRef.current)
+          setRunning(false)
+        }
+      }
+    }, 10_000)
   }
 
   useEffect(() => { load() }, [])
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">
@@ -192,11 +265,71 @@ export default function BacktestPage() {
           <h1 className="text-xl font-bold text-primary">Backtest Results</h1>
           <p className="text-xs text-muted mt-0.5">Walk-forward day-trade simulation · research-filtered signals</p>
         </div>
-        <button onClick={load} disabled={loading} className="btn-ghost text-xs">
-          <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={runBacktest}
+            disabled={running}
+            className={cn(
+              'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all',
+              'bg-brand-cyan/15 border border-brand-cyan/30 text-brand-cyan hover:bg-brand-cyan/25',
+              'disabled:opacity-50 disabled:cursor-not-allowed',
+            )}
+          >
+            {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+            {running ? 'Running...' : 'Run Backtest'}
+          </button>
+          <button onClick={load} disabled={loading} className="btn-ghost text-xs">
+            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+            Refresh
+          </button>
+        </div>
       </div>
+
+      {/* Auto-backtest status — shows the 24/7 scheduler is running */}
+      <div className="rounded-xl border border-bg-border bg-bg-card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+        <span className="flex items-center gap-1.5 font-medium text-primary">
+          <span className={cn(
+            'h-2 w-2 rounded-full',
+            running ? 'bg-brand-cyan animate-pulse'
+              : health?.last_status === 'ok' ? 'bg-bull'
+              : health?.last_status ? 'bg-bear' : 'bg-muted',
+          )} />
+          Auto-backtest
+        </span>
+        <span className="text-muted">Runs automatically every day after market close (server runs 24/7).</span>
+        {running ? (
+          <span className="text-brand-cyan font-medium">Running now…</span>
+        ) : health?.last_run_at ? (
+          <span className="text-subtle">
+            Last run: {relativeTime(health.last_run_at)}
+            {health.last_status === 'ok'
+              ? <span className="text-bull ml-1">· ok</span>
+              : <span className="text-bear ml-1">· {health.last_status}</span>}
+          </span>
+        ) : (
+          <span className="text-muted">No run recorded yet — first run happens on next server start or close.</span>
+        )}
+        {(health?.error_count ?? 0) > 0 && (
+          <span className="text-bear font-semibold">Failures: {health!.error_count}</span>
+        )}
+      </div>
+
+      {rejections.length > 0 && (
+        <div className="rounded-xl border border-bg-border bg-bg-card px-4 py-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted mb-2">
+            Recent Trade Rejections
+          </p>
+          <div className="space-y-1">
+            {rejections.map((r, i) => (
+              <div key={i} className="flex items-center justify-between text-xs">
+                <span className="font-mono text-primary">{r.ticker}</span>
+                <span className="text-muted capitalize">{r.reason.replace(/_/g, ' ')}</span>
+                <span className="text-subtle">{new Date(r.ts).toLocaleTimeString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {loading && (
         <div className="card flex items-center justify-center py-20">

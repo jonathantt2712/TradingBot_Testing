@@ -20,10 +20,15 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
+from datetime import datetime, time as _time
+from pathlib import Path
 from typing import Sequence
+from zoneinfo import ZoneInfo
+
 
 import bootstrap  # loads .env files on import — keep first
 from bootstrap import build_broker, build_manager, eod_flatten_loop, refresh_market_context
@@ -39,13 +44,35 @@ from execution.signal_publisher import SignalPublisher
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 logger = logging.getLogger("live")
 
-RESCAN_INTERVAL_MIN   = int(os.environ.get("RESCAN_INTERVAL_MIN",   "30"))
-BREAKOUT_INTERVAL_MIN = int(os.environ.get("BREAKOUT_INTERVAL_MIN", "5"))
-BREAKOUT_MIN_CHANGE   = float(os.environ.get("BREAKOUT_MIN_CHANGE_PCT", "3.0"))
+_ET = ZoneInfo("America/New_York")
+
+RESCAN_INTERVAL_MIN    = int(os.environ.get("RESCAN_INTERVAL_MIN",    "30"))
+BREAKOUT_INTERVAL_MIN  = int(os.environ.get("BREAKOUT_INTERVAL_MIN",  "5"))
+BREAKOUT_MIN_CHANGE    = float(os.environ.get("BREAKOUT_MIN_CHANGE_PCT", "3.0"))
+STRATEGY_REFRESH_MIN   = int(os.environ.get("STRATEGY_REFRESH_MIN",   "60"))
+
+# Weights file written by api_server's self-tuner — we read it hourly and
+# apply ATR/threshold updates to the live pm without restarting.
+_WEIGHTS_FILE = Path(__file__).parent / "data" / "strategy_weights.json"
 
 # Used when the universe scanner is unreachable at startup (network blip):
 # deep-liquidity names so the bot stays alive until the scanner recovers.
 FALLBACK_WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA"]
+
+# Protects concurrent reads/writes to the active_tickers list across async tasks.
+_ticker_lock: asyncio.Lock | None = None
+
+# Caps concurrent ticker evaluations to avoid Alpaca API rate limit exhaustion.
+_EVAL_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _is_market_hours() -> bool:
+    """True during US equities regular session (Mon–Fri 09:30–16:10 ET)."""
+    now = datetime.now(_ET)
+    return (
+        now.weekday() < 5
+        and _time(9, 30) <= now.time() <= _time(16, 10)
+    )
 
 
 async def evaluate_ticker(
@@ -56,21 +83,22 @@ async def evaluate_ticker(
     execute: bool,
     publisher: SignalPublisher | None,
 ) -> None:
-    try:
-        bars = await broker.get_bars(ticker, timeframe="5Min", limit=200)
-        account = await broker.get_account()
-        chart = render_chart(ticker, bars)
-        ctx = AnalysisContext(ticker=ticker, bars=bars, account=account, chart_image_path=chart)
-        decision = await pm.run_once(ctx, execute=execute)
-        logger.info(
-            "%s -> %s | composite=%.1f | %s",
-            ticker, decision.decision.value, decision.composite_score,
-            pm.summarise(decision.evaluations),
-        )
-        if publisher:
-            await publisher.publish(decision)
-    except Exception:
-        logger.exception("evaluation failed for %s", ticker)
+    async with _EVAL_SEMAPHORE:
+        try:
+            bars = await broker.get_bars(ticker, timeframe="5Min", limit=200)
+            account = await broker.get_account()
+            chart = render_chart(ticker, bars)
+            ctx = AnalysisContext(ticker=ticker, bars=bars, account=account, chart_image_path=chart)
+            decision = await pm.run_once(ctx, execute=execute)
+            logger.info(
+                "%s -> %s | composite=%.1f | %s",
+                ticker, decision.decision.value, decision.composite_score,
+                pm.summarise(decision.evaluations),
+            )
+            if publisher:
+                await publisher.publish(decision)
+        except Exception:
+            logger.exception("evaluation failed for %s", ticker)
 
 
 async def handle_heartbeat(
@@ -143,9 +171,10 @@ async def breakout_monitor_loop(
             )
             if not breakouts:
                 continue
-            for sym in breakouts:
-                if sym not in active_tickers:
-                    active_tickers.append(sym)
+            async with _ticker_lock:
+                for sym in breakouts:
+                    if sym not in active_tickers:
+                        active_tickers.append(sym)
             logger.info("BREAKOUT ALERT: %s — evaluating immediately", breakouts)
             await asyncio.gather(
                 *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
@@ -185,9 +214,10 @@ async def rescan_loop(
                     min_change=scanner_cfg.min_change_pct,
                 )
                 if fresh:
-                    added   = set(fresh) - set(active_tickers)
-                    removed = set(active_tickers) - set(fresh)
-                    active_tickers[:] = fresh
+                    async with _ticker_lock:
+                        added   = set(fresh) - set(active_tickers)
+                        removed = set(active_tickers) - set(fresh)
+                        active_tickers[:] = fresh
                     if added or removed:
                         logger.info(
                             "Universe refreshed: +%s -%s -> active=%s",
@@ -199,15 +229,62 @@ async def rescan_loop(
         # Regime + SPY bars go stale over a session — refresh before re-scoring.
         await refresh_market_context(pm, broker)
 
-        logger.info("Scheduled rescan of %s", active_tickers)
+        if not _is_market_hours():
+            logger.debug("rescan: market closed — skipping LLM evaluation")
+            continue
+
+        async with _ticker_lock:
+            snapshot = list(active_tickers)
+        logger.info("Scheduled rescan of %s", snapshot)
         await asyncio.gather(
             *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
-              for t in list(active_tickers)],
+              for t in snapshot],
             return_exceptions=True,
         )
 
 
+async def strategy_refresh_loop(pm: PortfolioManager, *, interval_min: int) -> None:
+    """Apply api_server's self-tuned strategy weights to the live PortfolioManager.
+
+    api_server._update_strategy_weights() adjusts ATR multiples based on
+    the last 20 closed trades (win rate) and writes them to strategy_weights.json.
+    This loop reads that file hourly and pushes the updates into the live pm
+    so the bot continuously improves without a restart.
+    """
+    while True:
+        await asyncio.sleep(interval_min * 60)
+        try:
+            if not _WEIGHTS_FILE.exists():
+                continue
+            w = json.loads(_WEIGHTS_FILE.read_text())
+            stop_m = w.get("atr_stop_multiple")
+            tp_m   = w.get("atr_target_multiple")
+            changed = False
+            if stop_m and abs(pm.risk.cfg.atr_stop_multiple - float(stop_m)) > 1e-6:
+                pm.risk.cfg.atr_stop_multiple = float(stop_m)
+                changed = True
+            if tp_m and abs(pm.risk.cfg.atr_target_multiple - float(tp_m)) > 1e-6:
+                pm.risk.cfg.atr_target_multiple = float(tp_m)
+                changed = True
+            if changed:
+                logger.info(
+                    "Strategy v%s applied: atr_stop=%.2f atr_tp=%.2f "
+                    "bias=%s win_rate=%.1f%%",
+                    w.get("update_count", "?"),
+                    pm.risk.cfg.atr_stop_multiple,
+                    pm.risk.cfg.atr_target_multiple,
+                    w.get("bias", "?"),
+                    w.get("win_rate_30d") or 0.0,
+                )
+        except Exception:
+            logger.exception("strategy refresh failed")
+
+
 async def main(tickers: Sequence[str]) -> None:
+    global _ticker_lock, _EVAL_SEMAPHORE
+    _ticker_lock = asyncio.Lock()
+    _EVAL_SEMAPHORE = asyncio.Semaphore(10)
+
     settings = load_settings()
     execute = os.environ.get("EXECUTE_LIVE", "false").lower() == "true"
 
@@ -274,7 +351,7 @@ async def main(tickers: Sequence[str]) -> None:
         logger.info("Initial scan of %s", active_tickers)
         await asyncio.gather(
             *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
-              for t in active_tickers],
+              for t in list(active_tickers)],
             return_exceptions=True,
         )
 
@@ -292,6 +369,7 @@ async def main(tickers: Sequence[str]) -> None:
                 universe=universe,
                 scanner_cfg=settings.scanner if universe else None,
             ),
+            strategy_refresh_loop(pm, interval_min=STRATEGY_REFRESH_MIN),
         ]
         if universe is not None:
             loops.append(

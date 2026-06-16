@@ -68,6 +68,10 @@ def _next_market_open() -> datetime:
 
 
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
+DAILY_LOSS_LIMIT_PCT    = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))   # 2% daily drawdown halt
+MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 3 consecutive losses halt
+TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", "0.05"))  # 5% trailing distance
+PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "2.0"))  # max net |beta| across open positions
 
 # Daily scan stats (reset at midnight by _background_loop)
 _scan_stats: Dict[str, Any] = {
@@ -81,9 +85,19 @@ _scan_stats: Dict[str, Any] = {
     "market_closed_skips": 0,
 }
 
-from fastapi import FastAPI, HTTPException
+import secrets as _secrets
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+_BOT_API_SECRET = os.getenv("BOT_API_SECRET", "")
+
+
+async def _verify_bot_secret(x_bot_secret: str = Header(default="")) -> None:
+    if not _BOT_API_SECRET:
+        return  # secret not configured — open in dev; Railway sets it in prod
+    if not _secrets.compare_digest(x_bot_secret, _BOT_API_SECRET):
+        raise HTTPException(status_code=401, detail="Invalid bot secret")
 
 logger = logging.getLogger("api_server")
 logging.basicConfig(level=logging.INFO)
@@ -207,6 +221,10 @@ PNL_FILE     = DATA_DIR / "pnl.json"
 CONTEXT_FILE = DATA_DIR / "context.json"
 WEIGHTS_FILE = DATA_DIR / "strategy_weights.json"
 REGIME_FILE  = DATA_DIR / "regime.json"
+REJECT_LOG      = DATA_DIR / "risk_rejections.jsonl"
+SNAPSHOT_LOG    = DATA_DIR / "daily_snapshots.jsonl"
+AGENT_PERF_FILE = DATA_DIR / "agent_attribution.json"
+EARNINGS_CACHE: Dict[str, Any] = {"blacklist": set(), "updated_at": None}
 
 
 def _load(path: Path, default: Any) -> Any:
@@ -217,7 +235,25 @@ def _load(path: Path, default: Any) -> Any:
 
 
 def _save(path: Path, obj: Any) -> None:
-    path.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
+    """Append a trade rejection record to risk_rejections.jsonl."""
+    entry = {
+        "ts":              datetime.utcnow().isoformat(),
+        "ticker":          ticker,
+        "reason":          reason,
+        "composite_score": round(score, 1),
+        **details,
+    }
+    try:
+        with open(REJECT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as exc:
+        logger.debug("rejection log write failed: %s", exc)
 
 
 # === Kelly position sizing ===
@@ -278,6 +314,41 @@ def _load_weights() -> Dict[str, Any]:
     return {**DEFAULT_WEIGHTS, **_load(WEIGHTS_FILE, {})}
 
 
+def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
+    """Append a trade rejection record to risk_rejections.jsonl."""
+    entry = {
+        "ts":              datetime.utcnow().isoformat(),
+        "ticker":          ticker,
+        "reason":          reason,
+        "composite_score": round(score, 1),
+        **details,
+    }
+    try:
+        with open(REJECT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as exc:
+        logger.debug("rejection log write failed: %s", exc)
+
+
+def _close_simulated_trade(trade: dict, exit_price: float, reason: str) -> None:
+    """Mark a trade as closed in-place (used by trailing stop and EoD flatten)."""
+    direction = trade.get("direction", "LONG")
+    entry     = float(trade.get("entry") or 0)
+    qty       = int(trade.get("qty", 1))
+    if direction == "LONG":
+        pnl     = (exit_price - entry) * qty
+        pnl_pct = (exit_price - entry) / entry * 100 if entry else 0.0
+    else:
+        pnl     = (entry - exit_price) * qty
+        pnl_pct = (entry - exit_price) / entry * 100 if entry else 0.0
+    trade["status"]      = "closed"
+    trade["exit"]        = round(exit_price, 2)
+    trade["exit_reason"] = reason
+    trade["pnl"]         = round(pnl, 2)
+    trade["pnl_pct"]     = round(pnl_pct, 2)
+    trade["closed_at"]   = datetime.utcnow().isoformat()
+
+
 def _save_weights(w: Dict[str, Any]) -> None:
     _save(WEIGHTS_FILE, w)
     logger.info(
@@ -308,6 +379,40 @@ async def _get_account_equity(session: aiohttp.ClientSession) -> float:
     except Exception as exc:
         logger.error("Could not fetch account equity — recs will be unsized: %s", exc)
     return 0.0
+
+
+async def _fetch_earnings_blacklist(session: aiohttp.ClientSession) -> set:
+    """Return set of tickers with earnings in the next 48 hours.
+
+    Uses Alpaca corporate actions API. Falls back to empty set on any error
+    so the scanner keeps running even if this call fails.
+    """
+    global EARNINGS_CACHE
+    now = datetime.utcnow()
+    cached_at = EARNINGS_CACHE.get("updated_at")
+    if cached_at and (now - cached_at).total_seconds() < 3600:
+        return EARNINGS_CACHE["blacklist"]
+
+    end = (now + timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        async with session.get(
+            f"{_DATA_BASE}/v1beta1/corporate-actions/earnings",
+            params={"start": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "end": end, "limit": "200"},
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status != 200:
+                return EARNINGS_CACHE.get("blacklist", set())
+            data = await r.json()
+    except Exception:
+        return EARNINGS_CACHE.get("blacklist", set())
+
+    blacklist = {item["symbol"] for item in data.get("earnings", []) if item.get("symbol")}
+    EARNINGS_CACHE["blacklist"] = blacklist
+    EARNINGS_CACHE["updated_at"] = now
+    if blacklist:
+        logger.info("Earnings blackout: %d tickers skipped (%s…)", len(blacklist), ", ".join(sorted(blacklist)[:5]))
+    return blacklist
 
 
 # === Bar data helpers ===
@@ -425,6 +530,8 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             # These have no real Alpaca bracket. Fall back to price-based
             # TP/SL detection so they don't stay open forever.
             if order_id.startswith("PAPER-"):
+                if not _is_market_open():
+                    continue
                 if not tp_val or not sl_val or not entry:
                     continue
                 ticker_sym = trade.get("ticker", "")
@@ -470,6 +577,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
                 trade["pnl_pct"]     = round(pnl_pct, 2)
                 trade["closed_at"]   = datetime.utcnow().isoformat()
                 modified = True
+                _update_agent_attribution(trade)
                 logger.info(
                     "Closed (simulated) %s %s via %s: exit=%.2f  PnL=$%.2f (%.2f%%)",
                     direction, ticker_sym, exit_reason, exit_price, pnl, pnl_pct,
@@ -529,6 +637,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             trade["pnl_pct"]     = round(pnl_pct, 2)
             trade["closed_at"]   = datetime.utcnow().isoformat()
             modified = True
+            _update_agent_attribution(trade)
             logger.info("Closed %s %s via %s: exit=%.2f PnL=$%.2f (%.2f%%)",
                         direction, trade["ticker"], exit_reason, exit_price, pnl, pnl_pct)
 
@@ -536,7 +645,8 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             logger.debug("Could not check order %s: %s", trade.get("order_id"), exc)
 
     if modified:
-        _save(TRADES_FILE, trades)
+        async with _trades_lock:
+            _save(TRADES_FILE, trades)
 
 
 # === Strategy weight learning ===
@@ -547,7 +657,7 @@ def _update_strategy_weights() -> None:
 
     closed = [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None]
     recent = closed[-20:]
-    if len(recent) < 5:
+    if len(recent) < 15:
         return
 
     wins         = [t for t in recent if (t.get("pnl") or 0) > 0]
@@ -586,6 +696,31 @@ def _update_strategy_weights() -> None:
         weights["bias"] = "neutral"
 
     _save_weights(weights)
+
+
+def _update_agent_attribution(trade: dict) -> None:
+    """Update per-agent win/loss counters when a trade closes."""
+    pnl = trade.get("pnl")
+    if pnl is None:
+        return
+    evaluations = trade.get("evaluations") or []
+    if not evaluations:
+        return
+
+    won = pnl > 0
+    attr = _load(AGENT_PERF_FILE, {})
+    for ev in evaluations:
+        role = ev.get("role", "") if isinstance(ev, dict) else getattr(ev, "role", "")
+        if not role:
+            continue
+        if role not in attr:
+            attr[role] = {"wins": 0, "losses": 0, "total_pnl": 0.0}
+        if won:
+            attr[role]["wins"] += 1
+        else:
+            attr[role]["losses"] += 1
+        attr[role]["total_pnl"] = round(attr[role]["total_pnl"] + float(pnl), 2)
+    _save(AGENT_PERF_FILE, attr)
 
 
 # === Signal revalidation ===
@@ -665,6 +800,23 @@ async def _revalidate_expired_recs(session: aiohttp.ClientSession) -> None:
 
 _scan_counter: Dict[str, int] = {"n": 0}
 
+_trades_lock: asyncio.Lock = None  # type: ignore[assignment]  # set in lifespan
+
+_backtest_stats: Dict[str, Any] = {
+    "last_run_at":   None,
+    "last_status":   None,   # "ok" | "failed" | "timeout"
+    "error_count":   0,
+    "last_error":    None,
+}
+
+_circuit_breaker: Dict[str, Any] = {
+    "halted":          False,
+    "reason":          None,      # "daily_loss" | "consecutive_losses" | None
+    "halted_at":       None,
+    "consecutive_losses": 0,
+    "daily_pnl_pct":   0.0,
+}
+
 
 def _reset_scan_stats_if_needed() -> None:
     today = str(date.today())
@@ -679,6 +831,180 @@ def _reset_scan_stats_if_needed() -> None:
             "last_scan_at":     None,
             "market_closed_skips": 0,
         })
+
+
+def _daily_pnl_pct() -> float:
+    """Today's realized P&L as fraction of current equity (negative = loss)."""
+    today = str(date.today())
+    trades = _load(TRADES_FILE, [])
+    if not isinstance(trades, list):
+        return 0.0
+    today_trades = [
+        t for t in trades
+        if t.get("status") == "closed"
+        and (t.get("closed_at") or "")[:10] == today
+        and t.get("pnl") is not None
+    ]
+    if not today_trades:
+        return 0.0
+    total_pnl = sum(float(t["pnl"]) for t in today_trades)
+    # Use yesterday's equity as baseline (we don't have real-time equity here)
+    # Estimate from total account trades — minimum $1000 guard
+    all_pnl = sum(float(t.get("pnl", 0)) for t in trades if t.get("status") == "closed")
+    est_equity = max(abs(all_pnl) * 3 + 1000, 1000)  # conservative floor
+    return total_pnl / est_equity
+
+
+def _consecutive_losses() -> int:
+    """Count of most recent consecutive losing closed trades."""
+    trades = _load(TRADES_FILE, [])
+    if not isinstance(trades, list):
+        return 0
+    closed = sorted(
+        [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None],
+        key=lambda t: t.get("closed_at") or t.get("executed_at") or "",
+        reverse=True,
+    )
+    count = 0
+    for t in closed:
+        if float(t["pnl"]) < 0:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _check_circuit_breaker() -> Optional[str]:
+    """Return a halt reason string if trading should be stopped, None if clear."""
+    # Consecutive loss check
+    consec = _consecutive_losses()
+    _circuit_breaker["consecutive_losses"] = consec
+    if consec >= MAX_CONSECUTIVE_LOSSES:
+        reason = f"{consec} consecutive losses — trading halted until manual reset"
+        _circuit_breaker.update({"halted": True, "reason": "consecutive_losses",
+                                  "halted_at": datetime.utcnow().isoformat()})
+        return reason
+
+    # Daily P&L check
+    daily_loss = _daily_pnl_pct()
+    _circuit_breaker["daily_pnl_pct"] = round(daily_loss * 100, 2)
+    if daily_loss <= -DAILY_LOSS_LIMIT_PCT:
+        reason = f"Daily loss limit hit ({daily_loss*100:.1f}%) — trading halted for today"
+        _circuit_breaker.update({"halted": True, "reason": "daily_loss",
+                                  "halted_at": datetime.utcnow().isoformat()})
+        return reason
+
+    _circuit_breaker["halted"] = False
+    _circuit_breaker["reason"] = None
+    return None
+
+
+async def _run_premarket_scan() -> None:
+    """Identify pre-market gappers (>2% gap) between 9:00-9:25 ET.
+
+    Tags resulting recs with premarket=True and gap_pct. These appear in the
+    dashboard with a PRE-MKT badge and give the trader a head start before the
+    regular session opens at 9:30.
+    """
+    if not _ALPACA_KEY or not _ALPACA_SECRET:
+        return
+
+    try:
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+        ) as session:
+            equity = await _get_account_equity(session)
+            async with session.get(
+                f"{_DATA_BASE}/v1beta1/screener/stocks/most-actives?by=volume&top=50",
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status != 200:
+                    return
+                actives = await r.json()
+
+            symbols = [
+                item["symbol"]
+                for item in actives.get("most_actives", [])
+                if item.get("symbol") and "." not in item["symbol"]
+            ][:50]
+
+            if not symbols:
+                return
+
+            async with session.get(
+                f"{_DATA_BASE}/v2/stocks/snapshots?symbols={','.join(symbols)}",
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status != 200:
+                    return
+                snaps: Dict[str, Any] = await r.json()
+
+        weights  = _load_weights()
+        win_mins = weights.get("time_window_minutes", 45)
+        recs: List[Dict[str, Any]] = []
+
+        for sym, snap in snaps.items():
+            try:
+                prev_bar   = snap.get("prevDailyBar") or {}
+                daily_bar  = snap.get("dailyBar") or {}
+                latest_trd = snap.get("latestTrade") or {}
+                prev_close = float(prev_bar.get("c") or 0)
+                price      = float(latest_trd.get("p") or daily_bar.get("o") or 0)
+                if prev_close <= 0 or price <= 0 or price < 5:
+                    continue
+                gap_pct = (price - prev_close) / prev_close * 100
+                if abs(gap_pct) < 2.0:
+                    continue
+                direction  = "LONG" if gap_pct > 0 else "SHORT"
+                entry      = round(price, 2)
+                d          = 1 if direction == "LONG" else -1
+                stop_pct   = weights.get("stop_pct", 0.02)
+                tp_pct     = weights.get("tp_pct",   0.05)
+                stop_loss  = round(entry * (1 - d * stop_pct), 2)
+                take_profit = round(entry * (1 + d * tp_pct),  2)
+                qty        = _kelly_qty(equity, entry, stop_loss, take_profit, 65.0)
+                rr         = round(tp_pct / stop_pct, 2)
+                dollar_rsk = round(abs(entry - stop_loss) * qty, 2)
+                expires_at = (_next_market_open() + timedelta(minutes=win_mins)).isoformat()
+
+                recs.append({
+                    "id":              f"{sym}-pm-{int(datetime.utcnow().timestamp())}",
+                    "ticker":          sym,
+                    "direction":       direction,
+                    "composite_score": round(min(max(50.0 + abs(gap_pct) * 3, 55.0), 90.0), 1),
+                    "agent_used":      False,
+                    "rationale":       f"Pre-market gap {gap_pct:+.2f}% (prev close ${prev_close:.2f})",
+                    "risk":            {"entry": entry, "stop_loss": stop_loss,
+                                       "take_profit": take_profit, "qty": qty,
+                                       "risk_reward": rr, "dollar_risk": dollar_rsk},
+                    "regime":          "neutral",
+                    "sector":          _SECTOR_MAP.get(sym, "Other"),
+                    "scanned_at":      datetime.utcnow().isoformat(),
+                    "expires_at":      expires_at,
+                    "reeval_count":    0,
+                    "hot_sector":      False,
+                    "evaluations":     [],
+                    "timestamp":       datetime.utcnow().isoformat(),
+                    "chg_pct":         round(gap_pct, 2),
+                    "premarket":       True,
+                    "gap_pct":         round(gap_pct, 2),
+                })
+            except Exception:
+                continue
+
+        if recs:
+            recs.sort(key=lambda x: abs(x["gap_pct"]), reverse=True)
+            existing = _load(RECS_FILE, [])
+            if not isinstance(existing, list):
+                existing = []
+            non_pm = [r for r in existing if not r.get("premarket")]
+            _save(RECS_FILE, recs + non_pm)
+            logger.info("Pre-market scan: %d gappers identified (>2%% gap)", len(recs))
+
+    except Exception as exc:
+        logger.warning("Pre-market scan failed: %s", exc)
 
 
 async def _run_market_scan() -> None:
@@ -730,7 +1056,7 @@ async def _run_market_scan() -> None:
                         equity, weights.get("update_count", 0), _AGENTS_AVAILABLE)
 
             async with session.get(
-                f"{_DATA_BASE}/v1beta1/screener/stocks/most-actives?by=volume&top=25",
+                f"{_DATA_BASE}/v1beta1/screener/stocks/most-actives?by=volume&top=50",
                 headers=_ALPACA_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as r:
@@ -742,7 +1068,7 @@ async def _run_market_scan() -> None:
                 item["symbol"]
                 for item in actives_data.get("most_actives", [])
                 if item.get("symbol") and "." not in item["symbol"]
-            ][:20]
+            ][:50]
 
             if not symbols_raw:
                 return
@@ -758,6 +1084,29 @@ async def _run_market_scan() -> None:
 
             bars_map = await _fetch_multi_bars(session, list(set(symbols_raw + ["SPY", "QQQ", "VIXY"])), limit=100)
             vix_index = await _fetch_vix_index(session)
+
+            # Fetch 1-hour bars for multi-timeframe confirmation gate
+            hourly_map = await _fetch_multi_bars(session, symbols_raw, timeframe="1Hour", limit=60)
+            earnings_blacklist = await _fetch_earnings_blacklist(session)
+
+        # Compute beta (correlation to SPY) for each ticker
+        ticker_beta: Dict[str, float] = {}
+        spy_df = bars_map.get("SPY")
+        if _AGENTS_AVAILABLE and spy_df is not None and len(spy_df) >= 20:
+            spy_ret = spy_df["close"].pct_change().dropna()
+            for _sym in symbols_raw:
+                _df = bars_map.get(_sym)
+                if _df is None or len(_df) < 20:
+                    ticker_beta[_sym] = 1.0
+                    continue
+                sym_ret = _df["close"].pct_change().dropna()
+                aligned = pd.concat([sym_ret, spy_ret], axis=1, join="inner")
+                if len(aligned) < 10:
+                    ticker_beta[_sym] = 1.0
+                    continue
+                cov_ = float(aligned.iloc[:, 0].cov(aligned.iloc[:, 1]))
+                var_ = float(aligned.iloc[:, 1].var())
+                ticker_beta[_sym] = round(cov_ / var_, 2) if var_ > 0 else 1.0
 
         if _AGENTS_AVAILABLE and _pm is not None:
             _pm.technical.spy_bars = bars_map.get("SPY")
@@ -840,6 +1189,10 @@ async def _run_market_scan() -> None:
             if not snap:
                 continue
 
+            if sym in earnings_blacklist:
+                _scan_stats["recs_skipped"] += 1
+                continue
+
             daily_bar  = snap.get("dailyBar")     or {}
             prev_bar   = snap.get("prevDailyBar") or {}
             latest_trd = snap.get("latestTrade")  or {}
@@ -863,7 +1216,8 @@ async def _run_market_scan() -> None:
             evaluations_out = []
 
             if _AGENTS_AVAILABLE and df is not None and len(df) >= 20:
-                ctx      = AnalysisContext(ticker=sym, bars=df, account={"equity": equity})
+                ctx      = AnalysisContext(ticker=sym, bars=df, account={"equity": equity},
+                                          hourly_bars=hourly_map.get(sym))
                 decision = await _evaluate(ctx)
                 if decision is None:
                     continue
@@ -966,6 +1320,7 @@ async def _run_market_scan() -> None:
                 "evaluations":  evaluations_out,
                 "timestamp":    datetime.utcnow().isoformat(),
                 "chg_pct":      round(chg_pct, 2),
+                "beta":         ticker_beta.get(sym, 1.0),
             })
 
         # Mark hot_sector = True for recs in the top-2 scoring sectors
@@ -1008,17 +1363,276 @@ async def _run_market_scan() -> None:
 
 # === Background loop ===
 
+_BACKTEST_SCRIPT  = _HERE / "backtest_30day.py"
+_RESULTS_FILE     = _HERE.parent / "backtest_results.json"
+_BACKTEST_INTERVAL_H = int(os.getenv("BACKTEST_INTERVAL_H", "24"))
+
+
+async def _run_backtest() -> None:
+    """Run backtest_30day.py as a subprocess (non-blocking)."""
+    if not _BACKTEST_SCRIPT.exists():
+        logger.warning("backtest_30day.py not found — skipping auto-backtest")
+        return
+    logger.info("Auto-backtest starting (interval=%dh)…", _BACKTEST_INTERVAL_H)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(_BACKTEST_SCRIPT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(_HERE),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1800)  # 30 min max
+        if proc.returncode == 0:
+            logger.info("Auto-backtest complete — results written to %s", _RESULTS_FILE)
+            _backtest_stats.update({
+                "last_run_at": datetime.utcnow().isoformat(),
+                "last_status": "ok",
+                "last_error":  None,
+            })
+        else:
+            decoded_tail = (stdout or b"").decode()[-500:]
+            logger.error("Auto-backtest failed (rc=%d): %s", proc.returncode, decoded_tail)
+            _backtest_stats.update({
+                "last_run_at": datetime.utcnow().isoformat(),
+                "last_status": "failed",
+                "error_count": _backtest_stats["error_count"] + 1,
+                "last_error":  decoded_tail,
+            })
+    except asyncio.TimeoutError:
+        logger.error("Auto-backtest timed out after 30 min — killed")
+        if proc is not None:
+            proc.kill()
+        _backtest_stats.update({
+            "last_run_at": datetime.utcnow().isoformat(),
+            "last_status": "timeout",
+            "error_count": _backtest_stats["error_count"] + 1,
+            "last_error":  "timed out after 30 min",
+        })
+    except Exception:
+        logger.exception("Auto-backtest subprocess error")
+        _backtest_stats.update({
+            "last_run_at": datetime.utcnow().isoformat(),
+            "last_status": "failed",
+            "error_count": _backtest_stats["error_count"] + 1,
+        })
+
+
+async def _eod_snapshot(session: aiohttp.ClientSession) -> None:
+    """Record daily P&L vs SPY/QQQ benchmark at ~15:55 ET."""
+    try:
+        today = str(date.today())
+
+        # Fetch account equity
+        equity_now = await _get_account_equity(session)
+
+        # Fetch SPY and QQQ latest quotes for day return
+        async def _day_return(sym: str) -> Optional[float]:
+            try:
+                async with session.get(
+                    f"{_DATA_BASE}/v2/stocks/{sym}/bars",
+                    params={"timeframe": "1Day", "limit": "2", "feed": "iex"},
+                    headers=_ALPACA_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    if r.status != 200:
+                        return None
+                    data = await r.json()
+                    bars = data.get("bars", [])
+                    if len(bars) < 2:
+                        return None
+                    prev_close = float(bars[-2].get("c", 0))
+                    last_close = float(bars[-1].get("c", 0))
+                    if prev_close <= 0:
+                        return None
+                    return round((last_close - prev_close) / prev_close * 100, 3)
+            except Exception:
+                return None
+
+        spy_ret, qqq_ret = await asyncio.gather(_day_return("SPY"), _day_return("QQQ"))
+
+        # Compute today's trade P&L
+        trades = _load(TRADES_FILE, [])
+        today_closed = [
+            t for t in trades
+            if t.get("status") == "closed" and (t.get("closed_at") or "")[:10] == today
+        ]
+        day_pnl = sum(float(t.get("pnl", 0)) for t in today_closed)
+        open_count = len([t for t in trades if t.get("status") == "open"])
+
+        snapshot = {
+            "date":              today,
+            "equity":            round(equity_now, 2) if equity_now > 0 else None,
+            "day_pnl":           round(day_pnl, 2),
+            "day_trades":        len(today_closed),
+            "open_positions":    open_count,
+            "spy_day_return_pct": spy_ret,
+            "qqq_day_return_pct": qqq_ret,
+        }
+
+        with open(SNAPSHOT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(snapshot) + "\n")
+        logger.info("EoD snapshot: pnl=$%.2f SPY=%.2f%% QQQ=%.2f%%",
+                    day_pnl, spy_ret or 0.0, qqq_ret or 0.0)
+
+    except Exception as exc:
+        logger.warning("EoD snapshot failed: %s", exc)
+
+
+async def _trailing_stop_loop() -> None:
+    """Update stop prices upward (LONG) or downward (SHORT) as positions move in our favor.
+
+    Runs every 60 seconds during market hours. Never moves stop in the losing direction.
+    Closes position immediately when trailing stop is hit (for PAPER- simulated orders).
+    """
+    if not _ALPACA_KEY or not _ALPACA_SECRET:
+        return
+
+    while True:
+        await asyncio.sleep(60)
+        if not _is_market_open():
+            continue
+
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+            ) as session:
+                trades = _load(TRADES_FILE, [])
+                open_trades = [t for t in trades if t.get("status") == "open"]
+                if not open_trades:
+                    continue
+
+                # Fetch current prices for all open tickers
+                tickers = list({t["ticker"] for t in open_trades})
+                try:
+                    async with session.get(
+                        f"{_DATA_BASE}/v2/stocks/snapshots?symbols={','.join(tickers)}",
+                        headers=_ALPACA_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as r:
+                        if r.status != 200:
+                            continue
+                        snaps: Dict[str, Any] = await r.json()
+                except Exception:
+                    continue
+
+                modified = False
+                for trade in open_trades:
+                    ticker    = trade.get("ticker", "")
+                    direction = trade.get("direction", "LONG")
+                    snap      = snaps.get(ticker, {})
+                    lt        = snap.get("latestTrade") or {}
+                    db        = snap.get("dailyBar") or {}
+                    price     = float(lt.get("p") or db.get("c") or 0)
+                    if price <= 0:
+                        continue
+
+                    risk = trade.get("risk") or trade
+                    stop = float(risk.get("stop_loss") or trade.get("stop_loss") or 0)
+                    if stop <= 0:
+                        continue
+
+                    if direction == "LONG":
+                        # Ratchet stop UP: new_stop = price × (1 - TRAIL_PCT)
+                        new_stop = round(price * (1.0 - TRAIL_STOP_PCT), 2)
+                        if new_stop > stop:
+                            if "risk" in trade and isinstance(trade["risk"], dict):
+                                trade["risk"]["stop_loss"] = new_stop
+                                trade["risk"]["high_water_mark"] = max(
+                                    price, trade["risk"].get("high_water_mark", price)
+                                )
+                            trade["stop_loss"] = new_stop
+                            modified = True
+                            logger.debug("Trail stop updated %s LONG stop %.2f -> %.2f",
+                                         ticker, stop, new_stop)
+                        # Check if current price hit the stop
+                        effective_stop = max(stop, new_stop) if new_stop > stop else stop
+                        if price <= effective_stop:
+                            _close_simulated_trade(trade, effective_stop, "trailing_stop")
+                            modified = True
+                            logger.info("Trailing stop hit: %s LONG closed @ %.2f", ticker, effective_stop)
+
+                    else:  # SHORT
+                        # Ratchet stop DOWN: new_stop = price × (1 + TRAIL_PCT)
+                        new_stop = round(price * (1.0 + TRAIL_STOP_PCT), 2)
+                        if new_stop < stop:
+                            if "risk" in trade and isinstance(trade["risk"], dict):
+                                trade["risk"]["stop_loss"] = new_stop
+                                trade["risk"]["low_water_mark"] = min(
+                                    price, trade["risk"].get("low_water_mark", price)
+                                )
+                            trade["stop_loss"] = new_stop
+                            modified = True
+                            logger.debug("Trail stop updated %s SHORT stop %.2f -> %.2f",
+                                         ticker, stop, new_stop)
+                        effective_stop = min(stop, new_stop) if new_stop < stop else stop
+                        if price >= effective_stop:
+                            _close_simulated_trade(trade, effective_stop, "trailing_stop")
+                            modified = True
+                            logger.info("Trailing stop hit: %s SHORT closed @ %.2f", ticker, effective_stop)
+
+                if modified:
+                    async with _trades_lock:
+                        _save(TRADES_FILE, trades)
+
+        except Exception as exc:
+            logger.warning("Trailing stop loop error: %s", exc)
+
+
 async def _background_loop() -> None:
     await asyncio.sleep(5)
     await _run_market_scan()
+
+    # Run backtest immediately on startup if no results exist yet
+    if not _RESULTS_FILE.exists():
+        asyncio.create_task(_run_backtest())
+
     consecutive_errors = 0
     last_day = ""
+    last_backtest_day = ""
+    last_snapshot_day  = ""
+    last_premarket_day = ""
     while True:
         # Reset daily scan stats at midnight
         today = str(date.today())
         if today != last_day:
             _reset_scan_stats_if_needed()
             last_day = today
+
+        # EoD benchmark snapshot at ~15:55 ET (before backtest at 17:00+)
+        if _ET is not None and _ALPACA_KEY and _ALPACA_SECRET:
+            now_et = datetime.now(_ET)
+            if (today != last_snapshot_day
+                    and now_et.weekday() < 5
+                    and now_et.hour == 15 and now_et.minute >= 55):
+                last_snapshot_day = today
+                try:
+                    async with aiohttp.ClientSession(
+                        connector=aiohttp.TCPConnector(
+                            resolver=aiohttp.resolver.ThreadedResolver()
+                        )
+                    ) as _snap_session:
+                        await _eod_snapshot(_snap_session)
+                except Exception as exc:
+                    logger.warning("EoD snapshot task failed: %s", exc)
+
+        # Run backtest once per day after market close (17:00+ ET)
+        if _ET is not None:
+            now_et = datetime.now(_ET)
+            if (today != last_backtest_day
+                    and now_et.weekday() < 5
+                    and now_et.hour >= 17):
+                last_backtest_day = today
+                asyncio.create_task(_run_backtest())
+
+        # Pre-market gap scanner: runs once between 9:00–9:25 ET on weekdays
+        if _ET is not None and _ALPACA_KEY and _ALPACA_SECRET:
+            now_et = datetime.now(_ET)
+            if (today != last_premarket_day
+                    and now_et.weekday() < 5
+                    and now_et.hour == 9 and now_et.minute < 25):
+                last_premarket_day = today
+                asyncio.create_task(_run_premarket_scan())
 
         # Backoff: after 3 consecutive errors, wait 10× longer
         wait = 300 if consecutive_errors < 3 else 3000
@@ -1051,6 +1665,9 @@ async def _background_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _trades_lock
+    _trades_lock = asyncio.Lock()
+
     # Open AI4Trade session if client was created
     if _ai4trade_client is not None and _ai4trade_client._session is None:
         try:
@@ -1064,13 +1681,16 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             logger.warning("AI4Trade session failed to open: %s", _e)
 
-    task = asyncio.create_task(_background_loop())
+    task  = asyncio.create_task(_background_loop())
+    trail = asyncio.create_task(_trailing_stop_loop())
     yield
     task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    trail.cancel()
+    for t in [task, trail]:
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
     # Close AI4Trade session on shutdown
     if _ai4trade_client is not None and _ai4trade_client._session is not None:
@@ -1098,7 +1718,7 @@ app.add_middleware(
 
 # === REST endpoints ===
 
-@app.get("/api/recommendations")
+@app.get("/api/recommendations", dependencies=[Depends(_verify_bot_secret)])
 def get_recommendations():
     data = _load(RECS_FILE, [])
     if isinstance(data, list):
@@ -1106,7 +1726,7 @@ def get_recommendations():
     return []
 
 
-@app.get("/api/history")
+@app.get("/api/history", dependencies=[Depends(_verify_bot_secret)])
 def get_history():
     data = _load(HISTORY_FILE, [])
     if isinstance(data, list):
@@ -1114,7 +1734,7 @@ def get_history():
     return []
 
 
-@app.get("/api/pnl")
+@app.get("/api/pnl", dependencies=[Depends(_verify_bot_secret)])
 def get_pnl():
     # Always compute from trade history (PNL_FILE is not used as a cache)
     history = _load(HISTORY_FILE, [])
@@ -1143,7 +1763,7 @@ def get_pnl():
     return out
 
 
-@app.get("/api/stats")
+@app.get("/api/stats", dependencies=[Depends(_verify_bot_secret)])
 def get_stats():
     all_trades = _load(HISTORY_FILE, [])
     if not isinstance(all_trades, list):
@@ -1223,7 +1843,7 @@ def get_stats():
 
 
 
-@app.get("/api/regime")
+@app.get("/api/regime", dependencies=[Depends(_verify_bot_secret)])
 def get_regime():
     data = _load(REGIME_FILE, {})
     if isinstance(data, dict) and data.get("regime"):
@@ -1238,7 +1858,7 @@ def get_regime():
     }
 
 
-@app.get("/api/sectors")
+@app.get("/api/sectors", dependencies=[Depends(_verify_bot_secret)])
 def get_sectors():
     recs = _load(RECS_FILE, [])
     if not isinstance(recs, list):
@@ -1275,9 +1895,11 @@ class ExecuteBody(BaseModel):
     order_id:          Optional[str] = None
     composite_score:   Optional[float] = None
     score:             Optional[float] = None
+    evaluations:       Optional[list] = None
+    beta:              Optional[float] = None
 
 
-@app.get("/api/open")
+@app.get("/api/open", dependencies=[Depends(_verify_bot_secret)])
 def get_open_context():
     """Return open trade TP/SL context for PositionsTable."""
     trades = _load(HISTORY_FILE, [])
@@ -1296,28 +1918,72 @@ def get_open_context():
     }
 
 
-@app.post("/api/execute")
-def execute_trade(body: ExecuteBody):
-    trade = {
-        "id":              body.recommendation_id or str(uuid.uuid4()),
-        "order_id":        body.order_id or "",
-        "ticker":          body.ticker,
-        "direction":       body.direction,
-        "qty":             body.qty,
-        "entry":           body.entry,
-        "stop_loss":       body.stop_loss,
-        "take_profit":     body.take_profit,
-        "composite_score": body.composite_score or body.score,
-        "risk_reward":     round(abs(body.take_profit - body.entry) / max(abs(body.entry - body.stop_loss), 0.01), 2),
-        "executed_at":     datetime.utcnow().isoformat(),
-        "status":          "open",
-        "pnl":             None,
-    }
-    history = _load(HISTORY_FILE, [])
-    if not isinstance(history, list):
-        history = []
-    history.append(trade)
-    _save(HISTORY_FILE, history)
+@app.post("/api/execute", dependencies=[Depends(_verify_bot_secret)])
+async def execute_trade(body: ExecuteBody):
+    async with _trades_lock:
+        history = _load(HISTORY_FILE, [])
+        if not isinstance(history, list):
+            history = []
+
+        # Circuit breaker checks
+        cb_reason = _check_circuit_breaker()
+        if cb_reason:
+            _log_rejection(body.ticker, "circuit_breaker", body.composite_score or 0.0,
+                           {"circuit_breaker_reason": cb_reason})
+            raise HTTPException(status_code=409, detail=cb_reason)
+
+        open_count = len([t for t in history if t.get("status") == "open"])
+        if open_count >= MAX_OPEN_POSITIONS:
+            _log_rejection(body.ticker, "max_positions", body.composite_score or 0.0,
+                           {"open_count": open_count, "max": MAX_OPEN_POSITIONS})
+            raise HTTPException(status_code=409, detail=f"Max open positions ({MAX_OPEN_POSITIONS}) reached")
+
+        # Sector correlation guard: max 2 open positions per sector
+        ticker_sector = _SECTOR_MAP.get(body.ticker.upper(), "Other")
+        open_in_sector = sum(
+            1 for t in history
+            if t.get("status") == "open"
+            and _SECTOR_MAP.get(t.get("ticker", "").upper(), "Other") == ticker_sector
+        )
+        if open_in_sector >= 2:
+            raise HTTPException(status_code=409, detail=f"Sector limit: {open_in_sector} open positions in {ticker_sector}")
+
+        # Portfolio beta cap: net |beta| across all open positions
+        portfolio_beta = sum(
+            float(t.get("beta", 1.0)) * (1.0 if t.get("direction") == "LONG" else -1.0)
+            for t in history if t.get("status") == "open"
+        )
+        new_beta = float(body.beta or 1.0) * (1.0 if body.direction == "LONG" else -1.0)
+        if abs(portfolio_beta + new_beta) > PORTFOLIO_BETA_CAP:
+            _log_rejection(body.ticker, "beta_cap", body.composite_score or 0.0,
+                           {"portfolio_beta": round(portfolio_beta, 2),
+                            "new_beta": round(new_beta, 2),
+                            "cap": PORTFOLIO_BETA_CAP})
+            raise HTTPException(
+                status_code=409,
+                detail=f"Portfolio beta cap: net beta {portfolio_beta + new_beta:+.2f} would exceed ±{PORTFOLIO_BETA_CAP}",
+            )
+
+        trade = {
+            "id":              body.recommendation_id or str(uuid.uuid4()),
+            "order_id":        body.order_id or "",
+            "ticker":          body.ticker,
+            "direction":       body.direction,
+            "qty":             body.qty,
+            "entry":           body.entry,
+            "stop_loss":       body.stop_loss,
+            "take_profit":     body.take_profit,
+            "composite_score": body.composite_score or body.score,
+            "risk_reward":     round(abs(body.take_profit - body.entry) / max(abs(body.entry - body.stop_loss), 0.01), 2),
+            "executed_at":     datetime.utcnow().isoformat(),
+            "status":          "open",
+            "pnl":             None,
+            "evaluations":     body.evaluations or [],
+            "beta":            body.beta or 1.0,
+            "regime":          _load(REGIME_FILE, {}).get("regime", "unknown"),
+        }
+        history.append(trade)
+        _save(HISTORY_FILE, history)
 
     # Store TP/SL context for auto-close detection
     ctx_data = _load(CONTEXT_FILE, {})
@@ -1337,13 +2003,94 @@ def execute_trade(body: ExecuteBody):
     return {"status": "recorded", "trade_id": trade["id"]}
 
 
-@app.post("/api/scan")
+@app.post("/api/scan", dependencies=[Depends(_verify_bot_secret)])
 async def trigger_scan():
     asyncio.create_task(_run_market_scan())
     return {"status": "scan_triggered", "timestamp": datetime.utcnow().isoformat()}
 
 
-@app.get("/api/scan-stats")
+@app.post("/api/reset-circuit-breaker", dependencies=[Depends(_verify_bot_secret)])
+async def reset_circuit_breaker():
+    """Manually reset the circuit breaker after reviewing losses."""
+    _circuit_breaker.update({
+        "halted":    False,
+        "reason":    None,
+        "halted_at": None,
+    })
+    logger.info("Circuit breaker manually reset")
+    return {"status": "reset", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/rejections", dependencies=[Depends(_verify_bot_secret)])
+def get_rejections(limit: int = 50):
+    """Return the last `limit` trade rejection records."""
+    try:
+        lines = REJECT_LOG.read_text(encoding="utf-8").strip().splitlines()
+        records = []
+        for line in reversed(lines[-limit * 2:]):
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                continue
+        return records[-limit:]
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        logger.warning("rejection log read failed: %s", exc)
+        return []
+
+
+@app.get("/api/snapshots", dependencies=[Depends(_verify_bot_secret)])
+def get_snapshots(days: int = 30):
+    """Return daily benchmark snapshots (last N days)."""
+    try:
+        lines = SNAPSHOT_LOG.read_text(encoding="utf-8").strip().splitlines()
+        records = []
+        for line in lines[-days:]:
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                continue
+        return records
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        logger.warning("snapshot log read failed: %s", exc)
+        return []
+
+
+_REPO_ROOT = _HERE.parent  # trading_bot/ -> repo root
+
+
+@app.get("/api/backtest", dependencies=[Depends(_verify_bot_secret)])
+def get_backtest():
+    """Return backtest_results.json and backtest_optimal.json from the repo root."""
+    def read_json(name: str):
+        try:
+            return json.loads((_REPO_ROOT / name).read_text())
+        except Exception:
+            return None
+
+    def read_text(name: str):
+        try:
+            return (_REPO_ROOT / name).read_text()
+        except Exception:
+            return None
+
+    return {
+        "results":    read_json("backtest_results.json"),
+        "optimal":    read_json("backtest_optimal.json"),
+        "configText": read_text("OPTIMAL_CONFIG.txt"),
+    }
+
+
+@app.post("/api/backtest/run", dependencies=[Depends(_verify_bot_secret)])
+async def run_backtest_now():
+    asyncio.create_task(_run_backtest())
+    return {"status": "backtest_triggered", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/scan-stats", dependencies=[Depends(_verify_bot_secret)])
 def get_scan_stats():
     """Return today's scan activity counters and market status."""
     all_trades = _load(HISTORY_FILE, [])
@@ -1356,12 +2103,114 @@ def get_scan_stats():
         "max_positions":  MAX_OPEN_POSITIONS,
         "open_positions": open_count,
         "agents_active":  _AGENTS_AVAILABLE,
+        "circuit_breaker": _circuit_breaker,
     }
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": _AGENTS_AVAILABLE, "timestamp": datetime.utcnow().isoformat()}
+    gemini_set    = bool(os.getenv("GEMINI_API_KEY"))
+    anthropic_set = bool(os.getenv("ANTHROPIC_API_KEY"))
+    ai4_set       = bool(os.getenv("AI4TRADE_EMAIL") and os.getenv("AI4TRADE_PASSWORD"))
+    return {
+        "status":    "ok",
+        "agents":    _AGENTS_AVAILABLE,
+        "timestamp": datetime.utcnow().isoformat(),
+        "backtest":  _backtest_stats,
+        "circuit_breaker": _circuit_breaker,
+        "keys": {
+            "gemini":    gemini_set,
+            "anthropic": anthropic_set,
+            "ai4trade":  ai4_set,
+            # Vision needs ANY vision-capable LLM key; social needs AI4Trade creds.
+            "vision_ready": gemini_set or anthropic_set,
+            "social_ready": ai4_set,
+        },
+    }
+
+
+@app.get("/api/agent-attribution", dependencies=[Depends(_verify_bot_secret)])
+def get_agent_attribution():
+    """Return per-agent win/loss counts and total PnL for performance attribution."""
+    attr = _load(AGENT_PERF_FILE, {})
+    if not isinstance(attr, dict):
+        return {}
+    result = {}
+    for role, stats in attr.items():
+        wins   = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        total  = wins + losses
+        result[role] = {
+            "wins":      wins,
+            "losses":    losses,
+            "total":     total,
+            "win_rate":  round(wins / total * 100, 1) if total > 0 else 0.0,
+            "total_pnl": round(stats.get("total_pnl", 0.0), 2),
+        }
+    return result
+
+
+@app.get("/api/monte-carlo", dependencies=[Depends(_verify_bot_secret)])
+def get_monte_carlo(n_sims: int = 10_000):
+    """Monte Carlo resample of trade win/loss sequence → 95% CI on win rate and PnL."""
+    import random as _rand
+    trades = _load(HISTORY_FILE, [])
+    if not isinstance(trades, list):
+        return {"error": "no_data"}
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None]
+    n = len(closed)
+    if n < 10:
+        return {"error": "insufficient_data", "min_trades": 10, "current": n}
+
+    pnls   = [float(t["pnl"]) for t in closed]
+    wins   = sum(1 for p in pnls if p > 0)
+    actual_wr = wins / n
+
+    sim_wrs  = []
+    sim_pnls = []
+    for _ in range(n_sims):
+        sample  = [_rand.choice(pnls) for _ in range(n)]
+        sim_wrs.append(sum(1 for p in sample if p > 0) / n)
+        sim_pnls.append(sum(sample))
+
+    sim_wrs.sort()
+    sim_pnls.sort()
+
+    return {
+        "actual_win_rate":   round(actual_wr * 100, 1),
+        "ci_95_lo":          round(sim_wrs[int(0.025 * n_sims)] * 100, 1),
+        "ci_95_hi":          round(sim_wrs[int(0.975 * n_sims)] * 100, 1),
+        "pnl_p5":            round(sim_pnls[int(0.05  * n_sims)], 2),
+        "pnl_p50":           round(sim_pnls[int(0.50  * n_sims)], 2),
+        "pnl_p95":           round(sim_pnls[int(0.95  * n_sims)], 2),
+        "n_trades":          n,
+        "n_sims":            n_sims,
+        "skill_signal":      actual_wr > sim_wrs[int(0.10 * n_sims)],  # above 10th-percentile random
+    }
+
+
+@app.get("/api/regime-performance", dependencies=[Depends(_verify_bot_secret)])
+def get_regime_performance():
+    """Per-regime trade performance breakdown."""
+    from collections import defaultdict as _dd
+    trades = _load(HISTORY_FILE, [])
+    if not isinstance(trades, list):
+        return {}
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None]
+    buckets: dict = _dd(list)
+    for t in closed:
+        buckets[t.get("regime", "unknown")].append(float(t["pnl"]))
+    result = {}
+    for regime, pnls in buckets.items():
+        wins = [p for p in pnls if p > 0]
+        result[regime] = {
+            "trades":    len(pnls),
+            "wins":      len(wins),
+            "win_rate":  round(len(wins) / len(pnls) * 100, 1) if pnls else 0.0,
+            "total_pnl": round(sum(pnls), 2),
+            "avg_pnl":   round(sum(pnls) / len(pnls), 2) if pnls else 0.0,
+        }
+    return result
 
 
 if __name__ == "__main__":

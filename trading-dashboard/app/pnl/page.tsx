@@ -1,55 +1,90 @@
 export const dynamic = 'force-dynamic'
 import { PnLAnalytics } from '@/components/pnl/PnLAnalytics'
 import { botGet }       from '@/lib/bot-api'
-import { getAccount, getOrders, type AlpacaCreds } from '@/lib/alpaca'
+import { getAccount, getPortfolioHistory, type AlpacaCreds, type PortfolioHistory } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { demoPnL, demoStats, demoHistory } from '@/lib/api'
 import type { PnLPoint, PortfolioStats, TradeRecord } from '@/types/trading'
 
+/** Convert Alpaca portfolio history into the dashboard's PnLPoint series. */
+function histToPnL(h: PortfolioHistory): PnLPoint[] {
+  const base = h.base_value || h.equity[0] || 0
+  return h.timestamp.map((ts, i) => ({
+    date:           new Date(ts * 1000).toISOString().slice(0, 10),
+    daily_pnl:      +(h.profit_loss[i] ?? 0).toFixed(2),
+    cumulative_pnl: +((h.equity[i] ?? base) - base).toFixed(2),
+    trade_count:    0,
+  }))
+}
+
 async function loadPnL(creds: AlpacaCreds | null) {
-  const [pnl, stats, account, orders] = await Promise.allSettled([
+  const [pnl, stats, account, history, botHistory, attrResult, mcResult, regimeResult] = await Promise.allSettled([
     botGet<PnLPoint[]>('/api/pnl'),
     botGet<PortfolioStats>('/api/stats'),
     creds ? getAccount(creds) : Promise.reject(new Error('no creds')),
-    creds ? getOrders(creds, 'closed', 200) : Promise.reject(new Error('no creds')),
+    creds ? getPortfolioHistory(creds, '1A', '1D') : Promise.reject(new Error('no creds')),
+    botGet<TradeRecord[]>('/api/history'),
+    botGet<Record<string, { wins: number; losses: number; total: number; win_rate: number; total_pnl: number }>>('/api/agent-attribution'),
+    botGet<{ actual_win_rate: number; ci_95_lo: number; ci_95_hi: number; pnl_p5: number; pnl_p50: number; pnl_p95: number; n_trades: number; skill_signal: boolean; error?: string }>('/api/monte-carlo'),
+    botGet<Record<string, { trades: number; wins: number; win_rate: number; total_pnl: number; avg_pnl: number }>>('/api/regime-performance'),
   ])
 
   const resolvedStats = stats.status === 'fulfilled' ? stats.value : demoStats()
 
-  // Enrich stats with live Alpaca equity
+  // Enrich stats with real Alpaca account performance
   if (account.status === 'fulfilled') {
     const acc = account.value
-    const livePnl  = parseFloat(acc.unrealized_pl) + parseFloat(acc.realized_pl ?? '0')
     const todayPnl = parseFloat(acc.equity) - parseFloat(acc.last_equity)
-    if (!isNaN(livePnl))  resolvedStats.total_pnl = +livePnl.toFixed(2)
     if (!isNaN(todayPnl)) resolvedStats.today_pnl = +todayPnl.toFixed(2)
+    if (history.status === 'fulfilled') {
+      const base = history.value.base_value
+      const totalPnl = parseFloat(acc.equity) - base
+      if (base > 0 && !isNaN(totalPnl)) resolvedStats.total_pnl = +totalPnl.toFixed(2)
+    }
   }
 
-  const resolvedTrades: TradeRecord[] = orders.status === 'fulfilled'
-    ? orders.value.filter(o => parseFloat(o.filled_qty ?? '0') > 0).map(o => ({
-        id:        o.id,
-        ticker:    o.symbol,
-        direction: o.side === 'buy' ? 'LONG' : 'SHORT',
-        entry:     parseFloat(o.filled_avg_price ?? '0'),
-        exit:      null, qty: parseInt(o.filled_qty),
-        pnl: null, pnl_pct: null,
-        opened_at: o.created_at, closed_at: o.filled_at,
-        duration: null, status: 'closed' as const,
-      }))
-    : demoHistory()
+  // Equity curve + daily P&L: prefer the real Alpaca account history, then the
+  // bot's computed series, then demo data.
+  const resolvedPnl: PnLPoint[] =
+    history.status === 'fulfilled' && history.value.timestamp?.length
+      ? histToPnL(history.value)
+      : pnl.status === 'fulfilled'
+        ? pnl.value
+        : demoPnL()
 
-  const live = pnl.status === 'fulfilled' || account.status === 'fulfilled'
+  // Win/Loss + monthly need per-trade realized P&L. Alpaca's order list doesn't
+  // expose paired entry/exit P&L, so use the bot's closed-trade history, which
+  // records real pnl per trade.
+  const resolvedTrades: TradeRecord[] =
+    botHistory.status === 'fulfilled' && Array.isArray(botHistory.value) && botHistory.value.length
+      ? botHistory.value
+          .filter(t => t.status === 'closed' && t.pnl != null)
+          .map(t => ({
+            id:        t.id,
+            ticker:    t.ticker,
+            direction: t.direction,
+            entry:     t.entry,
+            exit:      t.exit ?? null,
+            qty:       t.qty,
+            pnl:       t.pnl,
+            pnl_pct:   t.pnl_pct ?? null,
+            opened_at: (t as any).executed_at ?? t.opened_at ?? '',
+            closed_at: t.closed_at ?? null,
+            duration:  t.duration ?? null,
+            status:    'closed' as const,
+          }))
+      : demoHistory()
 
-  return {
-    pnl:    pnl.status === 'fulfilled' ? pnl.value : demoPnL(),
-    stats:  resolvedStats,
-    trades: resolvedTrades,
-    live,
-  }
+  const live = history.status === 'fulfilled' || account.status === 'fulfilled' || pnl.status === 'fulfilled'
+  const attribution  = attrResult.status   === 'fulfilled' ? attrResult.value   : undefined
+  const monteCarlo   = mcResult.status     === 'fulfilled' ? mcResult.value     : undefined
+  const regimePerf   = regimeResult.status === 'fulfilled' ? regimeResult.value : undefined
+
+  return { pnl: resolvedPnl, stats: resolvedStats, trades: resolvedTrades, live, attribution, monteCarlo, regimePerf }
 }
 
 export default async function PnLPage() {
   const creds = await getAlpacaCreds()
-  const { pnl, stats, trades, live } = await loadPnL(creds)
-  return <PnLAnalytics pnl={pnl} stats={stats} trades={trades} live={live} />
+  const { pnl, stats, trades, live, attribution, monteCarlo, regimePerf } = await loadPnL(creds)
+  return <PnLAnalytics pnl={pnl} stats={stats} trades={trades} live={live} attribution={attribution} monteCarlo={monteCarlo} regimePerf={regimePerf} />
 }

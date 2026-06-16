@@ -1,16 +1,17 @@
 import { NextResponse } from 'next/server'
-import { botPost }      from '@/lib/bot-api'
-import { auth }         from '@/auth'
+import { botGet }       from '@/lib/bot-api'
 
 export const dynamic = 'force-dynamic'
 
-export async function POST() {
+import { auth } from '@/auth'
+
+export async function GET() {
   const session = await auth()
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   try {
-    const data = await botPost('/api/scan', {})
+    const data = await botGet('/api/rejections')
     return NextResponse.json(data)
   } catch {
-    return NextResponse.json({ ok: false, error: 'Bot server offline' }, { status: 503 })
+    return NextResponse.json([], { status: 503 })
   }
 }

@@ -10,6 +10,20 @@ interface Props {
   onClose: () => void
 }
 
+
+function notConfiguredReason(ev: AgentEvaluation): string | null {
+  const r = (ev.rationale || '').toLowerCase()
+  if (r.includes('no vision api key'))       return 'No vision API key set on the bot server (Railway)'
+  if (r.includes('no chart image'))          return 'No chart image available for this evaluation'
+  if (r.includes('vision error'))            return 'Vision API call failed — check the key/quota'
+  if (r.includes('no community signals'))    return 'No AI4Trade community feed data (or creds not set)'
+  if (r.includes('no directional signals'))  return 'Community feed returned no directional signal'
+  if (r.includes('no congressional trades')) return 'No congressional trading disclosures found in last 30 days'
+  if (r.includes('fetch failed'))            return 'House Stock Watcher data fetch failed — check network'
+  return null
+}
+
+
 /** bullish (score >= 55), bearish (<= 45), neutral otherwise */
 function lean(score: number): 'bull' | 'bear' | 'neutral' {
   if (score >= 55) return 'bull'
@@ -118,35 +132,49 @@ export function RationaleModal({ trade, onClose }: Props) {
             </div>
           )}
 
-          {/* Per-agent breakdown — always show all six agents */}
+          {/* Per-agent breakdown — only agents with actual evaluations */}
           <div className="space-y-2">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">What each agent said</p>
-            {AGENT_ORDER.map(role => {
-              const ev = evalMap.get(role)
+            {AGENT_ORDER.filter(role => evalMap.has(role)).map(role => {
+              const ev     = evalMap.get(role)!
+              const unconf = notConfiguredReason(ev)
               return (
-                <div key={role} className="rounded-lg border border-bg-border bg-bg-base px-4 py-3">
+                <div key={role} className={cn(
+                  'rounded-lg border px-4 py-3',
+                  unconf ? 'border-bg-border bg-bg-base/40 opacity-80' : 'border-bg-border bg-bg-base',
+                )}>
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold text-primary">{AGENT_LABELS[role]}</span>
-                      {ev && <LeanIcon score={ev.score} />}
+                      {!unconf && <LeanIcon score={ev.score} />}
                     </div>
-                    {ev ? (
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className={cn('font-mono font-bold', bgColorForScore(ev.score).split(' ')[1])}>
-                          {ev.score.toFixed(0)}
+                    <div className="flex items-center gap-2 text-xs">
+                      {unconf ? (
+                        <span className="rounded-full border border-bg-border bg-bg-hover px-2 py-0.5 text-[10px] font-medium text-muted">
+                          Not configured
                         </span>
-                        <span className="text-muted">conf {Math.round(ev.confidence * 100)}%</span>
-                      </div>
-                    ) : (
-                      <span className="text-xs text-muted">not available</span>
-                    )}
+                      ) : (
+                        <>
+                          <span className={cn('font-mono font-bold', bgColorForScore(ev.score).split(' ')[1])}>
+                            {ev.score.toFixed(0)}
+                          </span>
+                          <span className="text-muted">conf {Math.round(ev.confidence * 100)}%</span>
+                        </>
+                      )}
+                    </div>
                   </div>
                   <p className="text-xs text-subtle">
-                    {humanizeRationale(role, ev?.rationale) ?? AGENT_BLURBS[role]}
+                    {unconf ?? humanizeRationale(role, ev.rationale) ?? AGENT_BLURBS[role]}
                   </p>
                 </div>
               )
             })}
+            {AGENT_ORDER.filter(role => !evalMap.has(role)).length > 0 && (
+              <p className="text-[10px] text-muted pt-1">
+                Not evaluated:{' '}
+                {AGENT_ORDER.filter(role => !evalMap.has(role)).map(r => AGENT_LABELS[r]).join(', ')}
+              </p>
+            )}
           </div>
         </div>
 

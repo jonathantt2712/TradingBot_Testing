@@ -33,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("desk")
 
 
-async def evaluate_ticker(pm: PortfolioManager, broker: BaseBroker, ticker: str, *, execute: bool) -> None:
+async def evaluate_ticker(pm: PortfolioManager, broker: BaseBroker, ticker: str, *, execute: bool):
     bars = await broker.get_bars(ticker, timeframe="5Min", limit=200)
     account = await broker.get_account()
     chart = render_chart(ticker, bars)
@@ -46,6 +46,7 @@ async def evaluate_ticker(pm: PortfolioManager, broker: BaseBroker, ticker: str,
         r = decision.risk
         logger.info("  plan qty=%g entry=%.2f SL=%.2f TP=%.2f R/R=%.2f",
                     r.qty, r.entry, r.stop_loss, r.take_profit, r.risk_reward)
+    return decision
 
 
 async def main(tickers: Sequence[str]) -> None:
@@ -109,17 +110,19 @@ async def main(tickers: Sequence[str]) -> None:
             *[evaluate_ticker(pm, broker, t, execute=execute) for t in tickers_list],
             return_exceptions=True,
         )
+        decisions = []
         for ticker, result in zip(tickers_list, results):
             if isinstance(result, Exception):
                 logger.exception("evaluation failed for %s: %s", ticker, result)
             else:
+                decisions.append(result)
                 if ticker.upper() not in hot:
                     logger.info("  %s is in a cold sector -- signal noted but deprioritised", ticker)
 
         # 4. Push signals to dashboard API
         try:
             await push_scan_results(
-                decisions=[],
+                decisions=decisions,
                 regime=regime,
                 scan_report=scan,
             )

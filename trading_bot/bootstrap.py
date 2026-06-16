@@ -30,11 +30,14 @@ load_env()  # must run before config.settings is imported by callers
 
 from config.settings import Settings  # noqa: E402
 from core.enums import RunMode  # noqa: E402
+from agents.decision_agent import DecisionAgent  # noqa: E402
 from agents.fundamental_agent import FundamentalAgent  # noqa: E402
 from agents.liquid_agent import LiquidAgent  # noqa: E402
 from agents.regime_agent import detect_regime  # noqa: E402
 from agents.risk_agent import RiskAgent  # noqa: E402
+from agents.insider_agent import InsiderAgent  # noqa: E402
 from agents.social_agent import SocialSentimentAgent  # noqa: E402
+from agents.squeeze_agent import SqueezeAgent  # noqa: E402
 from agents.technical_agent import TechnicalAgent  # noqa: E402
 from agents.vision_agent import VisionAgent  # noqa: E402
 from data.ai4trade_client import AI4TradeClient  # noqa: E402
@@ -83,15 +86,28 @@ def build_manager(
     *,
     publisher: SignalPublisher | None = None,
     include_live_only_agents: bool = True,
+    include_vision: bool = True,
+    include_decision_agent: bool = True,
+    include_insider: bool = True,
+    include_squeeze: bool = True,
 ) -> PortfolioManager:
     """Single composition point for every runner, including backtests.
 
     ``include_live_only_agents=False`` (backtests) drops the social and liquid
     agents: their data sources report CURRENT platform state, which would leak
     look-ahead noise into historical evaluations.
+
+    ``include_vision=False`` (backtests) skips VisionAgent's LLM chart analysis.
+    Historical backtests evaluate hundreds of windows; each LLM call costs money
+    and time, making it impractical to include vision in offline simulations.
+
+    ``include_decision_agent=False`` (backtests) skips DecisionAgent's LLM call.
+    A 30-day backtest generates ~500 evaluation windows, making per-window LLM
+    calls prohibitively expensive.
     """
     news = build_news(settings, ai4)
     live_extras = include_live_only_agents
+    squeeze_agent = SqueezeAgent(weight=settings.weights.squeeze) if include_squeeze else None
     return PortfolioManager(
         settings=settings,
         broker=broker,
@@ -102,14 +118,22 @@ def build_manager(
         vision=VisionAgent(weight=settings.weights.vision,
                            anthropic_api_key=settings.anthropic_api_key,
                            gemini_api_key=settings.gemini_api_key,
-                           model=settings.llm_model),
+                           model=settings.llm_model) if include_vision else None,
         technical=TechnicalAgent(weight=settings.weights.technical),
         risk=RiskAgent(settings.risk),
         liquid=LiquidAgent(weight=settings.weights.liquid)
             if live_extras and settings.weights.liquid > 0 else None,
         social=SocialSentimentAgent(ai4, weight=settings.weights.social)
             if live_extras and ai4 is not None and settings.weights.social > 0 else None,
+        insider=InsiderAgent(weight=settings.weights.insider)
+            if live_extras and include_insider and settings.weights.insider > 0 else None,
+        squeeze=squeeze_agent,
         publisher=publisher,
+        decision_agent=DecisionAgent(
+            anthropic_api_key=settings.anthropic_api_key,
+            gemini_api_key=settings.gemini_api_key,
+            model=settings.llm_model,
+        ) if include_decision_agent else None,
     )
 
 

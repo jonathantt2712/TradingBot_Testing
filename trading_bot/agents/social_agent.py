@@ -119,7 +119,11 @@ class SocialSentimentAgent(BaseAgent):
                 f"({n_action} trades, {n_strategy} strategies)"
             )
 
-        confidence = min(0.75, 0.1 + 0.03 * len(signals))
+        # Minimum 3 signals required for confidence above 0.40
+        base_conf = 0.1 + 0.03 * len(signals)
+        if len(signals) < 3:
+            base_conf = min(base_conf, 0.35)
+        confidence = min(0.90, base_conf)   # universal 0.90 cap
 
         return AgentEvaluation(
             role=self.role,

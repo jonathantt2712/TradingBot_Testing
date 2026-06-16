@@ -15,7 +15,11 @@ const BOT_TIMEOUT = 8_000  // ms
 
 // ngrok's free tier serves an interstitial warning page unless this header is
 // present; harmless when talking to localhost or any other backend.
-const BOT_HEADERS = { 'ngrok-skip-browser-warning': '1' }
+const BOT_SECRET = process.env.BOT_API_SECRET ?? ''
+const BOT_HEADERS: Record<string, string> = {
+  'ngrok-skip-browser-warning': '1',
+  ...(BOT_SECRET ? { 'x-bot-secret': BOT_SECRET } : {}),
+}
 
 function abortAfter(ms: number): AbortSignal {
   const ctrl = new AbortController()

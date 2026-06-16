@@ -138,9 +138,35 @@ export default function TradesPage() {
   async function handleBuyAll() {
     if (!active.length || buyingAll) return
     setBuyingAll(true)
+
+    // Pre-flight: check open position count vs. max
+    let tradesToExecute = active
+    try {
+      const ssRes = await fetch('/api/bot/scan-stats', { cache: 'no-store' })
+      if (ssRes.ok) {
+        const ss = await ssRes.json()
+        const openPos = ss.open_positions ?? 0
+        const maxPos  = ss.max_positions  ?? Infinity
+        if (openPos >= maxPos) {
+          toast.error('Position limit reached', {
+            description: `Already at max positions (${openPos}/${maxPos}). No new trades.`,
+          })
+          setBuyingAll(false)
+          return
+        }
+        const slots = maxPos - openPos
+        if (slots < tradesToExecute.length) {
+          tradesToExecute = tradesToExecute.slice(0, slots)
+          toast.info(`Position cap: executing only ${slots} of ${active.length} trades`, {
+            description: `${openPos} open, max ${maxPos}`,
+          })
+        }
+      }
+    } catch { /* if scan-stats unavailable, proceed with all */ }
+
     let succeeded = 0
     let failed    = 0
-    for (const trade of active) {
+    for (const trade of tradesToExecute) {
       try {
         const res = await api.execute({
           recommendation_id: trade.id,

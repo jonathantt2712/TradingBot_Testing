@@ -1,4 +1,4 @@
-export const AGENT_ORDER = ['technical', 'fundamental', 'vision', 'risk', 'social', 'liquid'] as const
+export const AGENT_ORDER = ['technical', 'fundamental', 'vision', 'risk', 'social', 'liquid', 'insider', 'squeeze'] as const
 
 export const AGENT_LABELS: Record<string, string> = {
   technical:   'Technical',
@@ -7,6 +7,8 @@ export const AGENT_LABELS: Record<string, string> = {
   risk:        'Risk',
   social:      'Social Sentiment',
   liquid:      'Liquidity Flow',
+  insider:     'Congressional Intel',
+  squeeze:     'Short Squeeze',
 }
 
 export const AGENT_BLURBS: Record<string, string> = {
@@ -16,4 +18,6 @@ export const AGENT_BLURBS: Record<string, string> = {
   risk:        'Position sizing, stop placement & R/R viability',
   social:      'Community / social sentiment chatter',
   liquid:      'Order flow & liquidity dynamics',
+  insider:     'Congressional trading disclosure signals (House Stock Watcher)',
+  squeeze:     'FINRA daily short volume ratio — detects squeeze setups and short-covering signals',
 }

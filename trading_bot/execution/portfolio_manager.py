@@ -25,8 +25,11 @@ from agents.fundamental_agent import FundamentalAgent
 from agents.liquid_agent import LiquidAgent
 from agents.regime_agent import MarketRegime, RegimeSnapshot
 from agents.risk_agent import RiskAgent
+from agents.insider_agent import InsiderAgent
 from agents.social_agent import SocialSentimentAgent
+from agents.squeeze_agent import SqueezeAgent
 from agents.technical_agent import TechnicalAgent
+from agents.decision_agent import DecisionAgent
 from agents.vision_agent import VisionAgent
 from execution.base_broker import BaseBroker, OrderReceipt
 
@@ -50,7 +53,10 @@ class PortfolioManager:
         risk: RiskAgent,
         liquid: Optional[LiquidAgent] = None,
         social: Optional[SocialSentimentAgent] = None,
+        insider: Optional["InsiderAgent"] = None,
+        squeeze: Optional["SqueezeAgent"] = None,
         publisher=None,
+        decision_agent: Optional[DecisionAgent] = None,
     ) -> None:
         self.settings = settings
         self.broker = broker
@@ -60,7 +66,10 @@ class PortfolioManager:
         self.risk = risk
         self.liquid = liquid
         self.social = social
+        self.insider = insider
+        self.squeeze = squeeze
         self.publisher = publisher
+        self._decision_agent = decision_agent
         self._weights = settings.weights.as_map()
         self._thresholds: DecisionThresholds = settings.thresholds
         self._regime: Optional[RegimeSnapshot] = None
@@ -85,7 +94,7 @@ class PortfolioManager:
             self.technical.safe_evaluate(ctx),
             self.risk.safe_evaluate(ctx),
         ]
-        vision_idx = liquid_idx = social_idx = None
+        vision_idx = liquid_idx = social_idx = squeeze_idx = None
         if self.vision is not None:
             vision_idx = len(coros)
             coros.append(self.vision.safe_evaluate(ctx))
@@ -95,6 +104,13 @@ class PortfolioManager:
         if self.social is not None:
             social_idx = len(coros)
             coros.append(self.social.safe_evaluate(ctx))
+        insider_idx = None
+        if self.insider is not None:
+            insider_idx = len(coros)
+            coros.append(self.insider.safe_evaluate(ctx))
+        if self.squeeze is not None:
+            squeeze_idx = len(coros)
+            coros.append(self.squeeze.safe_evaluate(ctx))
 
         results = await asyncio.gather(*coros)
         fundamental = results[0]
@@ -103,15 +119,25 @@ class PortfolioManager:
         vision_eval:  Optional[AgentEvaluation] = results[vision_idx]  if vision_idx  is not None else None
         liquid_eval:  Optional[AgentEvaluation] = results[liquid_idx]  if liquid_idx  is not None else None
         social_eval:  Optional[AgentEvaluation] = results[social_idx]  if social_idx  is not None else None
+        insider_eval: Optional[AgentEvaluation] = results[insider_idx] if insider_idx is not None else None
+        squeeze_eval: Optional[AgentEvaluation] = results[squeeze_idx] if squeeze_idx is not None else None
 
         evaluations = tuple(r for r in results)
-        composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval)
 
-        retail_surcharge = 0.0
-        if technical is not None and technical.data:
-            retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
-
-        decision = self._direction(composite, retail_surcharge=retail_surcharge)
+        decision_meta: Optional[dict] = None
+        if self._decision_agent is not None and self._decision_agent.available:
+            regime_value = self._regime.regime.value if self._regime else "neutral"
+            regime_rationale = getattr(self._regime, "rationale", "") if self._regime else ""
+            all_evals = [ev for ev in evaluations if ev is not None]
+            decision, composite, decision_meta = await self._decision_agent.decide(
+                ctx, all_evals, regime_value, regime_rationale,
+            )
+        else:
+            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval, insider_eval, squeeze_eval)
+            retail_surcharge = 0.0
+            if technical is not None and technical.data:
+                retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
+            decision = self._direction(composite, retail_surcharge=retail_surcharge)
 
         if risk.veto:
             logger.info("%s vetoed by Risk: %s", ctx.ticker, risk.rationale)
@@ -141,6 +167,7 @@ class PortfolioManager:
             return TradeDecision(
                 ticker=ctx.ticker, decision=Decision.PASS,
                 composite_score=composite, evaluations=evaluations,
+                decision_meta=decision_meta,
             )
 
         plan = self.risk.build_plan(ctx, intended=decision)
@@ -149,12 +176,14 @@ class PortfolioManager:
             return TradeDecision(
                 ticker=ctx.ticker, decision=Decision.PASS,
                 composite_score=composite, evaluations=evaluations,
+                decision_meta=decision_meta,
             )
 
         side = OrderSide.BUY if decision is Decision.LONG else OrderSide.SELL
         return TradeDecision(
             ticker=ctx.ticker, decision=decision, composite_score=composite,
             side=side, risk=plan, evaluations=evaluations,
+            decision_meta=decision_meta,
         )
 
     def _check_daily_loss(self, account: dict) -> bool:
@@ -266,7 +295,9 @@ class PortfolioManager:
             "composite": decision.composite_score,
             "halted": self._halted,
             "regime": self._regime.regime.value if self._regime else None,
-            "regime_reasoning": self._regime.reasoning if self._regime else None,
+            "regime_weights": self._REGIME_MULTIPLIERS.get(
+                self._regime.regime.value if self._regime else "neutral", {}
+            ),
             "agents": [
                 {
                     "role": e.role.value,
@@ -274,7 +305,6 @@ class PortfolioManager:
                     "confidence": round(e.confidence, 3),
                     "veto": e.veto,
                     "rationale": e.rationale,
-                    "reasoning": e.reasoning,
                 }
                 for e in decision.evaluations
             ],
@@ -282,6 +312,7 @@ class PortfolioManager:
                 "entry": r.entry, "stop_loss": r.stop_loss, "take_profit": r.take_profit,
                 "qty": r.qty, "risk_reward": r.risk_reward,
             } if r else None,
+            "decision_agent": decision.decision_meta,
             "executed": executed,
             "order_id": receipt.order_id if receipt else None,
             "order_status": receipt.status if receipt else None,
@@ -335,6 +366,43 @@ class PortfolioManager:
         except Exception:
             logger.debug("fill tracking failed for %s", decision.ticker, exc_info=True)
 
+    # Regime-adaptive weight multipliers.
+    # Values > 1.0 boost the agent's effective weight; < 1.0 reduces it.
+    # Applied on top of the base weights — normalisation happens inside _composite.
+    _REGIME_MULTIPLIERS: dict = {
+        "risk_on": {
+            # Bullish trend regime: momentum signals reliable, fundas lag
+            "technical":   1.30,
+            "liquid":      1.20,
+            "social":      1.10,
+            "fundamental": 0.80,
+            "vision":      0.90,
+            "insider":     0.90,
+        },
+        "risk_off": {
+            # Defensive regime: fundas + risk matter most, pure momentum dangerous
+            "fundamental": 1.30,
+            "vision":      1.10,
+            "risk":        1.20,   # risk agent score matters more
+            "technical":   0.75,
+            "social":      0.80,
+            "liquid":      0.85,
+            "insider":     1.00,
+        },
+        "choppy": {
+            # Range-bound: mean-reversion agents (liquid/insider) more reliable
+            "liquid":      1.25,
+            "insider":     1.15,
+            "fundamental": 1.10,
+            "technical":   0.80,   # trend signals unreliable in chop
+            "social":      0.85,
+            "vision":      0.95,
+        },
+        "neutral": {
+            # Default — no adjustment
+        },
+    }
+
     def _composite(
         self,
         f: AgentEvaluation,
@@ -342,6 +410,8 @@ class PortfolioManager:
         t: AgentEvaluation,
         liquid: Optional[AgentEvaluation],
         social: Optional[AgentEvaluation],
+        insider: Optional[AgentEvaluation] = None,
+        squeeze: Optional[AgentEvaluation] = None,
     ) -> float:
         agents = [
             ("fundamental", f),
@@ -352,15 +422,27 @@ class PortfolioManager:
             agents.append(("liquid", liquid))
         if social is not None:
             agents.append(("social", social))
+        if insider is not None:
+            agents.append(("insider", insider))
+        if squeeze is not None:
+            agents.append(("squeeze", squeeze))
+
+        # Look up regime multipliers (default = no adjustment)
+        regime_val = self._regime.regime.value if self._regime is not None else "neutral"
+        multipliers = self._REGIME_MULTIPLIERS.get(regime_val, {})
 
         num = den = 0.0
         for key, ev in agents:
             if ev is None:
                 continue
-            w = self._weights.get(key, 0.0) * max(ev.confidence, 0.05)
+            base_w = self._weights.get(key, 0.0)
+            regime_mult = multipliers.get(key, 1.0)
+            w = base_w * regime_mult * max(ev.confidence, 0.05)
             num += ev.score * w
             den += w
-        return round(num / den, 2) if den else 50.0
+
+        result = round(num / den, 2) if den else 50.0
+        return result
 
     def _direction(
         self,
