@@ -139,8 +139,8 @@ export function HistoryTable({ trades }: Props) {
           <thead>
             <tr className="border-b border-bg-border">
               {[
-                { key: 'ticker',    label: 'Ticker'   },
                 { key: 'opened_at', label: 'תאריך'    },
+                { key: 'ticker',    label: 'Ticker'   },
                 { key: null,        label: 'Dir'      },
                 { key: null,        label: 'Entry'    },
                 { key: null,        label: 'Exit'     },
@@ -169,8 +169,8 @@ export function HistoryTable({ trades }: Props) {
           <tbody>
             {filtered.map((t, i) => (
               <tr key={t.id + i} className="border-b border-bg-border/50 hover:bg-bg-hover transition-colors">
-                <td className="px-4 py-3 font-mono font-semibold text-primary">{t.ticker}</td>
                 <td className="px-4 py-3 text-muted whitespace-nowrap">{fmtDate(t.opened_at)}</td>
+                <td className="px-4 py-3 font-mono font-semibold text-primary">{t.ticker}</td>
                 <td className="px-4 py-3">
                   <span className={cn(
                     'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-semibold',
