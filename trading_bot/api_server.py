@@ -68,6 +68,8 @@ def _next_market_open() -> datetime:
 
 
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
+MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 3 consecutive losses halt
+PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "2.0"))  # max net |beta| across open positions
 
 # Daily scan stats (reset at midnight by _background_loop)
 _scan_stats: Dict[str, Any] = {
@@ -217,6 +219,7 @@ PNL_FILE     = DATA_DIR / "pnl.json"
 CONTEXT_FILE = DATA_DIR / "context.json"
 WEIGHTS_FILE = DATA_DIR / "strategy_weights.json"
 REGIME_FILE  = DATA_DIR / "regime.json"
+REJECT_LOG      = DATA_DIR / "risk_rejections.jsonl"
 
 
 def _load(path: Path, default: Any) -> Any:
@@ -230,6 +233,22 @@ def _save(path: Path, obj: Any) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
     tmp.replace(path)
+
+
+def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
+    """Append a trade rejection record to risk_rejections.jsonl."""
+    entry = {
+        "ts":              datetime.utcnow().isoformat(),
+        "ticker":          ticker,
+        "reason":          reason,
+        "composite_score": round(score, 1),
+        **details,
+    }
+    try:
+        with open(REJECT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as exc:
+        logger.debug("rejection log write failed: %s", exc)
 
 
 # === Kelly position sizing ===
@@ -754,6 +773,25 @@ async def _run_market_scan() -> None:
 
             bars_map = await _fetch_multi_bars(session, list(set(symbols_raw + ["SPY", "QQQ", "VIXY"])), limit=100)
 
+        # Compute beta (correlation to SPY) for each ticker
+        ticker_beta: Dict[str, float] = {}
+        spy_df = bars_map.get("SPY")
+        if _AGENTS_AVAILABLE and spy_df is not None and len(spy_df) >= 20:
+            spy_ret = spy_df["close"].pct_change().dropna()
+            for _sym in symbols_raw:
+                _df = bars_map.get(_sym)
+                if _df is None or len(_df) < 20:
+                    ticker_beta[_sym] = 1.0
+                    continue
+                sym_ret = _df["close"].pct_change().dropna()
+                aligned = pd.concat([sym_ret, spy_ret], axis=1, join="inner")
+                if len(aligned) < 10:
+                    ticker_beta[_sym] = 1.0
+                    continue
+                cov_ = float(aligned.iloc[:, 0].cov(aligned.iloc[:, 1]))
+                var_ = float(aligned.iloc[:, 1].var())
+                ticker_beta[_sym] = round(cov_ / var_, 2) if var_ > 0 else 1.0
+
         if _AGENTS_AVAILABLE and _pm is not None:
             _pm.technical.spy_bars = bars_map.get("SPY")
 
@@ -932,6 +970,7 @@ async def _run_market_scan() -> None:
                 "evaluations":  evaluations_out,
                 "timestamp":    datetime.utcnow().isoformat(),
                 "chg_pct":      round(chg_pct, 2),
+                "beta":         ticker_beta.get(sym, 1.0),
             })
 
         # Mark hot_sector = True for recs in the top-2 scoring sectors
@@ -1314,6 +1353,8 @@ class ExecuteBody(BaseModel):
     order_id:          Optional[str] = None
     composite_score:   Optional[float] = None
     score:             Optional[float] = None
+    evaluations:       Optional[list] = None
+    beta:              Optional[float] = None
 
 
 @app.get("/api/open", dependencies=[Depends(_verify_bot_secret)])
@@ -1344,7 +1385,35 @@ async def execute_trade(body: ExecuteBody):
 
         open_count = len([t for t in history if t.get("status") == "open"])
         if open_count >= MAX_OPEN_POSITIONS:
+            _log_rejection(body.ticker, "max_positions", body.composite_score or 0.0,
+                           {"open_count": open_count, "max": MAX_OPEN_POSITIONS})
             raise HTTPException(status_code=409, detail=f"Max open positions ({MAX_OPEN_POSITIONS}) reached")
+
+        # Sector correlation guard: max 2 open positions per sector
+        ticker_sector = _SECTOR_MAP.get(body.ticker.upper(), "Other")
+        open_in_sector = sum(
+            1 for t in history
+            if t.get("status") == "open"
+            and _SECTOR_MAP.get(t.get("ticker", "").upper(), "Other") == ticker_sector
+        )
+        if open_in_sector >= 2:
+            raise HTTPException(status_code=409, detail=f"Sector limit: {open_in_sector} open positions in {ticker_sector}")
+
+        # Portfolio beta cap: net |beta| across all open positions
+        portfolio_beta = sum(
+            float(t.get("beta", 1.0)) * (1.0 if t.get("direction") == "LONG" else -1.0)
+            for t in history if t.get("status") == "open"
+        )
+        new_beta = float(body.beta or 1.0) * (1.0 if body.direction == "LONG" else -1.0)
+        if abs(portfolio_beta + new_beta) > PORTFOLIO_BETA_CAP:
+            _log_rejection(body.ticker, "beta_cap", body.composite_score or 0.0,
+                           {"portfolio_beta": round(portfolio_beta, 2),
+                            "new_beta": round(new_beta, 2),
+                            "cap": PORTFOLIO_BETA_CAP})
+            raise HTTPException(
+                status_code=409,
+                detail=f"Portfolio beta cap: net beta {portfolio_beta + new_beta:+.2f} would exceed ±{PORTFOLIO_BETA_CAP}",
+            )
 
         trade = {
             "id":              body.recommendation_id or str(uuid.uuid4()),
@@ -1360,6 +1429,9 @@ async def execute_trade(body: ExecuteBody):
             "executed_at":     datetime.utcnow().isoformat(),
             "status":          "open",
             "pnl":             None,
+            "evaluations":     body.evaluations or [],
+            "beta":            body.beta or 1.0,
+            "regime":          _load(REGIME_FILE, {}).get("regime", "unknown"),
         }
         history.append(trade)
         _save(HISTORY_FILE, history)
@@ -1454,6 +1526,69 @@ def health():
             "social_ready": ai4_set,
         },
     }
+
+
+@app.get("/api/monte-carlo", dependencies=[Depends(_verify_bot_secret)])
+def get_monte_carlo(n_sims: int = 10_000):
+    """Monte Carlo resample of trade win/loss sequence → 95% CI on win rate and PnL."""
+    import random as _rand
+    trades = _load(HISTORY_FILE, [])
+    if not isinstance(trades, list):
+        return {"error": "no_data"}
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None]
+    n = len(closed)
+    if n < 10:
+        return {"error": "insufficient_data", "min_trades": 10, "current": n}
+
+    pnls   = [float(t["pnl"]) for t in closed]
+    wins   = sum(1 for p in pnls if p > 0)
+    actual_wr = wins / n
+
+    sim_wrs  = []
+    sim_pnls = []
+    for _ in range(n_sims):
+        sample  = [_rand.choice(pnls) for _ in range(n)]
+        sim_wrs.append(sum(1 for p in sample if p > 0) / n)
+        sim_pnls.append(sum(sample))
+
+    sim_wrs.sort()
+    sim_pnls.sort()
+
+    return {
+        "actual_win_rate":   round(actual_wr * 100, 1),
+        "ci_95_lo":          round(sim_wrs[int(0.025 * n_sims)] * 100, 1),
+        "ci_95_hi":          round(sim_wrs[int(0.975 * n_sims)] * 100, 1),
+        "pnl_p5":            round(sim_pnls[int(0.05  * n_sims)], 2),
+        "pnl_p50":           round(sim_pnls[int(0.50  * n_sims)], 2),
+        "pnl_p95":           round(sim_pnls[int(0.95  * n_sims)], 2),
+        "n_trades":          n,
+        "n_sims":            n_sims,
+        "skill_signal":      actual_wr > sim_wrs[int(0.10 * n_sims)],  # above 10th-percentile random
+    }
+
+
+@app.get("/api/regime-performance", dependencies=[Depends(_verify_bot_secret)])
+def get_regime_performance():
+    """Per-regime trade performance breakdown."""
+    from collections import defaultdict as _dd
+    trades = _load(HISTORY_FILE, [])
+    if not isinstance(trades, list):
+        return {}
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None]
+    buckets: dict = _dd(list)
+    for t in closed:
+        buckets[t.get("regime", "unknown")].append(float(t["pnl"]))
+    result = {}
+    for regime, pnls in buckets.items():
+        wins = [p for p in pnls if p > 0]
+        result[regime] = {
+            "trades":    len(pnls),
+            "wins":      len(wins),
+            "win_rate":  round(len(wins) / len(pnls) * 100, 1) if pnls else 0.0,
+            "total_pnl": round(sum(pnls), 2),
+            "avg_pnl":   round(sum(pnls) / len(pnls), 2) if pnls else 0.0,
+        }
+    return result
 
 
 if __name__ == "__main__":
