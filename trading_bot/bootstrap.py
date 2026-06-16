@@ -35,6 +35,7 @@ from agents.fundamental_agent import FundamentalAgent  # noqa: E402
 from agents.liquid_agent import LiquidAgent  # noqa: E402
 from agents.regime_agent import detect_regime  # noqa: E402
 from agents.risk_agent import RiskAgent  # noqa: E402
+from agents.insider_agent import InsiderAgent  # noqa: E402
 from agents.social_agent import SocialSentimentAgent  # noqa: E402
 from agents.technical_agent import TechnicalAgent  # noqa: E402
 from agents.vision_agent import VisionAgent  # noqa: E402
@@ -86,6 +87,7 @@ def build_manager(
     include_live_only_agents: bool = True,
     include_vision: bool = True,
     include_decision_agent: bool = True,
+    include_insider: bool = True,
 ) -> PortfolioManager:
     """Single composition point for every runner, including backtests.
 
@@ -120,6 +122,8 @@ def build_manager(
             if live_extras and settings.weights.liquid > 0 else None,
         social=SocialSentimentAgent(ai4, weight=settings.weights.social)
             if live_extras and ai4 is not None and settings.weights.social > 0 else None,
+        insider=InsiderAgent(weight=settings.weights.insider)
+            if live_extras and include_insider and settings.weights.insider > 0 else None,
         publisher=publisher,
         decision_agent=DecisionAgent(
             anthropic_api_key=settings.anthropic_api_key,

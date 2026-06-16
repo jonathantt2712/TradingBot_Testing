@@ -23,11 +23,12 @@ def _env_bool(key: str, default: bool = False) -> bool:
 
 @dataclass(slots=True)
 class AgentWeights:
-    fundamental: float = 0.20
-    vision:      float = 0.15
-    technical:   float = 0.35
-    liquid:      float = 0.15
-    social:      float = 0.15
+    fundamental: float = 0.18
+    vision:      float = 0.14
+    technical:   float = 0.32
+    liquid:      float = 0.13
+    social:      float = 0.13
+    insider:     float = 0.10   # congressional trading intelligence
 
     def as_map(self) -> Mapping[str, float]:
         raw = {
@@ -36,6 +37,7 @@ class AgentWeights:
             "technical":   self.technical,
             "liquid":      self.liquid,
             "social":      self.social,
+            "insider":     self.insider,
         }
         total = sum(raw.values())
         if total <= 0:
