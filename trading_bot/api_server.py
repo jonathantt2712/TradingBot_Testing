@@ -220,8 +220,10 @@ PNL_FILE     = DATA_DIR / "pnl.json"
 CONTEXT_FILE = DATA_DIR / "context.json"
 WEIGHTS_FILE = DATA_DIR / "strategy_weights.json"
 REGIME_FILE  = DATA_DIR / "regime.json"
-REJECT_LOG   = DATA_DIR / "risk_rejections.jsonl"
-SNAPSHOT_LOG = DATA_DIR / "daily_snapshots.jsonl"
+REJECT_LOG      = DATA_DIR / "risk_rejections.jsonl"
+SNAPSHOT_LOG    = DATA_DIR / "daily_snapshots.jsonl"
+AGENT_PERF_FILE = DATA_DIR / "agent_attribution.json"
+EARNINGS_CACHE: Dict[str, Any] = {"blacklist": set(), "updated_at": None}
 
 
 def _load(path: Path, default: Any) -> Any:
@@ -362,6 +364,40 @@ async def _get_account_equity(session: aiohttp.ClientSession) -> float:
     return 0.0
 
 
+async def _fetch_earnings_blacklist(session: aiohttp.ClientSession) -> set:
+    """Return set of tickers with earnings in the next 48 hours.
+
+    Uses Alpaca corporate actions API. Falls back to empty set on any error
+    so the scanner keeps running even if this call fails.
+    """
+    global EARNINGS_CACHE
+    now = datetime.utcnow()
+    cached_at = EARNINGS_CACHE.get("updated_at")
+    if cached_at and (now - cached_at).total_seconds() < 3600:
+        return EARNINGS_CACHE["blacklist"]
+
+    end = (now + timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        async with session.get(
+            f"{_DATA_BASE}/v1beta1/corporate-actions/earnings",
+            params={"start": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "end": end, "limit": "200"},
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status != 200:
+                return EARNINGS_CACHE.get("blacklist", set())
+            data = await r.json()
+    except Exception:
+        return EARNINGS_CACHE.get("blacklist", set())
+
+    blacklist = {item["symbol"] for item in data.get("earnings", []) if item.get("symbol")}
+    EARNINGS_CACHE["blacklist"] = blacklist
+    EARNINGS_CACHE["updated_at"] = now
+    if blacklist:
+        logger.info("Earnings blackout: %d tickers skipped (%s…)", len(blacklist), ", ".join(sorted(blacklist)[:5]))
+    return blacklist
+
+
 # === Bar data helpers ===
 
 def _bars_to_df(raw_bars: list) -> Any:
@@ -496,6 +532,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
                 trade["pnl_pct"]     = round(pnl_pct, 2)
                 trade["closed_at"]   = datetime.utcnow().isoformat()
                 modified = True
+                _update_agent_attribution(trade)
                 logger.info(
                     "Closed (simulated) %s %s via %s: exit=%.2f  PnL=$%.2f (%.2f%%)",
                     direction, ticker_sym, exit_reason, exit_price, pnl, pnl_pct,
@@ -555,6 +592,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             trade["pnl_pct"]     = round(pnl_pct, 2)
             trade["closed_at"]   = datetime.utcnow().isoformat()
             modified = True
+            _update_agent_attribution(trade)
             logger.info("Closed %s %s via %s: exit=%.2f PnL=$%.2f (%.2f%%)",
                         direction, trade["ticker"], exit_reason, exit_price, pnl, pnl_pct)
 
@@ -613,6 +651,31 @@ def _update_strategy_weights() -> None:
         weights["bias"] = "neutral"
 
     _save_weights(weights)
+
+
+def _update_agent_attribution(trade: dict) -> None:
+    """Update per-agent win/loss counters when a trade closes."""
+    pnl = trade.get("pnl")
+    if pnl is None:
+        return
+    evaluations = trade.get("evaluations") or []
+    if not evaluations:
+        return
+
+    won = pnl > 0
+    attr = _load(AGENT_PERF_FILE, {})
+    for ev in evaluations:
+        role = ev.get("role", "") if isinstance(ev, dict) else getattr(ev, "role", "")
+        if not role:
+            continue
+        if role not in attr:
+            attr[role] = {"wins": 0, "losses": 0, "total_pnl": 0.0}
+        if won:
+            attr[role]["wins"] += 1
+        else:
+            attr[role]["losses"] += 1
+        attr[role]["total_pnl"] = round(attr[role]["total_pnl"] + float(pnl), 2)
+    _save(AGENT_PERF_FILE, attr)
 
 
 # === Signal revalidation ===
@@ -791,6 +854,114 @@ def _check_circuit_breaker() -> Optional[str]:
     return None
 
 
+async def _run_premarket_scan() -> None:
+    """Identify pre-market gappers (>2% gap) between 9:00-9:25 ET.
+
+    Tags resulting recs with premarket=True and gap_pct. These appear in the
+    dashboard with a PRE-MKT badge and give the trader a head start before the
+    regular session opens at 9:30.
+    """
+    if not _ALPACA_KEY or not _ALPACA_SECRET:
+        return
+
+    try:
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+        ) as session:
+            equity = await _get_account_equity(session)
+            async with session.get(
+                f"{_DATA_BASE}/v1beta1/screener/stocks/most-actives?by=volume&top=50",
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status != 200:
+                    return
+                actives = await r.json()
+
+            symbols = [
+                item["symbol"]
+                for item in actives.get("most_actives", [])
+                if item.get("symbol") and "." not in item["symbol"]
+            ][:50]
+
+            if not symbols:
+                return
+
+            async with session.get(
+                f"{_DATA_BASE}/v2/stocks/snapshots?symbols={','.join(symbols)}",
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status != 200:
+                    return
+                snaps: Dict[str, Any] = await r.json()
+
+        weights  = _load_weights()
+        win_mins = weights.get("time_window_minutes", 45)
+        recs: List[Dict[str, Any]] = []
+
+        for sym, snap in snaps.items():
+            try:
+                prev_bar   = snap.get("prevDailyBar") or {}
+                daily_bar  = snap.get("dailyBar") or {}
+                latest_trd = snap.get("latestTrade") or {}
+                prev_close = float(prev_bar.get("c") or 0)
+                price      = float(latest_trd.get("p") or daily_bar.get("o") or 0)
+                if prev_close <= 0 or price <= 0 or price < 5:
+                    continue
+                gap_pct = (price - prev_close) / prev_close * 100
+                if abs(gap_pct) < 2.0:
+                    continue
+                direction  = "LONG" if gap_pct > 0 else "SHORT"
+                entry      = round(price, 2)
+                d          = 1 if direction == "LONG" else -1
+                stop_pct   = weights.get("stop_pct", 0.02)
+                tp_pct     = weights.get("tp_pct",   0.05)
+                stop_loss  = round(entry * (1 - d * stop_pct), 2)
+                take_profit = round(entry * (1 + d * tp_pct),  2)
+                qty        = _kelly_qty(equity, entry, stop_loss, take_profit, 65.0)
+                rr         = round(tp_pct / stop_pct, 2)
+                dollar_rsk = round(abs(entry - stop_loss) * qty, 2)
+                expires_at = (_next_market_open() + timedelta(minutes=win_mins)).isoformat()
+
+                recs.append({
+                    "id":              f"{sym}-pm-{int(datetime.utcnow().timestamp())}",
+                    "ticker":          sym,
+                    "direction":       direction,
+                    "composite_score": round(min(max(50.0 + abs(gap_pct) * 3, 55.0), 90.0), 1),
+                    "agent_used":      False,
+                    "rationale":       f"Pre-market gap {gap_pct:+.2f}% (prev close ${prev_close:.2f})",
+                    "risk":            {"entry": entry, "stop_loss": stop_loss,
+                                       "take_profit": take_profit, "qty": qty,
+                                       "risk_reward": rr, "dollar_risk": dollar_rsk},
+                    "regime":          "neutral",
+                    "sector":          _SECTOR_MAP.get(sym, "Other"),
+                    "scanned_at":      datetime.utcnow().isoformat(),
+                    "expires_at":      expires_at,
+                    "reeval_count":    0,
+                    "hot_sector":      False,
+                    "evaluations":     [],
+                    "timestamp":       datetime.utcnow().isoformat(),
+                    "chg_pct":         round(gap_pct, 2),
+                    "premarket":       True,
+                    "gap_pct":         round(gap_pct, 2),
+                })
+            except Exception:
+                continue
+
+        if recs:
+            recs.sort(key=lambda x: abs(x["gap_pct"]), reverse=True)
+            existing = _load(RECS_FILE, [])
+            if not isinstance(existing, list):
+                existing = []
+            non_pm = [r for r in existing if not r.get("premarket")]
+            _save(RECS_FILE, recs + non_pm)
+            logger.info("Pre-market scan: %d gappers identified (>2%% gap)", len(recs))
+
+    except Exception as exc:
+        logger.warning("Pre-market scan failed: %s", exc)
+
+
 async def _run_market_scan() -> None:
     _reset_scan_stats_if_needed()
 
@@ -868,6 +1039,10 @@ async def _run_market_scan() -> None:
 
             bars_map = await _fetch_multi_bars(session, list(set(symbols_raw + ["SPY", "QQQ", "VIXY"])), limit=100)
 
+            # Fetch 1-hour bars for multi-timeframe confirmation gate
+            hourly_map = await _fetch_multi_bars(session, symbols_raw, timeframe="1Hour", limit=60)
+            earnings_blacklist = await _fetch_earnings_blacklist(session)
+
         if _AGENTS_AVAILABLE and _pm is not None:
             _pm.technical.spy_bars = bars_map.get("SPY")
 
@@ -921,6 +1096,10 @@ async def _run_market_scan() -> None:
             if not snap:
                 continue
 
+            if sym in earnings_blacklist:
+                _scan_stats["recs_skipped"] += 1
+                continue
+
             daily_bar  = snap.get("dailyBar")     or {}
             prev_bar   = snap.get("prevDailyBar") or {}
             latest_trd = snap.get("latestTrade")  or {}
@@ -944,7 +1123,8 @@ async def _run_market_scan() -> None:
             evaluations_out = []
 
             if _AGENTS_AVAILABLE and df is not None and len(df) >= 20:
-                ctx      = AnalysisContext(ticker=sym, bars=df, account={"equity": equity})
+                ctx      = AnalysisContext(ticker=sym, bars=df, account={"equity": equity},
+                                          hourly_bars=hourly_map.get(sym))
                 decision = await _evaluate(ctx)
                 if decision is None:
                     continue
@@ -1315,7 +1495,8 @@ async def _background_loop() -> None:
     consecutive_errors = 0
     last_day = ""
     last_backtest_day = ""
-    last_snapshot_day = ""
+    last_snapshot_day  = ""
+    last_premarket_day = ""
     while True:
         # Reset daily scan stats at midnight
         today = str(date.today())
@@ -1348,6 +1529,15 @@ async def _background_loop() -> None:
                     and now_et.hour >= 17):
                 last_backtest_day = today
                 asyncio.create_task(_run_backtest())
+
+        # Pre-market gap scanner: runs once between 9:00–9:25 ET on weekdays
+        if _ET is not None and _ALPACA_KEY and _ALPACA_SECRET:
+            now_et = datetime.now(_ET)
+            if (today != last_premarket_day
+                    and now_et.weekday() < 5
+                    and now_et.hour == 9 and now_et.minute < 25):
+                last_premarket_day = today
+                asyncio.create_task(_run_premarket_scan())
 
         # Backoff: after 3 consecutive errors, wait 10× longer
         wait = 300 if consecutive_errors < 3 else 3000
@@ -1610,6 +1800,7 @@ class ExecuteBody(BaseModel):
     order_id:          Optional[str] = None
     composite_score:   Optional[float] = None
     score:             Optional[float] = None
+    evaluations:       Optional[list] = None
 
 
 @app.get("/api/open", dependencies=[Depends(_verify_bot_secret)])
@@ -1651,6 +1842,16 @@ async def execute_trade(body: ExecuteBody):
                            {"open_count": open_count, "max": MAX_OPEN_POSITIONS})
             raise HTTPException(status_code=409, detail=f"Max open positions ({MAX_OPEN_POSITIONS}) reached")
 
+        # Sector correlation guard: max 2 open positions per sector
+        ticker_sector = _SECTOR_MAP.get(body.ticker.upper(), "Other")
+        open_in_sector = sum(
+            1 for t in history
+            if t.get("status") == "open"
+            and _SECTOR_MAP.get(t.get("ticker", "").upper(), "Other") == ticker_sector
+        )
+        if open_in_sector >= 2:
+            raise HTTPException(status_code=409, detail=f"Sector limit: {open_in_sector} open positions in {ticker_sector}")
+
         trade = {
             "id":              body.recommendation_id or str(uuid.uuid4()),
             "order_id":        body.order_id or "",
@@ -1665,6 +1866,7 @@ async def execute_trade(body: ExecuteBody):
             "executed_at":     datetime.utcnow().isoformat(),
             "status":          "open",
             "pnl":             None,
+            "evaluations":     body.evaluations or [],
         }
         history.append(trade)
         _save(HISTORY_FILE, history)
@@ -1811,6 +2013,27 @@ def health():
             "social_ready": ai4_set,
         },
     }
+
+
+@app.get("/api/agent-attribution", dependencies=[Depends(_verify_bot_secret)])
+def get_agent_attribution():
+    """Return per-agent win/loss counts and total PnL for performance attribution."""
+    attr = _load(AGENT_PERF_FILE, {})
+    if not isinstance(attr, dict):
+        return {}
+    result = {}
+    for role, stats in attr.items():
+        wins   = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        total  = wins + losses
+        result[role] = {
+            "wins":      wins,
+            "losses":    losses,
+            "total":     total,
+            "win_rate":  round(wins / total * 100, 1) if total > 0 else 0.0,
+            "total_pnl": round(stats.get("total_pnl", 0.0), 2),
+        }
+    return result
 
 
 if __name__ == "__main__":
