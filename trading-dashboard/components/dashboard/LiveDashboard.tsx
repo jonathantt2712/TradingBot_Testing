@@ -62,9 +62,14 @@ export function LiveDashboard({
       fetch('/api/bot/sectors').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/stats').then(res => res.ok ? res.json() : null),
     ])
-    if (pos.status === 'fulfilled' && Array.isArray(pos.value))    setPositions(pos.value)
+    const newPositions = pos.status === 'fulfilled' && Array.isArray(pos.value) ? pos.value : null
+    if (newPositions)                                                setPositions(newPositions)
     if (sec.status === 'fulfilled' && Array.isArray(sec.value))    setSectors(sec.value)
-    if (s.status   === 'fulfilled' && s.value && !s.value.error)   setStats(s.value)
+    if (s.status   === 'fulfilled' && s.value && !s.value.error) {
+      const newStats = { ...s.value }
+      newStats.open_positions = newPositions ? newPositions.length : s.value.open_positions
+      setStats(newStats)
+    }
   }, [])
 
   // Slow: PnL chart, regime, scan-stats (5 min)

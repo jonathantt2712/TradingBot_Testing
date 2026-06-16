@@ -33,7 +33,7 @@ export async function GET() {
         if (base > 0 && !isNaN(totalPnl)) stats.total_pnl = +totalPnl.toFixed(2)
       }
 
-      stats.open_positions = 0 // filled by positions endpoint
+      // open_positions is set by the frontend from the live positions fetch
     }
 
     return NextResponse.json(stats)
