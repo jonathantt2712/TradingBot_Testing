@@ -960,17 +960,63 @@ async def _run_market_scan() -> None:
 
 # === Background loop ===
 
+_BACKTEST_SCRIPT  = _HERE / "backtest_30day.py"
+_RESULTS_FILE     = _HERE.parent / "backtest_results.json"
+_BACKTEST_INTERVAL_H = int(os.getenv("BACKTEST_INTERVAL_H", "24"))
+
+
+async def _run_backtest() -> None:
+    """Run backtest_30day.py as a subprocess (non-blocking)."""
+    if not _BACKTEST_SCRIPT.exists():
+        logger.warning("backtest_30day.py not found — skipping auto-backtest")
+        return
+    logger.info("Auto-backtest starting (interval=%dh)…", _BACKTEST_INTERVAL_H)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(_BACKTEST_SCRIPT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(_HERE),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1800)  # 30 min max
+        if proc.returncode == 0:
+            logger.info("Auto-backtest complete — results written to %s", _RESULTS_FILE)
+        else:
+            logger.error("Auto-backtest failed (rc=%d): %s",
+                         proc.returncode, (stdout or b"").decode()[-500:])
+    except asyncio.TimeoutError:
+        logger.error("Auto-backtest timed out after 30 min — killed")
+        proc.kill()
+    except Exception:
+        logger.exception("Auto-backtest subprocess error")
+
+
 async def _background_loop() -> None:
     await asyncio.sleep(5)
     await _run_market_scan()
+
+    # Run backtest immediately on startup if no results exist yet
+    if not _RESULTS_FILE.exists():
+        asyncio.create_task(_run_backtest())
+
     consecutive_errors = 0
     last_day = ""
+    last_backtest_day = ""
     while True:
         # Reset daily scan stats at midnight
         today = str(date.today())
         if today != last_day:
             _reset_scan_stats_if_needed()
             last_day = today
+
+        # Run backtest once per day after market close (17:00+ ET)
+        if _ET is not None:
+            now_et = datetime.now(_ET)
+            if (today != last_backtest_day
+                    and now_et.weekday() < 5
+                    and now_et.hour >= 17):
+                last_backtest_day = today
+                asyncio.create_task(_run_backtest())
 
         # Backoff: after 3 consecutive errors, wait 10× longer
         wait = 300 if consecutive_errors < 3 else 3000
