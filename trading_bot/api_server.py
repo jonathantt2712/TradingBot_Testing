@@ -1295,6 +1295,31 @@ async def trigger_scan():
     return {"status": "scan_triggered", "timestamp": datetime.utcnow().isoformat()}
 
 
+_REPO_ROOT = _HERE.parent  # trading_bot/ -> repo root
+
+
+@app.get("/api/backtest", dependencies=[Depends(_verify_bot_secret)])
+def get_backtest():
+    """Return backtest_results.json and backtest_optimal.json from the repo root."""
+    def read_json(name: str):
+        try:
+            return json.loads((_REPO_ROOT / name).read_text())
+        except Exception:
+            return None
+
+    def read_text(name: str):
+        try:
+            return (_REPO_ROOT / name).read_text()
+        except Exception:
+            return None
+
+    return {
+        "results":    read_json("backtest_results.json"),
+        "optimal":    read_json("backtest_optimal.json"),
+        "configText": read_text("OPTIMAL_CONFIG.txt"),
+    }
+
+
 @app.get("/api/scan-stats", dependencies=[Depends(_verify_bot_secret)])
 def get_scan_stats():
     """Return today's scan activity counters and market status."""
