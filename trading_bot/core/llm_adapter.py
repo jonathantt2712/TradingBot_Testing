@@ -14,9 +14,39 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+_LLM_JSON_RE = re.compile(r'\{[^{}]*"score"\s*:\s*\d+[^{}]*\}', re.DOTALL)
+
+
+def parse_llm_json(raw: str) -> Optional[dict]:
+    """Extract the first JSON object containing a 'score' key from LLM output.
+
+    Handles markdown code fences, preamble text, and minor formatting variations.
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    if "```" in text:
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    m = _LLM_JSON_RE.search(raw)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    return None
 
 # Defaults — override with GEMINI_MODEL / LLM_MODEL / LLM_VISION_MODEL env vars
 # (LLM_MODEL is the same variable config.settings exposes as Settings.llm_model).

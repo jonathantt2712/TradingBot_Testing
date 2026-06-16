@@ -27,6 +27,7 @@ from agents.regime_agent import MarketRegime, RegimeSnapshot
 from agents.risk_agent import RiskAgent
 from agents.social_agent import SocialSentimentAgent
 from agents.technical_agent import TechnicalAgent
+from agents.decision_agent import DecisionAgent
 from agents.vision_agent import VisionAgent
 from execution.base_broker import BaseBroker, OrderReceipt
 
@@ -51,6 +52,7 @@ class PortfolioManager:
         liquid: Optional[LiquidAgent] = None,
         social: Optional[SocialSentimentAgent] = None,
         publisher=None,
+        decision_agent: Optional[DecisionAgent] = None,
     ) -> None:
         self.settings = settings
         self.broker = broker
@@ -61,6 +63,7 @@ class PortfolioManager:
         self.liquid = liquid
         self.social = social
         self.publisher = publisher
+        self._decision_agent = decision_agent
         self._weights = settings.weights.as_map()
         self._thresholds: DecisionThresholds = settings.thresholds
         self._regime: Optional[RegimeSnapshot] = None
@@ -105,13 +108,21 @@ class PortfolioManager:
         social_eval:  Optional[AgentEvaluation] = results[social_idx]  if social_idx  is not None else None
 
         evaluations = tuple(r for r in results)
-        composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval)
 
-        retail_surcharge = 0.0
-        if technical is not None and technical.data:
-            retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
-
-        decision = self._direction(composite, retail_surcharge=retail_surcharge)
+        decision_meta: Optional[dict] = None
+        if self._decision_agent is not None and self._decision_agent.available:
+            regime_value = self._regime.regime.value if self._regime else "neutral"
+            regime_rationale = getattr(self._regime, "rationale", "") if self._regime else ""
+            all_evals = [ev for ev in evaluations if ev is not None]
+            decision, composite, decision_meta = await self._decision_agent.decide(
+                ctx, all_evals, regime_value, regime_rationale,
+            )
+        else:
+            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval)
+            retail_surcharge = 0.0
+            if technical is not None and technical.data:
+                retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
+            decision = self._direction(composite, retail_surcharge=retail_surcharge)
 
         if risk.veto:
             logger.info("%s vetoed by Risk: %s", ctx.ticker, risk.rationale)
@@ -141,6 +152,7 @@ class PortfolioManager:
             return TradeDecision(
                 ticker=ctx.ticker, decision=Decision.PASS,
                 composite_score=composite, evaluations=evaluations,
+                decision_meta=decision_meta,
             )
 
         plan = self.risk.build_plan(ctx, intended=decision)
@@ -149,12 +161,14 @@ class PortfolioManager:
             return TradeDecision(
                 ticker=ctx.ticker, decision=Decision.PASS,
                 composite_score=composite, evaluations=evaluations,
+                decision_meta=decision_meta,
             )
 
         side = OrderSide.BUY if decision is Decision.LONG else OrderSide.SELL
         return TradeDecision(
             ticker=ctx.ticker, decision=decision, composite_score=composite,
             side=side, risk=plan, evaluations=evaluations,
+            decision_meta=decision_meta,
         )
 
     def _check_daily_loss(self, account: dict) -> bool:
@@ -280,6 +294,7 @@ class PortfolioManager:
                 "entry": r.entry, "stop_loss": r.stop_loss, "take_profit": r.take_profit,
                 "qty": r.qty, "risk_reward": r.risk_reward,
             } if r else None,
+            "decision_agent": decision.decision_meta,
             "executed": executed,
             "order_id": receipt.order_id if receipt else None,
             "order_status": receipt.status if receipt else None,

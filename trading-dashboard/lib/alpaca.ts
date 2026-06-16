@@ -199,6 +199,28 @@ export async function submitBracketOrder(creds: AlpacaCreds, req: BracketOrderRe
   return res.json()
 }
 
+// Portfolio history (equity curve)
+
+export interface PortfolioHistory {
+  timestamp:       number[]
+  equity:          number[]
+  profit_loss:     number[]
+  profit_loss_pct: number[]
+  base_value:      number
+}
+
+export async function getPortfolioHistory(
+  creds: AlpacaCreds,
+  period   = '1M',
+  timeframe = '1D',
+): Promise<PortfolioHistory> {
+  return alpacaGet<PortfolioHistory>(
+    brokerBase(creds),
+    `/v2/account/portfolio/history?period=${period}&timeframe=${timeframe}&intraday_reporting=market_hours`,
+    creds,
+  )
+}
+
 // Close a position
 
 export async function closePosition(creds: AlpacaCreds, symbol: string): Promise<AlpacaOrderResponse> {

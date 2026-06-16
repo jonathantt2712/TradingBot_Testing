@@ -33,3 +33,4 @@ logs/
 .playwright-mcp/
 
 .vercel
+.claude/worktrees/
