@@ -35,7 +35,7 @@ export function PnLChart({ data }: Props) {
   const [todayError,   setTodayError]   = useState<string | null>(null)
 
   useEffect(() => {
-    if (view !== 'today') return
+    if (view !== 'today' || todayData.length > 0 || todayLoading) return
     setTodayLoading(true)
     setTodayError(null)
     fetch('/api/alpaca/portfolio-history?period=1D&timeframe=1H')
@@ -46,7 +46,7 @@ export function PnLChart({ data }: Props) {
       })
       .catch(e => setTodayError(e.message))
       .finally(() => setTodayLoading(false))
-  }, [view])
+  }, [view, todayData.length, todayLoading])
 
   const displayData = view === 'today' ? todayData : data
   const isPositive  = (displayData.at(-1)?.cumulative_pnl ?? 0) >= 0
