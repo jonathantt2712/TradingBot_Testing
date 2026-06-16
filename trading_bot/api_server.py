@@ -73,6 +73,12 @@ MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 
 TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", "0.05"))  # 5% trailing distance
 PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "2.0"))  # max net |beta| across open positions
 
+# Position exit monitor
+EXIT_MONITOR_INTERVAL_MIN = int(os.getenv("EXIT_MONITOR_INTERVAL_MIN", "5"))    # how often to re-score open positions
+EXIT_SCORE_THRESHOLD      = float(os.getenv("EXIT_SCORE_THRESHOLD", "40.0"))    # exit LONG if score < this; exit SHORT if score > (100 - this)
+ALLOW_OVERNIGHT           = os.getenv("ALLOW_OVERNIGHT", "false").lower() in ("1", "true", "yes")
+EOD_REVIEW_MIN_BEFORE     = int(os.getenv("EOD_REVIEW_MIN_BEFORE", "25"))       # minutes before 16:00 ET to run EOD review
+
 # Daily scan stats (reset at midnight by _background_loop)
 _scan_stats: Dict[str, Any] = {
     "date":             "",
@@ -112,6 +118,8 @@ _AGENTS_AVAILABLE = False
 _pm                = None   # PortfolioManager — the SAME composition live/backtest use
 _ai4trade_client   = None
 _Decision          = None
+_EXIT_DECISIONS: list = []  # rolling log of exit-monitor and EOD review decisions
+_MAX_EXIT_LOG     = 500
 
 try:
     import pandas as pd
@@ -1521,6 +1529,319 @@ async def _trailing_stop_loop() -> None:
             logger.warning("Trailing stop loop error: %s", exc)
 
 
+# ---------------------------------------------------------------------------
+# Position exit monitor helpers
+# ---------------------------------------------------------------------------
+
+async def _close_position_via_alpaca(session: aiohttp.ClientSession, ticker: str) -> bool:
+    """Close a single position via Alpaca DELETE /v2/positions/{symbol}."""
+    try:
+        async with session.delete(
+            f"{_BROKER_BASE}/v2/positions/{ticker}",
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status not in (200, 204):
+                logger.warning("Alpaca close %s -> HTTP %s: %s", ticker, r.status, await r.text())
+                return False
+            return True
+    except Exception as exc:
+        logger.warning("Alpaca close %s exception: %s", ticker, exc)
+        return False
+
+
+async def _fetch_bars_for_exit(session: aiohttp.ClientSession, ticker: str):
+    """Fetch recent 5-min bars for a ticker. Returns DataFrame or None."""
+    try:
+        async with session.get(
+            f"{_DATA_BASE}/v2/stocks/{ticker}/bars?timeframe=5Min&limit=100&feed=iex",
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status != 200:
+                return None
+            raw = await r.json()
+    except Exception:
+        return None
+
+    bars_data = raw.get("bars", [])
+    if len(bars_data) < 20:
+        return None
+    bars = pd.DataFrame(bars_data)
+    bars.rename(columns={"o": "open", "h": "high", "l": "low",
+                         "c": "close", "v": "volume", "t": "timestamp"}, inplace=True)
+    bars["timestamp"] = pd.to_datetime(bars["timestamp"])
+    bars.set_index("timestamp", inplace=True)
+    return bars
+
+
+def _log_exit_decision(ticker: str, direction: str, action: str,
+                       reason: str, score: Optional[float] = None,
+                       price: Optional[float] = None) -> None:
+    entry: Dict[str, Any] = {
+        "ts":        datetime.utcnow().isoformat(),
+        "ticker":    ticker,
+        "direction": direction,
+        "action":    action,   # "exit" | "hold" | "hold_overnight"
+        "reason":    reason,
+    }
+    if score  is not None: entry["score"] = round(score, 1)
+    if price  is not None: entry["price"] = round(price, 2)
+    _EXIT_DECISIONS.append(entry)
+    if len(_EXIT_DECISIONS) > _MAX_EXIT_LOG:
+        _EXIT_DECISIONS[:] = _EXIT_DECISIONS[-_MAX_EXIT_LOG:]
+
+
+async def _do_exit_position(trade: dict, price: float, reason: str,
+                            session: aiohttp.ClientSession,
+                            score: Optional[float] = None) -> bool:
+    """Close a position (simulated PAPER or real Alpaca) and record decision."""
+    ticker    = trade.get("ticker", "")
+    direction = trade.get("direction", "LONG")
+    order_id  = trade.get("order_id", "")
+
+    if order_id.startswith("PAPER-") or not order_id:
+        _close_simulated_trade(trade, price, reason)
+    else:
+        ok = await _close_position_via_alpaca(session, ticker)
+        if not ok:
+            logger.warning("Exit monitor: could not close %s via Alpaca", ticker)
+            return False
+        _close_simulated_trade(trade, price, reason)
+
+    _log_exit_decision(ticker, direction, "exit", reason, score=score, price=price)
+    logger.info("Position EXIT: %s %s @ %.2f — %s", direction, ticker, price, reason)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Continuous position exit monitor (every EXIT_MONITOR_INTERVAL_MIN minutes)
+# ---------------------------------------------------------------------------
+
+async def _position_exit_monitor_loop() -> None:
+    """Re-score open positions on a cadence. Exit any whose signal has flipped.
+
+    Uses TechnicalAgent only for speed (no LLM cost per position per cycle).
+    Confidence gate (≥0.50) prevents noise-driven exits on thin signals.
+    """
+    while True:
+        await asyncio.sleep(EXIT_MONITOR_INTERVAL_MIN * 60)
+
+        if not _is_market_open() or not _AGENTS_AVAILABLE or _pm is None:
+            continue
+
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+            ) as session:
+                trades = _load(TRADES_FILE, [])
+                open_trades = [t for t in trades if t.get("status") == "open"]
+                if not open_trades:
+                    continue
+
+                # Batch-fetch current prices
+                tickers = list({t["ticker"] for t in open_trades})
+                try:
+                    async with session.get(
+                        f"{_DATA_BASE}/v2/stocks/snapshots?symbols={','.join(tickers)}",
+                        headers=_ALPACA_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as r:
+                        snaps: Dict[str, Any] = await r.json() if r.status == 200 else {}
+                except Exception:
+                    snaps = {}
+
+                modified = False
+                for trade in open_trades:
+                    ticker    = trade.get("ticker", "")
+                    direction = trade.get("direction", "LONG")
+                    snap      = snaps.get(ticker, {})
+                    price     = float(
+                        (snap.get("latestTrade") or {}).get("p") or
+                        (snap.get("dailyBar")    or {}).get("c") or 0
+                    )
+
+                    bars = await _fetch_bars_for_exit(session, ticker)
+                    if bars is None:
+                        continue
+
+                    try:
+                        ctx = AnalysisContext(ticker=ticker, bars=bars)
+                        ev  = await asyncio.wait_for(_pm.technical.evaluate(ctx), timeout=10.0)
+                    except Exception:
+                        continue
+
+                    score      = ev.score
+                    confidence = ev.confidence
+                    exit_threshold_long  = EXIT_SCORE_THRESHOLD
+                    exit_threshold_short = 100.0 - EXIT_SCORE_THRESHOLD
+
+                    should_exit = (
+                        (direction == "LONG"  and score < exit_threshold_long  and confidence >= 0.50) or
+                        (direction == "SHORT" and score > exit_threshold_short and confidence >= 0.50)
+                    )
+
+                    if should_exit:
+                        reason = (
+                            f"exit_monitor: technical score {score:.0f} "
+                            f"({'< ' + str(exit_threshold_long) if direction == 'LONG' else '> ' + str(exit_threshold_short)}) "
+                            f"flipped against {direction} (conf {confidence:.0%}) — {ev.rationale}"
+                        )
+                        p = price if price > 0 else float(trade.get("entry", 0))
+                        ok = await _do_exit_position(trade, p, reason, session, score=score)
+                        if ok:
+                            modified = True
+                    else:
+                        _log_exit_decision(
+                            ticker, direction, "hold",
+                            f"exit_monitor: score {score:.0f} still supports {direction} (conf {confidence:.0%})",
+                            score=score, price=price,
+                        )
+
+                if modified:
+                    async with _trades_lock:
+                        _save(TRADES_FILE, trades)
+
+        except Exception as exc:
+            logger.warning("Position exit monitor error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# EOD position review (fires EOD_REVIEW_MIN_BEFORE minutes before 16:00 ET)
+# ---------------------------------------------------------------------------
+
+async def _eod_position_review_loop() -> None:
+    """Intelligent end-of-day position review.
+
+    Fires once per trading day EOD_REVIEW_MIN_BEFORE minutes before the
+    16:00 ET close. Runs the full agent evaluation on every open position
+    and decides to hold overnight (if ALLOW_OVERNIGHT=true and agents still
+    support the trade) or close.
+
+    The existing EOD_FLATTEN in bootstrap (15:55 by default) acts as a hard
+    safety net after this review has already made intelligent decisions.
+    """
+    last_review_day = ""
+
+    while True:
+        await asyncio.sleep(60)
+        if _ET is None:
+            continue
+
+        now_et = datetime.now(_ET)
+        today  = str(date.today())
+
+        # Target: EOD_REVIEW_MIN_BEFORE minutes before 16:00 ET
+        review_minutes_from_midnight = 16 * 60 - EOD_REVIEW_MIN_BEFORE
+        target_hour   = review_minutes_from_midnight // 60
+        target_minute = review_minutes_from_midnight % 60
+
+        if (today == last_review_day
+                or now_et.weekday() >= 5
+                or now_et.hour != target_hour
+                or now_et.minute < target_minute):
+            continue
+
+        last_review_day = today
+        logger.info("EOD position review: %d min before close", EOD_REVIEW_MIN_BEFORE)
+
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+            ) as session:
+                trades = _load(TRADES_FILE, [])
+                open_trades = [t for t in trades if t.get("status") == "open"]
+                if not open_trades:
+                    logger.info("EOD review: no open positions")
+                    continue
+
+                tickers = list({t["ticker"] for t in open_trades})
+                try:
+                    async with session.get(
+                        f"{_DATA_BASE}/v2/stocks/snapshots?symbols={','.join(tickers)}",
+                        headers=_ALPACA_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as r:
+                        snaps: Dict[str, Any] = await r.json() if r.status == 200 else {}
+                except Exception:
+                    snaps = {}
+
+                modified = False
+                kept: list = []
+                closed: list = []
+
+                for trade in open_trades:
+                    ticker    = trade.get("ticker", "")
+                    direction = trade.get("direction", "LONG")
+                    snap      = snaps.get(ticker, {})
+                    price     = float(
+                        (snap.get("latestTrade") or {}).get("p") or
+                        (snap.get("dailyBar")    or {}).get("c") or 0
+                    )
+                    p = price if price > 0 else float(trade.get("entry", 0))
+
+                    # Full agent re-evaluation (same pipeline as entry scan)
+                    score:  Optional[float] = None
+                    decision = None
+                    bars = await _fetch_bars_for_exit(session, ticker)
+                    if bars is not None and _AGENTS_AVAILABLE and _pm is not None:
+                        try:
+                            ctx      = AnalysisContext(ticker=ticker, bars=bars)
+                            decision = await _evaluate(ctx)
+                            if decision is not None:
+                                score = getattr(decision, "composite_score", None)
+                        except Exception as exc:
+                            logger.warning("EOD review eval failed for %s: %s", ticker, exc)
+
+                    # Decide: close vs keep overnight
+                    should_exit = True
+                    reason: str
+
+                    if ALLOW_OVERNIGHT and score is not None:
+                        still_bullish = direction == "LONG"  and score >= 55
+                        still_bearish = direction == "SHORT" and score <= 45
+                        if still_bullish or still_bearish:
+                            should_exit = False
+                            reason = (
+                                f"eod_review: HELD overnight — "
+                                f"agents still support {direction} (score {score:.0f})"
+                            )
+                        else:
+                            reason = (
+                                f"eod_review: CLOSED — score {score:.0f} no longer supports "
+                                f"{direction} (overnight allowed but signal faded)"
+                            )
+                    elif score is not None:
+                        reason = (
+                            f"eod_review: CLOSED — day-trade mode "
+                            f"(score {score:.0f}, ALLOW_OVERNIGHT=false)"
+                        )
+                    else:
+                        reason = "eod_review: CLOSED — could not re-evaluate, closing for safety"
+
+                    if should_exit:
+                        ok = await _do_exit_position(trade, p, reason, session, score=score)
+                        if ok:
+                            closed.append(ticker)
+                            modified = True
+                    else:
+                        _log_exit_decision(ticker, direction, "hold_overnight", reason, score=score, price=p)
+                        kept.append(ticker)
+                        logger.info("EOD review: KEPT %s %s overnight (score %.0f)", direction, ticker, score or 0)
+
+                if modified:
+                    async with _trades_lock:
+                        _save(TRADES_FILE, trades)
+
+                logger.info(
+                    "EOD review done — closed: %s | kept overnight: %s",
+                    closed or "none", kept or "none",
+                )
+
+        except Exception as exc:
+            logger.warning("EOD position review error: %s", exc)
+
+
 async def _background_loop() -> None:
     await asyncio.sleep(5)
     await _run_market_scan()
@@ -1623,12 +1944,16 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             logger.warning("AI4Trade session failed to open: %s", _e)
 
-    task  = asyncio.create_task(_background_loop())
-    trail = asyncio.create_task(_trailing_stop_loop())
+    task     = asyncio.create_task(_background_loop())
+    trail    = asyncio.create_task(_trailing_stop_loop())
+    exit_mon = asyncio.create_task(_position_exit_monitor_loop())
+    eod_rev  = asyncio.create_task(_eod_position_review_loop())
     yield
     task.cancel()
     trail.cancel()
-    for t in [task, trail]:
+    exit_mon.cancel()
+    eod_rev.cancel()
+    for t in [task, trail, exit_mon, eod_rev]:
         try:
             await t
         except asyncio.CancelledError:
@@ -2153,6 +2478,12 @@ def get_regime_performance():
             "avg_pnl":   round(sum(pnls) / len(pnls), 2) if pnls else 0.0,
         }
     return result
+
+
+@app.get("/api/exit-decisions", dependencies=[Depends(_verify_bot_secret)])
+def get_exit_decisions():
+    """Rolling log of exit-monitor and EOD review decisions (newest first)."""
+    return list(reversed(_EXIT_DECISIONS))
 
 
 if __name__ == "__main__":
