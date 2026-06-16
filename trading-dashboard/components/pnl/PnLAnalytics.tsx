@@ -13,6 +13,18 @@ interface Props {
   trades:      TradeRecord[]
   live:        boolean
   attribution?: Record<string, { wins: number; losses: number; total: number; win_rate: number; total_pnl: number }>
+  monteCarlo?: {
+    actual_win_rate: number
+    ci_95_lo:        number
+    ci_95_hi:        number
+    pnl_p5:          number
+    pnl_p50:         number
+    pnl_p95:         number
+    n_trades:        number
+    skill_signal:    boolean
+    error?:          string
+  }
+  regimePerf?: Record<string, { trades: number; wins: number; win_rate: number; total_pnl: number; avg_pnl: number }>
 }
 
 function ChartTooltip({ active, payload, label }: any) {
@@ -29,7 +41,7 @@ function ChartTooltip({ active, payload, label }: any) {
   )
 }
 
-export function PnLAnalytics({ pnl, stats, trades, live, attribution }: Props) {
+export function PnLAnalytics({ pnl, stats, trades, live, attribution, monteCarlo, regimePerf }: Props) {
   const wins   = trades.filter(t => (t.pnl ?? 0) > 0).length
   const losses = trades.filter(t => (t.pnl ?? 0) < 0).length
   const pie    = [
@@ -194,6 +206,114 @@ export function PnLAnalytics({ pnl, stats, trades, live, attribution }: Props) {
                   </span>
                 </div>
               ))}
+          </div>
+        </div>
+      )}
+
+      {/* Monte Carlo Win-Rate Confidence */}
+      {monteCarlo && !monteCarlo.error && (monteCarlo.n_trades ?? 0) >= 10 && (
+        <div className="card p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-semibold text-primary">Win Rate Confidence (Monte Carlo)</h2>
+            <span className={cn(
+              'rounded-full border px-2 py-0.5 text-[10px] font-semibold',
+              monteCarlo.skill_signal
+                ? 'border-bull/30 text-bull bg-bull/10'
+                : 'border-caution/30 text-caution bg-caution/10',
+            )}>
+              {monteCarlo.skill_signal ? 'Skill Signal' : 'Within Noise'}
+            </span>
+          </div>
+          <div className="space-y-4">
+            <div>
+              <div className="flex justify-between text-xs text-muted mb-1.5">
+                <span>{monteCarlo.ci_95_lo.toFixed(1)}%</span>
+                <span className="font-semibold text-primary">{monteCarlo.actual_win_rate.toFixed(1)}% actual</span>
+                <span>{monteCarlo.ci_95_hi.toFixed(1)}%</span>
+              </div>
+              <div className="relative h-3 rounded-full bg-bg-base overflow-hidden">
+                <div
+                  className="absolute h-full bg-brand-cyan/20 rounded-full"
+                  style={{ left: `${monteCarlo.ci_95_lo}%`, width: `${monteCarlo.ci_95_hi - monteCarlo.ci_95_lo}%` }}
+                />
+                <div
+                  className="absolute top-0 h-full w-0.5 bg-brand-cyan"
+                  style={{ left: `${monteCarlo.actual_win_rate}%` }}
+                />
+              </div>
+              <p className="text-[10px] text-muted mt-1.5">
+                95% CI from {monteCarlo.n_trades} trades · 10,000 simulations
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                { label: 'P5 PnL',  value: monteCarlo.pnl_p5,  color: 'text-bear'   },
+                { label: 'Median',  value: monteCarlo.pnl_p50, color: 'text-subtle' },
+                { label: 'P95 PnL', value: monteCarlo.pnl_p95, color: 'text-bull'   },
+              ] as const).map(({ label, value, color }) => (
+                <div key={label} className="rounded-lg bg-bg-base px-3 py-2 text-center">
+                  <p className="text-[10px] text-muted mb-0.5">{label}</p>
+                  <p className={cn('font-mono text-sm font-semibold', color)}>
+                    {value >= 0 ? '+' : ''}${value.toFixed(0)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Performance by Market Regime */}
+      {regimePerf && Object.keys(regimePerf).length > 0 && (
+        <div className="card p-5">
+          <h2 className="text-sm font-semibold text-primary mb-4">Performance by Market Regime</h2>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-muted border-b border-bg-border">
+                  <th className="text-left pb-2 pr-4 font-medium">Regime</th>
+                  <th className="text-right pb-2 pr-4 font-medium">Trades</th>
+                  <th className="text-right pb-2 pr-4 font-medium">Win Rate</th>
+                  <th className="text-right pb-2 pr-4 font-medium">Total P&amp;L</th>
+                  <th className="text-right pb-2 font-medium">Avg P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(regimePerf)
+                  .sort(([, a], [, b]) => b.trades - a.trades)
+                  .map(([regime, s]) => (
+                    <tr key={regime} className="border-b border-bg-border/50 last:border-0">
+                      <td className="py-2 pr-4">
+                        <span className={cn(
+                          'rounded-full border px-2 py-0.5 capitalize font-medium',
+                          regime === 'risk_on'  ? 'border-bull/30   text-bull     bg-bull/10'   :
+                          regime === 'risk_off' ? 'border-bear/30   text-bear     bg-bear/10'   :
+                          regime === 'choppy'   ? 'border-caution/30 text-caution bg-caution/10' :
+                                                  'border-bg-border text-muted',
+                        )}>
+                          {regime.replace(/_/g, ' ')}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-4 text-right font-mono text-subtle">{s.trades}</td>
+                      <td className="py-2 pr-4 text-right font-mono">
+                        <span className={s.win_rate >= 50 ? 'text-bull' : 'text-bear'}>
+                          {s.win_rate.toFixed(1)}%
+                        </span>
+                      </td>
+                      <td className="py-2 pr-4 text-right font-mono">
+                        <span className={s.total_pnl >= 0 ? 'text-bull' : 'text-bear'}>
+                          {s.total_pnl >= 0 ? '+' : ''}${s.total_pnl.toFixed(0)}
+                        </span>
+                      </td>
+                      <td className="py-2 text-right font-mono">
+                        <span className={s.avg_pnl >= 0 ? 'text-bull' : 'text-bear'}>
+                          {s.avg_pnl >= 0 ? '+' : ''}${s.avg_pnl.toFixed(0)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
