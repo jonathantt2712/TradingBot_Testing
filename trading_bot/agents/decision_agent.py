@@ -99,14 +99,31 @@ def _load_perf_block() -> str:
     try:
         with open(_WEIGHTS_FILE, encoding="utf-8") as f:
             weights = json.load(f)
-        win_rate = weights.get("win_rate_30d")
+        win_rate   = weights.get("win_rate_30d")
+        long_wr    = weights.get("long_win_rate")
+        short_wr   = weights.get("short_win_rate")
+        bias       = weights.get("bias", "neutral")
+        atr_stop   = weights.get("atr_stop_multiple", 2.0)
+        atr_target = weights.get("atr_target_multiple", 3.0)
+
         if win_rate is None:
-            return ""
-        lines = [f"BACKTEST PERFORMANCE (30d win rate: {win_rate:.1%})"]
-        for key, val in weights.items():
-            if key != "win_rate_30d":
-                lines.append(f"  {key}: {val}")
-        return "\n".join(lines)
+            return "PERFORMANCE CONTEXT (apply these directives):\n- No trade history yet — evaluate each signal on its merits."
+
+        long_wr_str  = f"{long_wr:.1f}"  if long_wr  is not None else "n/a"
+        short_wr_str = f"{short_wr:.1f}" if short_wr is not None else "n/a"
+        if bias == "long":
+            directive = "Prefer LONG signals unless strong short evidence overrides."
+        elif bias == "short":
+            directive = "Prefer SHORT signals unless strong long evidence overrides."
+        else:
+            directive = "No directional bias — evaluate each signal on its merits."
+        return (
+            "PERFORMANCE CONTEXT (apply these directives):\n"
+            f"- Historical bias: {bias} (long win rate: {long_wr_str}%, short win rate: {short_wr_str}%)\n"
+            f"- Current win rate (last 30 trades): {win_rate:.1f}%\n"
+            f"- DIRECTIVE: {directive}\n"
+            f"- ATR stop multiple in use: {atr_stop}× | ATR target multiple: {atr_target}×"
+        )
     except Exception:
         return ""
 

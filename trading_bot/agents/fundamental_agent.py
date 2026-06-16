@@ -8,6 +8,7 @@ Provider priority (automatic, based on available env keys):
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from core.base_agent import NEUTRAL_SCORE, BaseAgent, clamp_score
 from core.enums import AgentRole
@@ -39,7 +40,7 @@ class FundamentalAgent(BaseAgent):
         anthropic_api_key: str   = "",
         gemini_api_key:    str   = "",
         model:             str   = "",
-        max_articles:      int   = 8,
+        max_articles:      int   = 15,
     ) -> None:
         super().__init__(weight=weight)
         self.news         = news_source
@@ -56,6 +57,29 @@ class FundamentalAgent(BaseAgent):
         except Exception as exc:
             logger.debug("News fetch failed for %s: %s", ctx.ticker, exc)
             articles = []
+
+        # Freshness filter: drop stale articles (>4h during market hours, >24h otherwise)
+        if articles:
+            now = datetime.now(tz=timezone.utc)
+            # Determine if market is open (Mon-Fri 09:30-16:00 ET, approximated as 13:30-20:00 UTC)
+            _is_mkt = now.weekday() < 5 and 13 <= now.hour < 20
+            max_age = timedelta(hours=4 if _is_mkt else 24)
+            fresh = []
+            for a in articles:
+                ts_raw = a.get("created_at") or a.get("updated_at") or a.get("published_at") or a.get("timestamp")
+                if ts_raw is None:
+                    fresh.append(a)  # no timestamp — keep it
+                    continue
+                try:
+                    if isinstance(ts_raw, (int, float)):
+                        ts = datetime.fromtimestamp(ts_raw, tz=timezone.utc)
+                    else:
+                        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                    if (now - ts) <= max_age:
+                        fresh.append(a)
+                except Exception:
+                    fresh.append(a)  # unparseable — keep it
+            articles = fresh
 
         if not articles:
             return AgentEvaluation(

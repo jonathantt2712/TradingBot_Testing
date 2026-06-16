@@ -227,7 +227,9 @@ def _load(path: Path, default: Any) -> Any:
 
 
 def _save(path: Path, obj: Any) -> None:
-    path.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
+    tmp.replace(path)
 
 
 # === Kelly position sizing ===
@@ -407,6 +409,8 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             # These have no real Alpaca bracket. Fall back to price-based
             # TP/SL detection so they don't stay open forever.
             if order_id.startswith("PAPER-"):
+                if not _is_market_open():
+                    continue
                 if not tp_val or not sl_val or not entry:
                     continue
                 ticker_sym = trade.get("ticker", "")
@@ -518,7 +522,8 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             logger.debug("Could not check order %s: %s", trade.get("order_id"), exc)
 
     if modified:
-        _save(TRADES_FILE, trades)
+        async with _trades_lock:
+            _save(TRADES_FILE, trades)
 
 
 # === Strategy weight learning ===
@@ -529,7 +534,7 @@ def _update_strategy_weights() -> None:
 
     closed = [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None]
     recent = closed[-20:]
-    if len(recent) < 5:
+    if len(recent) < 15:
         return
 
     wins         = [t for t in recent if (t.get("pnl") or 0) > 0]
@@ -646,6 +651,15 @@ async def _revalidate_expired_recs(session: aiohttp.ClientSession) -> None:
 # === Market scanner (Tasks #70 + #73) ===
 
 _scan_counter: Dict[str, int] = {"n": 0}
+
+_trades_lock: asyncio.Lock = None  # type: ignore[assignment]  # set in lifespan
+
+_backtest_stats: Dict[str, Any] = {
+    "last_run_at":   None,
+    "last_status":   None,   # "ok" | "failed" | "timeout"
+    "error_count":   0,
+    "last_error":    None,
+}
 
 
 def _reset_scan_stats_if_needed() -> None:
@@ -971,6 +985,7 @@ async def _run_backtest() -> None:
         logger.warning("backtest_30day.py not found — skipping auto-backtest")
         return
     logger.info("Auto-backtest starting (interval=%dh)…", _BACKTEST_INTERVAL_H)
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, str(_BACKTEST_SCRIPT),
@@ -981,14 +996,37 @@ async def _run_backtest() -> None:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1800)  # 30 min max
         if proc.returncode == 0:
             logger.info("Auto-backtest complete — results written to %s", _RESULTS_FILE)
+            _backtest_stats.update({
+                "last_run_at": datetime.utcnow().isoformat(),
+                "last_status": "ok",
+                "last_error":  None,
+            })
         else:
-            logger.error("Auto-backtest failed (rc=%d): %s",
-                         proc.returncode, (stdout or b"").decode()[-500:])
+            decoded_tail = (stdout or b"").decode()[-500:]
+            logger.error("Auto-backtest failed (rc=%d): %s", proc.returncode, decoded_tail)
+            _backtest_stats.update({
+                "last_run_at": datetime.utcnow().isoformat(),
+                "last_status": "failed",
+                "error_count": _backtest_stats["error_count"] + 1,
+                "last_error":  decoded_tail,
+            })
     except asyncio.TimeoutError:
         logger.error("Auto-backtest timed out after 30 min — killed")
-        proc.kill()
+        if proc is not None:
+            proc.kill()
+        _backtest_stats.update({
+            "last_run_at": datetime.utcnow().isoformat(),
+            "last_status": "timeout",
+            "error_count": _backtest_stats["error_count"] + 1,
+            "last_error":  "timed out after 30 min",
+        })
     except Exception:
         logger.exception("Auto-backtest subprocess error")
+        _backtest_stats.update({
+            "last_run_at": datetime.utcnow().isoformat(),
+            "last_status": "failed",
+            "error_count": _backtest_stats["error_count"] + 1,
+        })
 
 
 async def _background_loop() -> None:
@@ -1049,6 +1087,9 @@ async def _background_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _trades_lock
+    _trades_lock = asyncio.Lock()
+
     # Open AI4Trade session if client was created
     if _ai4trade_client is not None and _ai4trade_client._session is None:
         try:
@@ -1295,27 +1336,33 @@ def get_open_context():
 
 
 @app.post("/api/execute", dependencies=[Depends(_verify_bot_secret)])
-def execute_trade(body: ExecuteBody):
-    trade = {
-        "id":              body.recommendation_id or str(uuid.uuid4()),
-        "order_id":        body.order_id or "",
-        "ticker":          body.ticker,
-        "direction":       body.direction,
-        "qty":             body.qty,
-        "entry":           body.entry,
-        "stop_loss":       body.stop_loss,
-        "take_profit":     body.take_profit,
-        "composite_score": body.composite_score or body.score,
-        "risk_reward":     round(abs(body.take_profit - body.entry) / max(abs(body.entry - body.stop_loss), 0.01), 2),
-        "executed_at":     datetime.utcnow().isoformat(),
-        "status":          "open",
-        "pnl":             None,
-    }
-    history = _load(HISTORY_FILE, [])
-    if not isinstance(history, list):
-        history = []
-    history.append(trade)
-    _save(HISTORY_FILE, history)
+async def execute_trade(body: ExecuteBody):
+    async with _trades_lock:
+        history = _load(HISTORY_FILE, [])
+        if not isinstance(history, list):
+            history = []
+
+        open_count = len([t for t in history if t.get("status") == "open"])
+        if open_count >= MAX_OPEN_POSITIONS:
+            raise HTTPException(status_code=409, detail=f"Max open positions ({MAX_OPEN_POSITIONS}) reached")
+
+        trade = {
+            "id":              body.recommendation_id or str(uuid.uuid4()),
+            "order_id":        body.order_id or "",
+            "ticker":          body.ticker,
+            "direction":       body.direction,
+            "qty":             body.qty,
+            "entry":           body.entry,
+            "stop_loss":       body.stop_loss,
+            "take_profit":     body.take_profit,
+            "composite_score": body.composite_score or body.score,
+            "risk_reward":     round(abs(body.take_profit - body.entry) / max(abs(body.entry - body.stop_loss), 0.01), 2),
+            "executed_at":     datetime.utcnow().isoformat(),
+            "status":          "open",
+            "pnl":             None,
+        }
+        history.append(trade)
+        _save(HISTORY_FILE, history)
 
     # Store TP/SL context for auto-close detection
     ctx_data = _load(CONTEXT_FILE, {})
@@ -1366,6 +1413,12 @@ def get_backtest():
     }
 
 
+@app.post("/api/backtest/run", dependencies=[Depends(_verify_bot_secret)])
+async def run_backtest_now():
+    asyncio.create_task(_run_backtest())
+    return {"status": "backtest_triggered", "timestamp": datetime.utcnow().isoformat()}
+
+
 @app.get("/api/scan-stats", dependencies=[Depends(_verify_bot_secret)])
 def get_scan_stats():
     """Return today's scan activity counters and market status."""
@@ -1384,7 +1437,7 @@ def get_scan_stats():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": _AGENTS_AVAILABLE, "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "agents": _AGENTS_AVAILABLE, "timestamp": datetime.utcnow().isoformat(), "backtest": _backtest_stats}
 
 
 if __name__ == "__main__":

@@ -263,6 +263,11 @@ class UniverseScanner:
         if volume > 0 and volume < min_volume:
             return f"volume {volume:,} < {min_volume:,}"
 
+        # Proxy market-cap filter: price × daily volume > $50M (avoids micro-caps with wide spreads)
+        market_cap_proxy = price * volume
+        if market_cap_proxy > 0 and market_cap_proxy < 50_000_000:
+            return f"market-cap proxy ${market_cap_proxy/1e6:.1f}M < $50M"
+
         # Must be moving
         chg = abs(data.get("percent_change") or data.get("change_percent") or 0.0)
         try:

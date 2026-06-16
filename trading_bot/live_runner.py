@@ -62,6 +62,9 @@ FALLBACK_WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSL
 # Protects concurrent reads/writes to the active_tickers list across async tasks.
 _ticker_lock: asyncio.Lock | None = None
 
+# Caps concurrent ticker evaluations to avoid Alpaca API rate limit exhaustion.
+_EVAL_SEMAPHORE: asyncio.Semaphore | None = None
+
 
 def _is_market_hours() -> bool:
     """True during US equities regular session (Mon–Fri 09:30–16:10 ET)."""
@@ -80,21 +83,22 @@ async def evaluate_ticker(
     execute: bool,
     publisher: SignalPublisher | None,
 ) -> None:
-    try:
-        bars = await broker.get_bars(ticker, timeframe="5Min", limit=200)
-        account = await broker.get_account()
-        chart = render_chart(ticker, bars)
-        ctx = AnalysisContext(ticker=ticker, bars=bars, account=account, chart_image_path=chart)
-        decision = await pm.run_once(ctx, execute=execute)
-        logger.info(
-            "%s -> %s | composite=%.1f | %s",
-            ticker, decision.decision.value, decision.composite_score,
-            pm.summarise(decision.evaluations),
-        )
-        if publisher:
-            await publisher.publish(decision)
-    except Exception:
-        logger.exception("evaluation failed for %s", ticker)
+    async with _EVAL_SEMAPHORE:
+        try:
+            bars = await broker.get_bars(ticker, timeframe="5Min", limit=200)
+            account = await broker.get_account()
+            chart = render_chart(ticker, bars)
+            ctx = AnalysisContext(ticker=ticker, bars=bars, account=account, chart_image_path=chart)
+            decision = await pm.run_once(ctx, execute=execute)
+            logger.info(
+                "%s -> %s | composite=%.1f | %s",
+                ticker, decision.decision.value, decision.composite_score,
+                pm.summarise(decision.evaluations),
+            )
+            if publisher:
+                await publisher.publish(decision)
+        except Exception:
+            logger.exception("evaluation failed for %s", ticker)
 
 
 async def handle_heartbeat(
@@ -277,8 +281,9 @@ async def strategy_refresh_loop(pm: PortfolioManager, *, interval_min: int) -> N
 
 
 async def main(tickers: Sequence[str]) -> None:
-    global _ticker_lock
+    global _ticker_lock, _EVAL_SEMAPHORE
     _ticker_lock = asyncio.Lock()
+    _EVAL_SEMAPHORE = asyncio.Semaphore(10)
 
     settings = load_settings()
     execute = os.environ.get("EXECUTE_LIVE", "false").lower() == "true"

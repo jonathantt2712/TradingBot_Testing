@@ -117,7 +117,7 @@ async def fetch_bars_range(
         "timeframe": timeframe,
         "start":     start.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "end":       end.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "feed":      "iex",
+        "feed":      os.getenv("ALPACA_DATA_FEED", "iex"),
         "adjustment": "raw",
         "limit":     10000,
     }
@@ -246,7 +246,7 @@ def _spy_regime_at(spy_bars: "pd.DataFrame | None", entry_ts: "pd.Timestamp") ->
 # -- Walk-forward for one ticker -----------------------------------------------
 
 LOOKBACK_BARS = 200   # bars fed to agents
-STEP_BARS     = 26    # evaluate every ~2 hours (26 x 5min = 130min)
+STEP_BARS     = 6     # evaluate every ~30 min (6 x 5min = 30min) — matches live runner cadence
 # Entry filter: skip evaluations where the entry bar falls after this UTC hour.
 # 19:00 UTC = 15:00 ET -- no new entries in the last hour of RTH.
 ENTRY_CUTOFF_UTC_HOUR = 19
@@ -591,15 +591,18 @@ async def run(tickers: list[str], days: int) -> None:
     fetch_list = list(dict.fromkeys(tickers + ["SPY"]))
     logger.info("Tickers: %s (+ SPY for RS signal)", " ".join(tickers))
 
+    logger.info("Fetching bars for %d tickers in parallel...", len(fetch_list))
+    results = await asyncio.gather(
+        *[fetch_bars_range(t, start_dt, end_dt, settings.alpaca_key_id, settings.alpaca_secret)
+          for t in fetch_list],
+        return_exceptions=True,
+    )
     all_bars: dict[str, pd.DataFrame] = {}
-    for ticker in fetch_list:
-        logger.info("Fetching %d days of 5-min bars for %s...", days, ticker)
-        bars = await fetch_bars_range(
-            ticker, start_dt, end_dt,
-            settings.alpaca_key_id, settings.alpaca_secret,
-        )
-        if bars is not None and len(bars) >= LOOKBACK_BARS + 10:
-            all_bars[ticker] = bars
+    for ticker, result in zip(fetch_list, results):
+        if isinstance(result, Exception):
+            logger.warning("Failed to fetch bars for %s: %s", ticker, result)
+        elif result is not None and len(result) >= LOOKBACK_BARS + 10:
+            all_bars[ticker] = result
         else:
             logger.warning("Skipping %s -- not enough data", ticker)
 
