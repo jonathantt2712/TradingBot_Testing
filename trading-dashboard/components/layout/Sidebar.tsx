@@ -4,13 +4,14 @@ import { usePathname } from 'next/navigation'
 import { signOut } from 'next-auth/react'
 import {
   LayoutDashboard, TrendingUp, History, BarChart2,
-  Zap, Settings, ExternalLink, FlaskConical, LogOut, User,
+  Zap, Settings, ExternalLink, FlaskConical, LogOut, User, Brain,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const nav = [
   { href: '/',          icon: LayoutDashboard, label: 'Dashboard'  },
   { href: '/trades',    icon: TrendingUp,      label: 'Trades'     },
+  { href: '/agents',    icon: Brain,           label: 'Agents'     },
   { href: '/history',   icon: History,         label: 'History'    },
   { href: '/pnl',       icon: BarChart2,       label: 'P&L'        },
   { href: '/backtest',  icon: FlaskConical,    label: 'Backtest'   },
