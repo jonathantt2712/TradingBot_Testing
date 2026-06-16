@@ -39,8 +39,8 @@ function elapsed(opened: string, closed: string | null): string | null {
 function fmtDate(iso: string): string {
   try {
     const d = new Date(iso)
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      + ' ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+    return d.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'Asia/Jerusalem' })
+      + ' ' + d.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Jerusalem' })
   } catch { return iso.slice(0, 16) }
 }
 
@@ -140,6 +140,7 @@ export function HistoryTable({ trades }: Props) {
             <tr className="border-b border-bg-border">
               {[
                 { key: 'ticker',    label: 'Ticker'   },
+                { key: 'opened_at', label: 'תאריך'    },
                 { key: null,        label: 'Dir'      },
                 { key: null,        label: 'Entry'    },
                 { key: null,        label: 'Exit'     },
@@ -147,7 +148,6 @@ export function HistoryTable({ trades }: Props) {
                 { key: 'pnl',       label: 'P&L $'    },
                 { key: 'pnl_pct',   label: 'P&L %'    },
                 { key: null,        label: 'Duration' },
-                { key: 'opened_at', label: 'Date'     },
                 { key: null,        label: 'Status'   },
               ].map(({ key, label }) => (
                 <th
@@ -170,6 +170,7 @@ export function HistoryTable({ trades }: Props) {
             {filtered.map((t, i) => (
               <tr key={t.id + i} className="border-b border-bg-border/50 hover:bg-bg-hover transition-colors">
                 <td className="px-4 py-3 font-mono font-semibold text-primary">{t.ticker}</td>
+                <td className="px-4 py-3 text-muted whitespace-nowrap">{fmtDate(t.opened_at)}</td>
                 <td className="px-4 py-3">
                   <span className={cn(
                     'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-semibold',
@@ -192,7 +193,6 @@ export function HistoryTable({ trades }: Props) {
                   {t._pnlPct != null ? formatPct(t._pnlPct) : '—'}
                 </td>
                 <td className="px-4 py-3 text-muted">{t._dur ?? '—'}</td>
-                <td className="px-4 py-3 text-muted">{fmtDate(t.opened_at)}</td>
                 <td className="px-4 py-3">
                   <span className={cn(
                     'rounded-full px-2 py-0.5 text-[10px] font-medium',
