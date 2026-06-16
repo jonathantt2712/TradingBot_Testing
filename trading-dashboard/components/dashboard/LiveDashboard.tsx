@@ -55,27 +55,27 @@ export function LiveDashboard({
   const [scanStats,      setScanStats]      = useState<ScanStats | null>(null)
   const [circuitBreaker, setCircuitBreaker] = useState<{ halted: boolean; reason?: string } | null>(null)
 
-  // Fast: positions (30s)
+  // Fast: positions + stats (30s) — stats includes total/today P&L so it stays in sync with positions
   const refreshFast = useCallback(async () => {
-    const [pos, sec] = await Promise.allSettled([
+    const [pos, sec, s] = await Promise.allSettled([
       fetch('/api/alpaca/positions').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/sectors').then(res => res.ok ? res.json() : null),
+      fetch('/api/bot/stats').then(res => res.ok ? res.json() : null),
     ])
-    if (pos.status === 'fulfilled' && Array.isArray(pos.value)) setPositions(pos.value)
-    if (sec.status === 'fulfilled' && Array.isArray(sec.value)) setSectors(sec.value)
+    if (pos.status === 'fulfilled' && Array.isArray(pos.value))    setPositions(pos.value)
+    if (sec.status === 'fulfilled' && Array.isArray(sec.value))    setSectors(sec.value)
+    if (s.status   === 'fulfilled' && s.value && !s.value.error)   setStats(s.value)
   }, [])
 
-  // Slow: stats, PnL, regime, scan-stats (5 min)
+  // Slow: PnL chart, regime, scan-stats (5 min)
   const refreshSlow = useCallback(async () => {
-    const [s, p, r, ss] = await Promise.allSettled([
-      fetch('/api/bot/stats').then(res => res.ok ? res.json() : null),
+    const [p, r, ss] = await Promise.allSettled([
       fetch('/api/bot/pnl').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/regime').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/scan-stats').then(res => res.ok ? res.json() : null),
     ])
-    if (s.status === 'fulfilled' && s.value && !s.value.error) setStats(s.value)
-    if (p.status === 'fulfilled' && Array.isArray(p.value))    setPnl(p.value)
-    if (r.status === 'fulfilled' && r.value?.regime)           setRegime(r.value)
+    if (p.status  === 'fulfilled' && Array.isArray(p.value))  setPnl(p.value)
+    if (r.status  === 'fulfilled' && r.value?.regime)          setRegime(r.value)
     if (ss.status === 'fulfilled' && ss.value) {
       setScanStats(ss.value)
       setCircuitBreaker(ss.value.circuit_breaker ?? null)
