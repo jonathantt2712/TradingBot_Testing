@@ -27,6 +27,7 @@ from agents.regime_agent import MarketRegime, RegimeSnapshot
 from agents.risk_agent import RiskAgent
 from agents.insider_agent import InsiderAgent
 from agents.social_agent import SocialSentimentAgent
+from agents.squeeze_agent import SqueezeAgent
 from agents.technical_agent import TechnicalAgent
 from agents.decision_agent import DecisionAgent
 from agents.vision_agent import VisionAgent
@@ -53,6 +54,7 @@ class PortfolioManager:
         liquid: Optional[LiquidAgent] = None,
         social: Optional[SocialSentimentAgent] = None,
         insider: Optional["InsiderAgent"] = None,
+        squeeze: Optional["SqueezeAgent"] = None,
         publisher=None,
         decision_agent: Optional[DecisionAgent] = None,
     ) -> None:
@@ -65,6 +67,7 @@ class PortfolioManager:
         self.liquid = liquid
         self.social = social
         self.insider = insider
+        self.squeeze = squeeze
         self.publisher = publisher
         self._decision_agent = decision_agent
         self._weights = settings.weights.as_map()
@@ -91,7 +94,7 @@ class PortfolioManager:
             self.technical.safe_evaluate(ctx),
             self.risk.safe_evaluate(ctx),
         ]
-        vision_idx = liquid_idx = social_idx = None
+        vision_idx = liquid_idx = social_idx = squeeze_idx = None
         if self.vision is not None:
             vision_idx = len(coros)
             coros.append(self.vision.safe_evaluate(ctx))
@@ -105,6 +108,9 @@ class PortfolioManager:
         if self.insider is not None:
             insider_idx = len(coros)
             coros.append(self.insider.safe_evaluate(ctx))
+        if self.squeeze is not None:
+            squeeze_idx = len(coros)
+            coros.append(self.squeeze.safe_evaluate(ctx))
 
         results = await asyncio.gather(*coros)
         fundamental = results[0]
@@ -114,6 +120,7 @@ class PortfolioManager:
         liquid_eval:  Optional[AgentEvaluation] = results[liquid_idx]  if liquid_idx  is not None else None
         social_eval:  Optional[AgentEvaluation] = results[social_idx]  if social_idx  is not None else None
         insider_eval: Optional[AgentEvaluation] = results[insider_idx] if insider_idx is not None else None
+        squeeze_eval: Optional[AgentEvaluation] = results[squeeze_idx] if squeeze_idx is not None else None
 
         evaluations = tuple(r for r in results)
 
@@ -126,7 +133,7 @@ class PortfolioManager:
                 ctx, all_evals, regime_value, regime_rationale,
             )
         else:
-            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval, insider_eval)
+            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval, insider_eval, squeeze_eval)
             retail_surcharge = 0.0
             if technical is not None and technical.data:
                 retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
@@ -404,6 +411,7 @@ class PortfolioManager:
         liquid: Optional[AgentEvaluation],
         social: Optional[AgentEvaluation],
         insider: Optional[AgentEvaluation] = None,
+        squeeze: Optional[AgentEvaluation] = None,
     ) -> float:
         agents = [
             ("fundamental", f),
@@ -416,6 +424,8 @@ class PortfolioManager:
             agents.append(("social", social))
         if insider is not None:
             agents.append(("insider", insider))
+        if squeeze is not None:
+            agents.append(("squeeze", squeeze))
 
         # Look up regime multipliers (default = no adjustment)
         regime_val = self._regime.regime.value if self._regime is not None else "neutral"

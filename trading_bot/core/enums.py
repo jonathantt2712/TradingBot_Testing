@@ -30,6 +30,7 @@ class AgentRole(str, Enum):
     LIQUID = "liquid"
     SOCIAL = "social"     # AI4Trade community signal feed
     INSIDER = "insider"   # Congressional trading intelligence
+    SQUEEZE = "squeeze"   # FINRA short volume squeeze detector
 
 
 class RunMode(str, Enum):

@@ -9,7 +9,7 @@ interface Props {
   onClose: () => void
 }
 
-const AGENT_ORDER = ['technical', 'fundamental', 'vision', 'risk', 'social', 'liquid', 'insider'] as const
+const AGENT_ORDER = ['technical', 'fundamental', 'vision', 'risk', 'social', 'liquid', 'insider', 'squeeze'] as const
 
 const AGENT_LABELS: Record<string, string> = {
   technical:   'Technical',
@@ -19,6 +19,7 @@ const AGENT_LABELS: Record<string, string> = {
   social:      'Social Sentiment',
   liquid:      'Liquidity Flow',
   insider:     'Congressional Intel',
+  squeeze:     'Short Squeeze',
 }
 
 const AGENT_BLURBS: Record<string, string> = {
@@ -29,6 +30,7 @@ const AGENT_BLURBS: Record<string, string> = {
   social:      'Community / social sentiment chatter',
   liquid:      'Order flow & liquidity dynamics',
   insider:     'Congressional trading disclosure signals (House Stock Watcher)',
+  squeeze:     'FINRA daily short volume ratio — detects squeeze setups and short-covering signals',
 }
 
 /**
