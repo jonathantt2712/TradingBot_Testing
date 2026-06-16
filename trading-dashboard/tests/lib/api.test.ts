@@ -35,3 +35,23 @@ describe('lib/api clientPost error handling', () => {
     })).rejects.toMatchObject({ status: 500 })
   })
 })
+
+describe('demo data reasoning', () => {
+  it('demoRegime includes a reasoning snapshot', async () => {
+    const { demoRegime } = await import('@/lib/api')
+    const regime = demoRegime()
+    expect(regime.reasoning).toBeTruthy()
+    expect(regime.reasoning?.inputs).toBeTruthy()
+    expect(regime.reasoning?.rules).toBeTruthy()
+  })
+
+  it('demoRecommendations evaluations include a reasoning dict for every agent role', async () => {
+    const { demoRecommendations } = await import('@/lib/api')
+    const recs = demoRecommendations()
+    for (const rec of recs) {
+      for (const ev of rec.evaluations) {
+        expect(ev.reasoning, `${rec.ticker} ${ev.role} reasoning`).toBeTruthy()
+      }
+    }
+  })
+})
