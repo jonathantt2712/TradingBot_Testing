@@ -22,6 +22,7 @@ interface ScanStats {
   recs_generated?:  number
   scan_errors?:     number
   last_scan_at?:    string | null
+  circuit_breaker?: { halted: boolean; reason?: string } | null
 }
 
 interface Props {
@@ -46,12 +47,13 @@ export function LiveDashboard({
   initialSectors,
   initialPositions,
 }: Props) {
-  const [stats,     setStats]     = useState(initialStats)
-  const [pnl,       setPnl]       = useState(initialPnl)
-  const [regime,    setRegime]    = useState(initialRegime)
-  const [sectors,   setSectors]   = useState(initialSectors)
-  const [positions, setPositions] = useState(initialPositions)
-  const [scanStats, setScanStats] = useState<ScanStats | null>(null)
+  const [stats,          setStats]          = useState(initialStats)
+  const [pnl,            setPnl]            = useState(initialPnl)
+  const [regime,         setRegime]         = useState(initialRegime)
+  const [sectors,        setSectors]        = useState(initialSectors)
+  const [positions,      setPositions]      = useState(initialPositions)
+  const [scanStats,      setScanStats]      = useState<ScanStats | null>(null)
+  const [circuitBreaker, setCircuitBreaker] = useState<{ halted: boolean; reason?: string } | null>(null)
 
   // Fast: positions (30s)
   const refreshFast = useCallback(async () => {
@@ -74,7 +76,10 @@ export function LiveDashboard({
     if (s.status === 'fulfilled' && s.value && !s.value.error) setStats(s.value)
     if (p.status === 'fulfilled' && Array.isArray(p.value))    setPnl(p.value)
     if (r.status === 'fulfilled' && r.value?.regime)           setRegime(r.value)
-    if (ss.status === 'fulfilled' && ss.value)                 setScanStats(ss.value)
+    if (ss.status === 'fulfilled' && ss.value) {
+      setScanStats(ss.value)
+      setCircuitBreaker(ss.value.circuit_breaker ?? null)
+    }
   }, [])
 
   // Initial load of slow data
@@ -107,6 +112,25 @@ export function LiveDashboard({
           {(scanStats.scan_errors ?? 0) > 0 && (
             <span className="text-bear font-semibold">Errors: {scanStats.scan_errors}</span>
           )}
+        </div>
+      )}
+
+      {circuitBreaker?.halted && (
+        <div className="rounded-xl border border-bear/40 bg-bear/10 px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-bear animate-pulse" />
+            <span className="text-sm font-semibold text-bear">Circuit Breaker Active</span>
+            <span className="text-xs text-muted">{circuitBreaker.reason?.replace(/_/g, ' ')}</span>
+          </div>
+          <button
+            onClick={async () => {
+              await fetch('/api/bot/reset-circuit-breaker', { method: 'POST' })
+              setCircuitBreaker(null)
+            }}
+            className="text-xs text-muted hover:text-primary transition-colors"
+          >
+            Reset
+          </button>
         </div>
       )}
 

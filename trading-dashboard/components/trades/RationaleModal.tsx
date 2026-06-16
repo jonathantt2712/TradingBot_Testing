@@ -9,7 +9,7 @@ interface Props {
   onClose: () => void
 }
 
-const AGENT_ORDER = ['technical', 'fundamental', 'vision', 'risk', 'social', 'liquid'] as const
+const AGENT_ORDER = ['technical', 'fundamental', 'vision', 'risk', 'social', 'liquid', 'insider'] as const
 
 const AGENT_LABELS: Record<string, string> = {
   technical:   'Technical',
@@ -18,6 +18,7 @@ const AGENT_LABELS: Record<string, string> = {
   risk:        'Risk',
   social:      'Social Sentiment',
   liquid:      'Liquidity Flow',
+  insider:     'Congressional Intel',
 }
 
 const AGENT_BLURBS: Record<string, string> = {
@@ -27,6 +28,7 @@ const AGENT_BLURBS: Record<string, string> = {
   risk:        'Position sizing, stop placement & R/R viability',
   social:      'Community / social sentiment chatter',
   liquid:      'Order flow & liquidity dynamics',
+  insider:     'Congressional trading disclosure signals (House Stock Watcher)',
 }
 
 /**
@@ -37,11 +39,13 @@ const AGENT_BLURBS: Record<string, string> = {
  */
 function notConfiguredReason(ev: AgentEvaluation): string | null {
   const r = (ev.rationale || '').toLowerCase()
-  if (r.includes('no vision api key'))     return 'No vision API key set on the bot server (Railway)'
-  if (r.includes('no chart image'))        return 'No chart image available for this evaluation'
-  if (r.includes('vision error'))          return 'Vision API call failed — check the key/quota'
-  if (r.includes('no community signals'))  return 'No AI4Trade community feed data (or creds not set)'
-  if (r.includes('no directional signals')) return 'Community feed returned no directional signal'
+  if (r.includes('no vision api key'))       return 'No vision API key set on the bot server (Railway)'
+  if (r.includes('no chart image'))          return 'No chart image available for this evaluation'
+  if (r.includes('vision error'))            return 'Vision API call failed — check the key/quota'
+  if (r.includes('no community signals'))    return 'No AI4Trade community feed data (or creds not set)'
+  if (r.includes('no directional signals'))  return 'Community feed returned no directional signal'
+  if (r.includes('no congressional trades')) return 'No congressional trading disclosures found in last 30 days'
+  if (r.includes('fetch failed'))            return 'House Stock Watcher data fetch failed — check network'
   return null
 }
 
