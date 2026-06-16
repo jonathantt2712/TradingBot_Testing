@@ -91,6 +91,7 @@ class TechnicalAgent(BaseAgent):
 
         df = bars.copy()
         signals: dict[str, float] = {}
+        h_bias = h_desc = h_agree = h_disagree = None
 
         # ── Stale-data guard ─────────────────────────────────────────────
         # If the most recent bar is more than 30 minutes old during RTH,
@@ -303,6 +304,29 @@ class TechnicalAgent(BaseAgent):
         if "divergence" in clean and (clean["divergence"] > 65 or clean["divergence"] < 35):
             rationale += f" {'BULL-DIV' if clean['divergence'] > 65 else 'BEAR-DIV'}"
 
+        # ── Multi-Timeframe Gate ─────────────────────────────────────────
+        # If 1-hour trend strongly disagrees with the 5-min composite,
+        # pull the score toward neutral. Agreement boosts confidence.
+        hourly = getattr(ctx, "hourly_bars", None)
+        if hourly is not None and len(hourly) >= 10:
+            h_bias, h_desc = self._hourly_direction(hourly)
+            # Strong disagreement: 5m bullish but 1h bearish (or vice versa)
+            h_disagree = (score > 60 and h_bias < 42) or (score < 40 and h_bias > 58)
+            h_agree    = (score > 55 and h_bias > 55) or (score < 45 and h_bias < 45)
+
+            if h_disagree:
+                # Pull score 25% toward neutral (50)
+                score = score + (50.0 - score) * 0.25
+                score = clamp_score(score)
+                confidence = max(0.30, confidence * 0.75)
+                rationale += f" [MTF-CONFLICT: {h_desc}]"
+            elif h_agree:
+                # Boost confidence by up to 10%
+                confidence = min(0.90, confidence * 1.10)
+                rationale += f" [MTF-CONFIRM: {h_desc}]"
+            else:
+                rationale += f" [MTF: {h_desc}]"
+
         # ── Elaborate reasoning for dashboard/audit ──────────────────────────
         def _dir(s: float) -> str:
             return "bullish" if s > 60 else ("bearish" if s < 40 else "neutral")
@@ -416,6 +440,11 @@ class TechnicalAgent(BaseAgent):
                 "retail_driven": retail_surcharge > 0,
                 "retail_surcharge": retail_surcharge if retail_surcharge > 0 else None,
             },
+            "mtf": {
+                "hourly_bias": round(h_bias, 1) if h_bias is not None else None,
+                "hourly_desc": h_desc if h_desc is not None else "no hourly data",
+                "agreement": "confirm" if h_agree else ("conflict" if h_disagree else "neutral"),
+            } if hourly is not None else None,
         }
 
         return AgentEvaluation(
@@ -888,6 +917,50 @@ class TechnicalAgent(BaseAgent):
         typical = (df["high"] + df["low"] + df["close"]) / 3.0
         cum_vol = df["volume"].cumsum().replace(0, np.nan)
         return float((typical * df["volume"]).cumsum().iloc[-1] / cum_vol.iloc[-1])
+
+    def _hourly_direction(self, hourly: pd.DataFrame) -> tuple[float, str]:
+        """Compute a directional bias from 1-hour bars.
+
+        Returns (bias_score 0–100, description) where:
+          >60 = hourly bullish (rising trend, RSI above 50, price above VWAP)
+          <40 = hourly bearish
+          40–60 = neutral/choppy
+        """
+        if hourly is None or len(hourly) < 10:
+            return 50.0, "no hourly data"
+
+        close = hourly["close"]
+
+        # 1. EMA 9/21 cross on hourly
+        ema9  = close.ewm(span=9,  adjust=False).mean().iloc[-1]
+        ema21 = close.ewm(span=21, adjust=False).mean().iloc[-1]
+        ema_score = 65.0 if ema9 > ema21 else 35.0
+
+        # 2. RSI on hourly
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, float("nan"))
+        rsi_h = float((100 - 100 / (1 + rs)).iloc[-1]) if not loss.iloc[-1] == 0 else 50.0
+        if float("nan") == rsi_h or rsi_h != rsi_h:
+            rsi_h = 50.0
+        rsi_score = float(np.interp(rsi_h, [30, 50, 70], [30, 50, 70]))
+
+        # 3. Price vs 20-bar SMA on hourly
+        sma20 = close.rolling(20).mean().iloc[-1]
+        last  = float(close.iloc[-1])
+        sma_score = 60.0 if last > sma20 else 40.0
+
+        bias = float(np.mean([ema_score, rsi_score, sma_score]))
+
+        if bias >= 60:
+            desc = f"hourly bullish (EMA{'↑' if ema9 > ema21 else '↓'}, RSI={rsi_h:.0f})"
+        elif bias <= 40:
+            desc = f"hourly bearish (EMA{'↑' if ema9 > ema21 else '↓'}, RSI={rsi_h:.0f})"
+        else:
+            desc = f"hourly neutral (RSI={rsi_h:.0f})"
+
+        return bias, desc
 
 
 # ---- Module-level helper (used by RegimeAgent too) ----------------------

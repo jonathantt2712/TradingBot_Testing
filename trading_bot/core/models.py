@@ -42,10 +42,11 @@ class RiskParameters:
 class AnalysisContext:
     """Everything agents need to evaluate a single ticker."""
     ticker:           str
-    bars:             Optional[pd.DataFrame] = None   # OHLCV, DatetimeIndex
+    bars:             Optional[pd.DataFrame] = None   # OHLCV 5-min, DatetimeIndex
     account:          dict                   = field(default_factory=dict)
     chart_image_path: Optional[str]          = None   # path to rendered PNG
     as_of:            Optional[pd.Timestamp] = None   # evaluation time (backtests)
+    hourly_bars:      Optional[pd.DataFrame] = None   # OHLCV 1-hour bars for MTF gate
 
     @property
     def last_price(self) -> Optional[float]:
