@@ -8,10 +8,11 @@ import { cn, formatCurrency, formatPct } from '@/lib/utils'
 import type { PnLPoint, PortfolioStats, TradeRecord } from '@/types/trading'
 
 interface Props {
-  pnl:    PnLPoint[]
-  stats:  PortfolioStats
-  trades: TradeRecord[]
-  live:   boolean
+  pnl:         PnLPoint[]
+  stats:       PortfolioStats
+  trades:      TradeRecord[]
+  live:        boolean
+  attribution?: Record<string, { wins: number; losses: number; total: number; win_rate: number; total_pnl: number }>
 }
 
 function ChartTooltip({ active, payload, label }: any) {
@@ -28,7 +29,7 @@ function ChartTooltip({ active, payload, label }: any) {
   )
 }
 
-export function PnLAnalytics({ pnl, stats, trades, live }: Props) {
+export function PnLAnalytics({ pnl, stats, trades, live, attribution }: Props) {
   const wins   = trades.filter(t => (t.pnl ?? 0) > 0).length
   const losses = trades.filter(t => (t.pnl ?? 0) < 0).length
   const pie    = [
@@ -166,6 +167,33 @@ export function PnLAnalytics({ pnl, stats, trades, live }: Props) {
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {/* Agent Attribution */}
+      {attribution && Object.keys(attribution).length > 0 && (
+        <div className="card p-5">
+          <h2 className="text-sm font-semibold text-primary mb-4">Agent Attribution</h2>
+          <div className="space-y-3">
+            {Object.entries(attribution)
+              .sort(([, a], [, b]) => b.total - a.total)
+              .map(([role, s]) => (
+                <div key={role} className="flex items-center gap-3">
+                  <span className="w-24 text-xs text-muted capitalize">{role}</span>
+                  <div className="flex-1 h-2 rounded-full bg-bg-base overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-bull"
+                      style={{ width: s.total > 0 ? `${s.win_rate}%` : '0%' }}
+                    />
+                  </div>
+                  <span className="w-12 text-right text-xs font-mono text-subtle">{s.win_rate.toFixed(0)}%</span>
+                  <span className="w-16 text-right text-xs font-mono text-muted">{s.wins}W/{s.losses}L</span>
+                  <span className={cn('w-16 text-right text-xs font-mono', s.total_pnl >= 0 ? 'text-bull' : 'text-bear')}>
+                    ${s.total_pnl >= 0 ? '+' : ''}{s.total_pnl.toFixed(0)}
+                  </span>
+                </div>
+              ))}
           </div>
         </div>
       )}
