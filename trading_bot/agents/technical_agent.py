@@ -14,7 +14,9 @@ Confidence is inversely proportional to signal disagreement (std-dev spread).
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -49,6 +51,7 @@ _WEIGHTS = {
     "zscore":        0.04,
     "stochastic":    0.04,
     "divergence":    0.03,
+    "gap":           0.04,
 }
 
 # ── Research-derived thresholds ──────────────────────────────────────────────
@@ -189,10 +192,15 @@ class TechnicalAgent(BaseAgent):
             # 0 = at low (bearish=20), 0.5 = mid (50), 1 = at high (bullish=80)
             signals["day_range_pos"] = float(np.clip(drp * 80 + 10, 10, 90))
 
-        # 5. Opening Range Breakout
-        orb = self._orb_score(df)
+        # 5. Opening Range Breakout (RVOL-gated: unconfirmed breakout capped if RVOL < 1.5)
+        orb = self._orb_score(df, rvol=vol_ratio)
         if orb is not None:
             signals["orb"] = orb
+
+        # 5b. Gap signal (today open vs prior close — fade small gaps, ride large ones)
+        gap_val = self._gap_signal(df)
+        if gap_val is not None:
+            signals["gap"] = gap_val
 
         # 6. Candlestick Patterns (pandas-ta only)
         if _HAS_PANDAS_TA:
@@ -249,6 +257,32 @@ class TechnicalAgent(BaseAgent):
             # Apply a +5-point threshold surcharge (stored as negative signal)
             signals["_retail_surcharge"] = 5.0
 
+        # ── Time-of-day phase weight adjustment ──────────────────────────
+        try:
+            _now_et = datetime.now(ZoneInfo("America/New_York"))
+            _now_et_h = _now_et.hour + _now_et.minute / 60.0
+            if 9.5 <= _now_et_h < 10.5:       # 9:30–10:30 ET: momentum phase
+                _tod_mult = {
+                    "orb": 1.3, "volume_surge": 1.3, "intraday_mom": 1.3, "rel_strength": 1.2,
+                    "zscore": 0.7, "stochastic": 0.7, "divergence": 0.7,
+                }
+                _tod_phase = "momentum"
+            elif 10.5 <= _now_et_h < 14.5:    # 10:30–14:30 ET: mean-reversion phase
+                _tod_mult = {
+                    "zscore": 1.3, "stochastic": 1.3, "divergence": 1.2, "vwap": 1.2,
+                    "orb": 0.7, "intraday_mom": 0.8,
+                }
+                _tod_phase = "mean_reversion"
+            elif 15.5 <= _now_et_h < 16.0:    # 15:30–16:00 ET: late-session dampening
+                _tod_mult = {}
+                _tod_phase = "late_session"
+            else:
+                _tod_mult = {}
+                _tod_phase = "afternoon" if _now_et_h >= 14.5 else "other"
+        except Exception:
+            _tod_mult = {}
+            _tod_phase = None
+
         # ── Composite score ──────────────────────────────────────────────
         clean = {k: v for k, v in signals.items() if not np.isnan(v)}
         if not clean:
@@ -259,13 +293,17 @@ class TechnicalAgent(BaseAgent):
         lottery_penalty  = clean.pop("_lottery_penalty",  0.0)
         retail_surcharge = clean.pop("_retail_surcharge", 0.0)
 
-        # Weighted mean (fall back to equal weight for signals not in _WEIGHTS)
+        # Weighted mean with time-of-day phase adjustment
         total_w = num = 0.0
         for key, val in clean.items():
-            w = _WEIGHTS.get(key, 0.05)
+            w = _WEIGHTS.get(key, 0.05) * _tod_mult.get(key, 1.0)
             num += val * w
             total_w += w
         raw_score = num / total_w if total_w else 50.0
+
+        # Late-session dampening: after 15:30 ET pull score 30% toward neutral
+        if _tod_phase == "late_session":
+            raw_score = raw_score + (50.0 - raw_score) * 0.30
 
         # Research #2: subtract lottery penalty (pushes score toward 50 = neutral)
         if lottery_penalty > 0:
@@ -291,6 +329,10 @@ class TechnicalAgent(BaseAgent):
             orb_val = clean["orb"]
             orb_tag = "↑BRK" if orb_val > 55 else ("↓BRK" if orb_val < 45 else "=RNG")
             rationale += f" ORB{orb_tag}"
+        if "gap" in clean:
+            rationale += f" GAP={'FADE' if clean['gap'] < 50 else 'CONT'}"
+        if _tod_phase:
+            rationale += f" [{_tod_phase}]"
         if lottery_penalty > 0:
             rationale += f" [LOTTERY pen={lottery_penalty:.0f}]"
         if retail_surcharge > 0:
@@ -413,6 +455,11 @@ class TechnicalAgent(BaseAgent):
                 "N/A" if div_val is None else ("bullish div" if div_val > 60 else ("bearish div" if div_val < 40 else "no divergence")),
                 "Bullish divergence: price at lows but RSI making higher low — potential reversal" if div_val is not None and div_val > 60 else ("Bearish divergence: price at highs but RSI making lower high — potential reversal" if div_val is not None and div_val < 40 else "No RSI/price divergence detected"),
             ),
+            "gap": (
+                "Gap Signal",
+                f"score {clean.get('gap', 50):.0f}",
+                f"{'Fade bias — gap expected to fill (small gap <0.5%)' if clean.get('gap', 50) < 50 else 'Continuation bias — gap likely holds (large gap >2%)'}",
+            ),
         }
         for key, sig_score in clean.items():
             if key not in _meta:
@@ -439,6 +486,7 @@ class TechnicalAgent(BaseAgent):
                 "lottery_penalty": round(lottery_penalty, 1) if lottery_penalty > 0 else None,
                 "retail_driven": retail_surcharge > 0,
                 "retail_surcharge": retail_surcharge if retail_surcharge > 0 else None,
+                "tod_phase": _tod_phase,
             },
             "mtf": {
                 "hourly_bias": round(h_bias, 1) if h_bias is not None else None,
@@ -574,13 +622,14 @@ class TechnicalAgent(BaseAgent):
             return 0.5
         return (last - lo) / (hi - lo)
 
-    def _orb_score(self, df: pd.DataFrame, num_bars: int = 3) -> Optional[float]:
+    def _orb_score(self, df: pd.DataFrame, num_bars: int = 3, rvol: Optional[float] = None) -> Optional[float]:
         """Opening Range Breakout: first 3 five-min bars (9:30–9:45 ET) form the range.
 
         score > 55  → price above ORB high (bullish breakout)
         score < 45  → price below ORB low  (bearish breakdown)
         45–55       → price inside opening range (no directional edge)
 
+        rvol: if supplied and < 1.5, caps breakout at 65 (unconfirmed breakout).
         Returns None if not enough bars in today's session to confirm the breakout
         (requires opening range bars + at least 2 follow-through bars).
         """
@@ -603,14 +652,53 @@ class TechnicalAgent(BaseAgent):
         if last > orb_high:
             # Breakout above: +% above high maps to score 65–90
             pct_above = (last - orb_high) / orb_high * 100
-            return float(np.clip(65 + pct_above * 8, 65, 90))
+            brk = float(np.clip(65 + pct_above * 8, 65, 90))
+            # RVOL gate: unconfirmed breakout (RVOL < 1.5) capped at 65
+            if rvol is not None and rvol < 1.5:
+                brk = min(brk, 65.0)
+            return brk
         if last < orb_low:
             # Breakdown below: +% below low maps to score 10–35
             pct_below = (orb_low - last) / orb_low * 100
-            return float(np.clip(35 - pct_below * 8, 10, 35))
+            bdn = float(np.clip(35 - pct_below * 8, 10, 35))
+            # RVOL gate: unconfirmed breakdown (RVOL < 1.5) floored at 35
+            if rvol is not None and rvol < 1.5:
+                bdn = max(bdn, 35.0)
+            return bdn
         # Inside range: neutral with slight position bias (45–55)
         pos_in_range = (last - orb_low) / orb_range
         return float(np.clip(45 + pos_in_range * 10, 45, 55))
+
+    def _gap_signal(self, df: pd.DataFrame) -> Optional[float]:
+        """Gap open vs prior close — fade small gaps, ride large ones.
+
+        Research: |gap| < 0.5% fills 88% intraday → fade.
+                  |gap| > 2.0% fills only 8% → continuation.
+        """
+        if not hasattr(df.index, "date") or len(df) < 40:
+            return None
+        try:
+            today = df.index[-1].date()
+            today_df = df[df.index.map(lambda x: x.date()) == today]
+            prior_df  = df[df.index.map(lambda x: x.date()) < today]
+            if today_df.empty or prior_df.empty:
+                return None
+            today_open = float(today_df["open"].iloc[0])
+            prev_close = float(prior_df["close"].iloc[-1])
+            if prev_close <= 0 or today_open <= 0:
+                return None
+            gap_pct = (today_open - prev_close) / prev_close * 100
+            if abs(gap_pct) < 0.5:
+                # Small gap: high fill probability — fade the direction
+                return float(np.clip(50 - gap_pct * 15, 20, 80))
+            elif abs(gap_pct) > 2.0:
+                # Large gap: low fill probability — ride the continuation
+                return float(np.clip(50 + gap_pct * 8, 20, 80))
+            else:
+                # Medium gap: mild continuation bias
+                return float(np.clip(50 + gap_pct * 4, 30, 70))
+        except Exception:
+            return None
 
     def _adx_signal(self, df: pd.DataFrame, length: int = 14) -> Optional[float]:
         """ADX trend strength. ADX>25 = trending market. Used to amplify trend signals."""

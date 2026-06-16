@@ -128,6 +128,9 @@ class PortfolioManager:
         if self._decision_agent is not None and self._decision_agent.available:
             regime_value = self._regime.regime.value if self._regime else "neutral"
             regime_rationale = getattr(self._regime, "rationale", "") if self._regime else ""
+            vix_level = getattr(self._regime, "vix_level", None) if self._regime else None
+            if vix_level is not None:
+                regime_rationale = f"{regime_rationale} | VIX={vix_level:.1f}"
             all_evals = [ev for ev in evaluations if ev is not None]
             decision, composite, decision_meta = await self._decision_agent.decide(
                 ctx, all_evals, regime_value, regime_rationale,
@@ -171,6 +174,18 @@ class PortfolioManager:
             )
 
         plan = self.risk.build_plan(ctx, intended=decision)
+
+        # VIX-aware position scaling: high volatility → smaller size
+        if plan is not None and self._regime is not None:
+            vix = self._regime.vix_level
+            if vix is not None:
+                if vix > 40:
+                    plan.qty = float(int(plan.qty * 0.5))
+                    logger.info("%s VIX=%.1f > 40: position scaled 50%%", ctx.ticker, vix)
+                elif vix > 30:
+                    plan.qty = float(int(plan.qty * 0.7))
+                    logger.info("%s VIX=%.1f > 30: position scaled 70%%", ctx.ticker, vix)
+
         if plan is None or plan.qty <= 0 or plan.risk_reward < self.settings.risk.min_risk_reward:
             logger.info("%s downgraded to PASS: no viable plan", ctx.ticker)
             return TradeDecision(
@@ -442,6 +457,14 @@ class PortfolioManager:
             den += w
 
         result = round(num / den, 2) if den else 50.0
+
+        # Social + Squeeze convergence bonus: both agree → ±3 point boost
+        if social is not None and squeeze is not None:
+            if social.score >= 60 and squeeze.score >= 60:
+                result = min(99.0, result + 3.0)
+            elif social.score <= 40 and squeeze.score <= 40:
+                result = max(1.0, result - 3.0)
+
         return result
 
     def _direction(
