@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { readFileSync }  from 'fs'
 import { resolve }       from 'path'
+import { auth }          from '@/auth'
 
 function readJson(relPath: string): any {
   try {
@@ -12,6 +13,8 @@ function readJson(relPath: string): any {
 }
 
 export async function GET() {
+  const session = await auth()
+  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const results = readJson('backtest_results.json')
   const optimal = readJson('backtest_optimal.json')
   const config  = readJson('OPTIMAL_CONFIG.txt')   // text, not JSON

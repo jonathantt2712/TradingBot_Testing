@@ -81,9 +81,19 @@ _scan_stats: Dict[str, Any] = {
     "market_closed_skips": 0,
 }
 
-from fastapi import FastAPI, HTTPException
+import secrets as _secrets
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+_BOT_API_SECRET = os.getenv("BOT_API_SECRET", "")
+
+
+async def _verify_bot_secret(x_bot_secret: str = Header(default="")) -> None:
+    if not _BOT_API_SECRET:
+        return  # secret not configured — open in dev; Railway sets it in prod
+    if not _secrets.compare_digest(x_bot_secret, _BOT_API_SECRET):
+        raise HTTPException(status_code=401, detail="Invalid bot secret")
 
 logger = logging.getLogger("api_server")
 logging.basicConfig(level=logging.INFO)
@@ -1040,7 +1050,7 @@ app.add_middleware(
 
 # === REST endpoints ===
 
-@app.get("/api/recommendations")
+@app.get("/api/recommendations", dependencies=[Depends(_verify_bot_secret)])
 def get_recommendations():
     data = _load(RECS_FILE, [])
     if isinstance(data, list):
@@ -1048,7 +1058,7 @@ def get_recommendations():
     return []
 
 
-@app.get("/api/history")
+@app.get("/api/history", dependencies=[Depends(_verify_bot_secret)])
 def get_history():
     data = _load(HISTORY_FILE, [])
     if isinstance(data, list):
@@ -1056,7 +1066,7 @@ def get_history():
     return []
 
 
-@app.get("/api/pnl")
+@app.get("/api/pnl", dependencies=[Depends(_verify_bot_secret)])
 def get_pnl():
     # Always compute from trade history (PNL_FILE is not used as a cache)
     history = _load(HISTORY_FILE, [])
@@ -1085,7 +1095,7 @@ def get_pnl():
     return out
 
 
-@app.get("/api/stats")
+@app.get("/api/stats", dependencies=[Depends(_verify_bot_secret)])
 def get_stats():
     all_trades = _load(HISTORY_FILE, [])
     if not isinstance(all_trades, list):
@@ -1165,7 +1175,7 @@ def get_stats():
 
 
 
-@app.get("/api/regime")
+@app.get("/api/regime", dependencies=[Depends(_verify_bot_secret)])
 def get_regime():
     data = _load(REGIME_FILE, {})
     if isinstance(data, dict) and data.get("regime"):
@@ -1180,7 +1190,7 @@ def get_regime():
     }
 
 
-@app.get("/api/sectors")
+@app.get("/api/sectors", dependencies=[Depends(_verify_bot_secret)])
 def get_sectors():
     recs = _load(RECS_FILE, [])
     if not isinstance(recs, list):
@@ -1219,7 +1229,7 @@ class ExecuteBody(BaseModel):
     score:             Optional[float] = None
 
 
-@app.get("/api/open")
+@app.get("/api/open", dependencies=[Depends(_verify_bot_secret)])
 def get_open_context():
     """Return open trade TP/SL context for PositionsTable."""
     trades = _load(HISTORY_FILE, [])
@@ -1238,7 +1248,7 @@ def get_open_context():
     }
 
 
-@app.post("/api/execute")
+@app.post("/api/execute", dependencies=[Depends(_verify_bot_secret)])
 def execute_trade(body: ExecuteBody):
     trade = {
         "id":              body.recommendation_id or str(uuid.uuid4()),
@@ -1279,13 +1289,13 @@ def execute_trade(body: ExecuteBody):
     return {"status": "recorded", "trade_id": trade["id"]}
 
 
-@app.post("/api/scan")
+@app.post("/api/scan", dependencies=[Depends(_verify_bot_secret)])
 async def trigger_scan():
     asyncio.create_task(_run_market_scan())
     return {"status": "scan_triggered", "timestamp": datetime.utcnow().isoformat()}
 
 
-@app.get("/api/scan-stats")
+@app.get("/api/scan-stats", dependencies=[Depends(_verify_bot_secret)])
 def get_scan_stats():
     """Return today's scan activity counters and market status."""
     all_trades = _load(HISTORY_FILE, [])

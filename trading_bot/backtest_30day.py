@@ -24,6 +24,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -149,7 +150,7 @@ async def fetch_bars_range(
 
 # -- Fill simulator (day-trade: forced close at 15:55 ET) ----------------------
 
-_ET = timezone(timedelta(hours=-4))   # EDT (UTC-4) -- use -5 in winter
+_ET = ZoneInfo("America/New_York")
 
 def simulate_day_trade(
     future_bars: pd.DataFrame,

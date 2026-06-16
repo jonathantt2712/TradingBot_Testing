@@ -25,6 +25,7 @@ import os
 import sys
 from typing import Sequence
 
+
 import bootstrap  # loads .env files on import — keep first
 from bootstrap import build_broker, build_manager, eod_flatten_loop, refresh_market_context
 from config.settings import load_settings
@@ -44,6 +45,9 @@ RESCAN_INTERVAL_MIN = int(os.environ.get("RESCAN_INTERVAL_MIN", "30"))
 # Used when the universe scanner is unreachable at startup (network blip):
 # deep-liquidity names so the bot stays alive until the scanner recovers.
 FALLBACK_WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA"]
+
+# Protects concurrent reads/writes to the active_tickers list across async tasks.
+_ticker_lock: asyncio.Lock | None = None
 
 
 async def evaluate_ticker(
@@ -143,9 +147,10 @@ async def rescan_loop(
                     min_change=scanner_cfg.min_change_pct,
                 )
                 if fresh:
-                    added   = set(fresh) - set(active_tickers)
-                    removed = set(active_tickers) - set(fresh)
-                    active_tickers[:] = fresh
+                    async with _ticker_lock:
+                        added   = set(fresh) - set(active_tickers)
+                        removed = set(active_tickers) - set(fresh)
+                        active_tickers[:] = fresh
                     if added or removed:
                         logger.info(
                             "Universe refreshed: +%s -%s -> active=%s",
@@ -157,15 +162,20 @@ async def rescan_loop(
         # Regime + SPY bars go stale over a session — refresh before re-scoring.
         await refresh_market_context(pm, broker)
 
-        logger.info("Scheduled rescan of %s", active_tickers)
+        async with _ticker_lock:
+            snapshot = list(active_tickers)
+        logger.info("Scheduled rescan of %s", snapshot)
         await asyncio.gather(
             *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
-              for t in list(active_tickers)],
+              for t in snapshot],
             return_exceptions=True,
         )
 
 
 async def main(tickers: Sequence[str]) -> None:
+    global _ticker_lock
+    _ticker_lock = asyncio.Lock()
+
     settings = load_settings()
     execute = os.environ.get("EXECUTE_LIVE", "false").lower() == "true"
 
@@ -232,7 +242,7 @@ async def main(tickers: Sequence[str]) -> None:
         logger.info("Initial scan of %s", active_tickers)
         await asyncio.gather(
             *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
-              for t in active_tickers],
+              for t in list(active_tickers)],
             return_exceptions=True,
         )
 
