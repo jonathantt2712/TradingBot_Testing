@@ -86,11 +86,11 @@ class LiquidAgent(BaseAgent):
 
         score = clamp_score(float(np.mean(list(signals.values()))))
         spread_std = float(np.std(list(signals.values()))) if len(signals) > 1 else 0.0
-        confidence = max(0.25, min(0.75, 0.4 - spread_std / 80.0))
+        confidence = max(0.25, min(0.90, 0.4 - spread_std / 80.0))   # 0.90 universal cap
 
         rv_raw = self._relative_volume_raw(df)
         if rv_raw is not None and rv_raw > 2.0:
-            confidence = min(0.75, confidence + 0.15)
+            confidence = min(0.90, confidence + 0.15)   # 0.90 universal cap
 
         label_parts = [f"{k}={v:.0f}" for k, v in signals.items()]
 
