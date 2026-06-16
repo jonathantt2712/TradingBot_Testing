@@ -9,13 +9,20 @@ import { formatCurrency } from '@/lib/utils'
 
 interface Props { data: PnLPoint[] }
 
+const formatLabel = (label: string) => {
+  if (/^\d{10,}$/.test(label)) {
+    return new Date(+label).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Jerusalem' })
+  }
+  return label
+}
+
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null
   const cum   = payload.find((p: any) => p.dataKey === 'cumulative_pnl')
   const daily = payload.find((p: any) => p.dataKey === 'daily_pnl')
   return (
     <div className="rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 shadow-lg text-xs">
-      <p className="text-muted mb-1">{label}</p>
+      <p className="text-muted mb-1">{formatLabel(label)}</p>
       {cum   && <p className="text-brand-cyan font-medium">Cum: {formatCurrency(cum.value)}</p>}
       {daily && (
         <p className={daily.value >= 0 ? 'text-bull' : 'text-bear'}>
@@ -135,7 +142,9 @@ export function PnLChart({ data }: Props) {
                 <XAxis
                   dataKey="date"
                   tick={{ fontSize: 10, fill: '#64748B' }}
-                  tickFormatter={d => view === 'today' ? d : d.slice(5)}
+                  tickFormatter={d => view === 'today'
+                    ? new Date(+d).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Jerusalem' })
+                    : d.slice(5)}
                   axisLine={false} tickLine={false}
                 />
                 <YAxis

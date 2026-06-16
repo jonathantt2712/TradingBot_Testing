@@ -21,14 +21,10 @@ export async function GET(req: Request) {
       const prev  = i > 0 ? (profit_loss[i - 1] ?? 0) : 0
       const daily = i === 0 ? cum : cum - prev
 
-      let date: string
-      if (intraday) {
-        const d = new Date(ts * 1000)
-        const h = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Jerusalem' })
-        date = h
-      } else {
-        date = new Date(ts * 1000).toISOString().slice(0, 10)
-      }
+      // For intraday: send raw Unix timestamp (ms) as string — client formats in local timezone
+      const date = intraday
+        ? String(ts * 1000)
+        : new Date(ts * 1000).toISOString().slice(0, 10)
 
       return { date, cumulative_pnl: +cum.toFixed(2), daily_pnl: +daily.toFixed(2), trade_count: 0 }
     })
