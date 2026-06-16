@@ -1437,7 +1437,23 @@ def get_scan_stats():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": _AGENTS_AVAILABLE, "timestamp": datetime.utcnow().isoformat(), "backtest": _backtest_stats}
+    gemini_set    = bool(os.getenv("GEMINI_API_KEY"))
+    anthropic_set = bool(os.getenv("ANTHROPIC_API_KEY"))
+    ai4_set       = bool(os.getenv("AI4TRADE_EMAIL") and os.getenv("AI4TRADE_PASSWORD"))
+    return {
+        "status":    "ok",
+        "agents":    _AGENTS_AVAILABLE,
+        "timestamp": datetime.utcnow().isoformat(),
+        "backtest":  _backtest_stats,
+        "keys": {
+            "gemini":    gemini_set,
+            "anthropic": anthropic_set,
+            "ai4trade":  ai4_set,
+            # Vision needs ANY vision-capable LLM key; social needs AI4Trade creds.
+            "vision_ready": gemini_set or anthropic_set,
+            "social_ready": ai4_set,
+        },
+    }
 
 
 if __name__ == "__main__":
