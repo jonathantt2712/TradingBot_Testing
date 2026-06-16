@@ -24,7 +24,7 @@ export function RegimeReasoningCard({ regime }: Props) {
         </span>
       </div>
 
-      <p className="text-sm text-subtle">{regime.rationale}</p>
+      <p className="text-sm text-subtle break-words leading-relaxed">{regime.rationale}</p>
 
       {inputs && (
         <div className="grid grid-cols-3 gap-2">

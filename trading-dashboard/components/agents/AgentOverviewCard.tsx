@@ -48,19 +48,20 @@ export function AgentOverviewCard({ role, recommendations }: Props) {
 
   return (
     <div className="card space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-semibold text-primary">{AGENT_LABELS[role] ?? role}</h3>
             <LeanIcon score={avgScore} />
           </div>
-          <p className="text-xs text-muted mt-0.5">{AGENT_BLURBS[role]}</p>
+          <p className="text-xs text-muted mt-0.5 leading-relaxed">{AGENT_BLURBS[role]}</p>
         </div>
-        <div className="text-right">
+        <div className="text-right shrink-0">
           <span className={cn('inline-block rounded-full border px-2 py-1 font-mono text-sm font-bold', bgColorForScore(avgScore))}>
             {avgScore.toFixed(0)}
           </span>
-          <p className="text-[10px] text-muted mt-1">avg conf {Math.round(avgConf * 100)}% · {entries.length} ticker{entries.length === 1 ? '' : 's'}</p>
+          <p className="text-[10px] text-muted mt-1">avg conf {Math.round(avgConf * 100)}%</p>
+          <p className="text-[10px] text-muted">{entries.length} ticker{entries.length === 1 ? '' : 's'}</p>
         </div>
       </div>
 
@@ -75,15 +76,15 @@ export function AgentOverviewCard({ role, recommendations }: Props) {
       {expanded && (
         <div className="space-y-3">
           {entries.map(({ ticker, ev }) => (
-            <div key={ticker} className="rounded-lg border border-bg-border bg-bg-base px-3 py-2 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="ticker-mono text-sm text-primary">{ticker}</span>
-                <div className="flex items-center gap-2 text-xs">
+            <div key={ticker} className="rounded-lg border border-bg-border bg-bg-base px-3 py-2.5 space-y-2 overflow-hidden">
+              <div className="flex items-center justify-between gap-2">
+                <span className="ticker-mono text-sm font-bold text-primary">{ticker}</span>
+                <div className="flex items-center gap-2 text-xs shrink-0">
                   <span className={cn('font-mono font-bold', bgColorForScore(ev.score).split(' ')[1])}>{ev.score.toFixed(0)}</span>
                   <span className="text-muted">conf {Math.round(ev.confidence * 100)}%</span>
                 </div>
               </div>
-              {ev.rationale && <p className="text-xs text-subtle">{ev.rationale}</p>}
+              {ev.rationale && <p className="text-xs text-subtle leading-relaxed break-words">{ev.rationale}</p>}
               <ReasoningDetail reasoning={ev.reasoning} />
             </div>
           ))}
