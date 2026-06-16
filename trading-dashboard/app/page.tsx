@@ -6,18 +6,32 @@ import { RefreshButton }  from '@/components/layout/RefreshButton'
 import {
   demoStats, demoPnL, demoRegime, demoSectors,
 } from '@/lib/api'
-import { getAccount, getPositions, type AlpacaCreds } from '@/lib/alpaca'
+import { getAccount, getPositions, getPortfolioHistory, type AlpacaCreds, type PortfolioHistory } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { botGet } from '@/lib/bot-api'
 import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/trading'
 import type { AlpacaAccount } from '@/lib/alpaca'
 
+function portfolioHistoryToPnL(h: PortfolioHistory): PnLPoint[] {
+  return h.timestamp.map((ts, i) => {
+    const cum   = h.profit_loss[i] ?? 0
+    const prev  = i > 0 ? (h.profit_loss[i - 1] ?? 0) : 0
+    const daily = i === 0 ? cum : cum - prev
+    return {
+      date:           new Date(ts * 1000).toISOString().slice(0, 10),
+      cumulative_pnl: +cum.toFixed(2),
+      daily_pnl:      +daily.toFixed(2),
+      trade_count:    0,
+    }
+  })
+}
+
 async function loadDashboard(creds: AlpacaCreds | null) {
-  const [account, positions, stats, pnl, regime, sectors] = await Promise.allSettled([
+  const [account, positions, stats, portfolioHist, regime, sectors] = await Promise.allSettled([
     creds ? getAccount(creds) : Promise.reject(new Error('no creds')),
     creds ? getPositions(creds) : Promise.reject(new Error('no creds')),
     botGet<PortfolioStats>('/api/stats'),
-    botGet<PnLPoint[]>('/api/pnl'),
+    creds ? getPortfolioHistory(creds, '1M', '1D') : botGet<PnLPoint[]>('/api/pnl'),
     botGet<RegimeInfo>('/api/regime'),
     botGet<SectorStat[]>('/api/sectors'),
   ])
@@ -43,11 +57,19 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     resolvedStats.open_positions = positions.value.length
   }
 
+  let resolvedPnl: PnLPoint[]
+  if (portfolioHist.status === 'fulfilled') {
+    const v = portfolioHist.value as any
+    resolvedPnl = Array.isArray(v) ? v : portfolioHistoryToPnL(v as PortfolioHistory)
+  } else {
+    resolvedPnl = demoPnL()
+  }
+
   return {
     stats:        resolvedStats,
     account:      account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
     accountError: accountErrorDetail,
-    pnl:          pnl.status      === 'fulfilled' ? pnl.value      : demoPnL(),
+    pnl:          resolvedPnl,
     regime:       regime.status   === 'fulfilled' ? regime.value   : demoRegime(),
     sectors:      sectors.status  === 'fulfilled' ? sectors.value  : demoSectors(),
     positions:    positions.status === 'fulfilled' ? positions.value : [],

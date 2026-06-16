@@ -35,7 +35,7 @@ export function LiveDashboard({
   const refresh = useCallback(async () => {
     const [s, p, r, sec, pos] = await Promise.allSettled([
       fetch('/api/bot/stats').then(res => res.ok ? res.json() : null),
-      fetch('/api/bot/pnl').then(res => res.ok ? res.json() : null),
+      fetch('/api/alpaca/portfolio-history').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/regime').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/sectors').then(res => res.ok ? res.json() : null),
       fetch('/api/alpaca/positions').then(res => res.ok ? res.json() : null),
