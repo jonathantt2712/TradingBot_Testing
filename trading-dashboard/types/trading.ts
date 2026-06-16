@@ -32,6 +32,8 @@ export interface TradeRecommendation {
   expires_at?:          string
   time_window_minutes?: number
   rationale?:           string
+  premarket?:           boolean
+  gap_pct?:             number
 }
 
 export interface TradeRecord {

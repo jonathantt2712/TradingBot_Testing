@@ -97,6 +97,19 @@ export function TradeCard({ trade, onExecute, onInfo, currentPrice }: Props) {
                   <Flame className="h-2.5 w-2.5" /> HOT
                 </span>
               )}
+              {trade.premarket && (
+                <span className="flex items-center gap-0.5 rounded-full bg-brand-cyan/15 border border-brand-cyan/25 px-1.5 py-0.5 text-[10px] font-semibold text-brand-cyan">
+                  PRE-MKT
+                </span>
+              )}
+              {trade.gap_pct != null && (
+                <span className={cn(
+                  'rounded-full border px-1.5 py-0.5 text-[10px] font-mono font-semibold',
+                  trade.gap_pct > 0 ? 'border-bull/25 text-bull bg-bull/10' : 'border-bear/25 text-bear bg-bear/10',
+                )}>
+                  {trade.gap_pct > 0 ? '+' : ''}{trade.gap_pct.toFixed(1)}% gap
+                </span>
+              )}
             </div>
             <p className="text-xs text-muted truncate">{trade.sector}</p>
           </div>
