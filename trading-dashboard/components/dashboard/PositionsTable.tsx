@@ -165,41 +165,44 @@ function PositionRow({ position, tradeRec, onClose, closing }: {
 
   return (
     <div className="border-b border-bg-border/50 last:border-0">
-      <div className="flex items-center gap-3 px-4 py-3 hover:bg-bg-hover/50 transition-colors">
-        <button onClick={() => setExpanded(v => !v)} className="text-muted hover:text-subtle transition-colors shrink-0">
-          {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-        </button>
-        <div className="w-20 shrink-0">
+      <div className="px-3 py-3 hover:bg-bg-hover/50 transition-colors space-y-1.5">
+        {/* Row 1: expand · symbol · qty · P&L */}
+        <div className="flex items-center gap-2">
+          <button onClick={() => setExpanded(v => !v)} className="text-muted hover:text-subtle transition-colors shrink-0">
+            {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+          </button>
           <span className="font-mono font-bold text-sm text-primary">{position.symbol}</span>
-          <span className={cn('ml-1.5 rounded px-1 py-0.5 text-[10px] font-semibold', isLong ? 'bg-bull/10 text-bull' : 'bg-bear/10 text-bear')}>
+          <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-semibold', isLong ? 'bg-bull/10 text-bull' : 'bg-bear/10 text-bear')}>
             {position.side.toUpperCase()}
           </span>
+          <span className="text-xs font-mono text-muted">{position.qty} sh</span>
+          <div className={cn('ml-auto flex flex-col items-end', pnl >= 0 ? 'text-bull' : 'text-bear')}>
+            <span className="text-sm font-mono font-semibold">{pnl >= 0 ? '+' : ''}${Math.abs(pnl).toFixed(2)}</span>
+            <span className="text-[10px] font-mono opacity-80">{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%</span>
+          </div>
         </div>
-        <span className="w-10 text-xs font-mono text-subtle shrink-0">{position.qty}</span>
-        <div className="flex items-center gap-1.5 text-xs font-mono text-subtle shrink-0">
-          <span>{formatPrice(parseFloat(position.avg_entry_price))}</span>
-          <span className="text-muted">to</span>
-          <span className="text-primary">{formatPrice(parseFloat(position.current_price))}</span>
-        </div>
-        <div className="flex flex-col items-end shrink-0 text-right">
-          <span className="text-[10px] text-muted">Cost</span>
-          <span className="text-xs font-mono font-semibold text-subtle">
-            ${totalCost.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+        {/* Row 2: entry→current · cost · signal · close */}
+        <div className="flex items-center gap-2 pl-5">
+          <div className="flex items-center gap-1 text-xs font-mono text-subtle">
+            <span>{formatPrice(parseFloat(position.avg_entry_price))}</span>
+            <span className="text-muted">→</span>
+            <span className="text-primary">{formatPrice(parseFloat(position.current_price))}</span>
+          </div>
+          <span className="text-[10px] text-muted shrink-0">
+            Cost ${totalCost.toLocaleString('en-US', { maximumFractionDigits: 0 })}
           </span>
+          <div className="ml-auto flex items-center gap-2 shrink-0">
+            <RecBadge rec={rec} />
+            <button
+              onClick={() => onClose(position.symbol)}
+              disabled={isClosing}
+              className="flex items-center gap-1 rounded-md border border-bear/30 bg-bear/10 px-2 py-1 text-[10px] font-semibold text-bear hover:bg-bear/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isClosing ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <X className="h-2.5 w-2.5" />}
+              Close
+            </button>
+          </div>
         </div>
-        <div className={cn('ml-auto flex flex-col items-end shrink-0', pnl >= 0 ? 'text-bull' : 'text-bear')}>
-          <span className="text-xs font-mono font-semibold">{pnl >= 0 ? '+' : ''}${Math.abs(pnl).toFixed(2)}</span>
-          <span className="text-[10px] font-mono opacity-80">{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%</span>
-        </div>
-        <div className="shrink-0 ml-2"><RecBadge rec={rec} /></div>
-        <button
-          onClick={() => onClose(position.symbol)}
-          disabled={isClosing}
-          className="shrink-0 ml-1 flex items-center gap-1 rounded-md border border-bear/30 bg-bear/10 px-2 py-1 text-[10px] font-semibold text-bear hover:bg-bear/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {isClosing ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <X className="h-2.5 w-2.5" />}
-          Close
-        </button>
       </div>
 
       {expanded && (
@@ -355,15 +358,10 @@ export function PositionsTable({ positions, onClosed }: Props) {
         </div>
       ) : (
         <div>
-          <div className="flex items-center gap-3 px-4 py-1.5 text-[10px] font-medium text-muted border-b border-bg-border/50">
-            <span className="w-3.5 shrink-0" />
-            <span className="w-20 shrink-0">Symbol</span>
-            <span className="w-10 shrink-0">Qty</span>
-            <span className="shrink-0">Entry / Current</span>
-            <span className="shrink-0">Cost</span>
-            <span className="ml-auto shrink-0">P&amp;L</span>
-            <span className="ml-2 shrink-0">Signal</span>
-            <span className="ml-1 w-14 shrink-0" />
+          <div className="flex items-center justify-between px-4 py-1.5 text-[10px] font-medium text-muted border-b border-bg-border/50">
+            <span>Symbol · Qty</span>
+            <span>Entry → Current · Cost · Signal</span>
+            <span>P&amp;L</span>
           </div>
           {positions.map(pos => (
             <PositionRow
@@ -374,23 +372,21 @@ export function PositionsTable({ positions, onClosed }: Props) {
               closing={closing}
             />
           ))}
-          <div className="flex items-center gap-3 px-4 py-2.5 border-t border-bg-border bg-bg-hover/30 text-xs font-semibold">
-            <span className="w-3.5 shrink-0" />
-            <span className="w-20 shrink-0 text-subtle">{positions.length} position{positions.length !== 1 ? 's' : ''}</span>
-            <span className="w-10 shrink-0 text-muted font-normal">
-              {positions.reduce((s, p) => s + parseFloat(p.qty), 0)} sh
-            </span>
-            <span className="shrink-0" />
-            <div className="flex flex-col items-end shrink-0">
-              <span className="text-[10px] text-muted font-normal">Total Cost</span>
+          <div className="flex items-center justify-between px-4 py-2.5 border-t border-bg-border bg-bg-hover/30 text-xs font-semibold">
+            <div>
+              <span className="text-subtle">{positions.length} position{positions.length !== 1 ? 's' : ''}</span>
+              <span className="ml-2 text-muted font-normal">
+                {positions.reduce((s, p) => s + parseFloat(p.qty), 0).toLocaleString()} sh
+              </span>
+            </div>
+            <div className="text-center text-muted font-normal">
+              <span className="text-[10px]">Total Cost </span>
               <span className="font-mono text-subtle">${totalCostAll.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
             </div>
-            <div className={cn('ml-auto flex flex-col items-end shrink-0', totalPnlAll >= 0 ? 'text-bull' : 'text-bear')}>
+            <div className={cn('flex flex-col items-end', totalPnlAll >= 0 ? 'text-bull' : 'text-bear')}>
               <span className="font-mono">{totalPnlAll >= 0 ? '+' : ''}${Math.abs(totalPnlAll).toFixed(2)}</span>
               <span className="text-[10px] font-mono opacity-80">{avgPnlPct >= 0 ? '+' : ''}{avgPnlPct.toFixed(2)}% avg</span>
             </div>
-            <div className="ml-2 shrink-0 w-20" />
-            <div className="ml-1 w-14 shrink-0" />
           </div>
         </div>
       )}
