@@ -36,6 +36,7 @@ from agents.liquid_agent import LiquidAgent  # noqa: E402
 from agents.regime_agent import detect_regime  # noqa: E402
 from agents.risk_agent import RiskAgent  # noqa: E402
 from agents.social_agent import SocialSentimentAgent  # noqa: E402
+from agents.squeeze_agent import SqueezeAgent  # noqa: E402
 from agents.technical_agent import TechnicalAgent  # noqa: E402
 from agents.vision_agent import VisionAgent  # noqa: E402
 from data.ai4trade_client import AI4TradeClient  # noqa: E402
@@ -86,6 +87,7 @@ def build_manager(
     include_live_only_agents: bool = True,
     include_vision: bool = True,
     include_decision_agent: bool = True,
+    include_squeeze: bool = True,
 ) -> PortfolioManager:
     """Single composition point for every runner, including backtests.
 
@@ -103,6 +105,7 @@ def build_manager(
     """
     news = build_news(settings, ai4)
     live_extras = include_live_only_agents
+    squeeze_agent = SqueezeAgent(weight=settings.weights.squeeze) if include_squeeze else None
     return PortfolioManager(
         settings=settings,
         broker=broker,
@@ -120,6 +123,7 @@ def build_manager(
             if live_extras and settings.weights.liquid > 0 else None,
         social=SocialSentimentAgent(ai4, weight=settings.weights.social)
             if live_extras and ai4 is not None and settings.weights.social > 0 else None,
+        squeeze=squeeze_agent,
         publisher=publisher,
         decision_agent=DecisionAgent(
             anthropic_api_key=settings.anthropic_api_key,

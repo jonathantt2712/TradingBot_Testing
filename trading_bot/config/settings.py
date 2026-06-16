@@ -28,6 +28,7 @@ class AgentWeights:
     technical:   float = 0.35
     liquid:      float = 0.15
     social:      float = 0.15
+    squeeze:     float = 0.08
 
     def as_map(self) -> Mapping[str, float]:
         raw = {
@@ -36,6 +37,7 @@ class AgentWeights:
             "technical":   self.technical,
             "liquid":      self.liquid,
             "social":      self.social,
+            "squeeze":     self.squeeze,
         }
         total = sum(raw.values())
         if total <= 0:
