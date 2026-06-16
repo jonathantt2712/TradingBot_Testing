@@ -44,6 +44,14 @@ interface BacktestHealth {
   last_error:  string | null
 }
 
+interface RejectionRecord {
+  ts:              string
+  ticker:          string
+  reason:          string
+  composite_score: number
+  [key: string]:   unknown
+}
+
 function relativeTime(iso: string): string {
   const ms   = Date.now() - new Date(iso + (iso.endsWith('Z') ? '' : 'Z')).getTime()
   const mins = Math.floor(ms / 60000)
@@ -182,11 +190,12 @@ function DatasetPanel({ data, title, badge }: { data: BacktestData; title: strin
 }
 
 export default function BacktestPage() {
-  const [data,    setData]    = useState<BacktestPayload | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState<string | null>(null)
-  const [running, setRunning] = useState(false)
-  const [health,  setHealth]  = useState<BacktestHealth | null>(null)
+  const [data,       setData]       = useState<BacktestPayload | null>(null)
+  const [loading,    setLoading]    = useState(true)
+  const [error,      setError]      = useState<string | null>(null)
+  const [running,    setRunning]    = useState(false)
+  const [health,     setHealth]     = useState<BacktestHealth | null>(null)
+  const [rejections, setRejections] = useState<RejectionRecord[]>([])
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   async function loadHealth() {
@@ -197,6 +206,16 @@ export default function BacktestPage() {
         setHealth(d.backtest ?? null)
       }
     } catch { /* bot offline */ }
+  }
+
+  async function loadRejections() {
+    try {
+      const res = await fetch('/api/bot/rejections')
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) setRejections(data.slice(-10).reverse())
+      }
+    } catch { /* ignore */ }
   }
 
   async function load() {
@@ -211,6 +230,7 @@ export default function BacktestPage() {
       setLoading(false)
     }
     loadHealth()
+    loadRejections()
   }
 
   async function runBacktest() {
@@ -293,6 +313,23 @@ export default function BacktestPage() {
           <span className="text-bear font-semibold">Failures: {health!.error_count}</span>
         )}
       </div>
+
+      {rejections.length > 0 && (
+        <div className="rounded-xl border border-bg-border bg-bg-card px-4 py-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted mb-2">
+            Recent Trade Rejections
+          </p>
+          <div className="space-y-1">
+            {rejections.map((r, i) => (
+              <div key={i} className="flex items-center justify-between text-xs">
+                <span className="font-mono text-primary">{r.ticker}</span>
+                <span className="text-muted capitalize">{r.reason.replace(/_/g, ' ')}</span>
+                <span className="text-subtle">{new Date(r.ts).toLocaleTimeString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {loading && (
         <div className="card flex items-center justify-center py-20">
