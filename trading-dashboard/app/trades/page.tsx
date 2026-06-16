@@ -7,7 +7,7 @@ import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
 import { demoRegime, api } from '@/lib/api'
 import type { TradeRecommendation, RegimeInfo } from '@/types/trading'
 import { RefreshCw, Filter, Wifi, WifiOff, ChevronDown, ChevronUp, CheckCircle2, ShoppingCart, Loader2 } from 'lucide-react'
-import { useRouter } from 'next/navigation'
+
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 
@@ -70,7 +70,7 @@ function tradeKey(t: TradeRecommendation): string {
 }
 
 export default function TradesPage() {
-  const router = useRouter()
+
 
   const [selected,     setSelected]     = useState<TradeRecommendation | null>(null)
   const [infoTrade,    setInfoTrade]    = useState<TradeRecommendation | null>(null)
@@ -211,7 +211,6 @@ export default function TradesPage() {
       toast.success(`Bought all — ${succeeded} trade${succeeded > 1 ? 's' : ''} submitted`, {
         description: failed > 0 ? `${failed} failed` : undefined,
       })
-      router.push('/')
     }
   }
 
@@ -224,7 +223,6 @@ export default function TradesPage() {
     saveExecRecs(newRecs)
     setSelected(null)
     setShowExecuted(true)
-    router.push('/')
   }
 
   const active = trades
