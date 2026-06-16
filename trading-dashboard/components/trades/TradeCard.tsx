@@ -164,14 +164,21 @@ export function TradeCard({ trade, onExecute, onInfo, currentPrice }: Props) {
 
       <button
         onClick={() => onExecute(trade)}
+        disabled={isExpired}
         className={cn(
           'w-full rounded-lg py-2.5 text-sm font-semibold transition-all duration-200',
-          isLong
-            ? 'bg-bull/15 border border-bull/30 text-bull hover:bg-bull/25'
-            : 'bg-bear/15 border border-bear/30 text-bear hover:bg-bear/25',
+          isExpired
+            ? 'bg-bg-hover border border-bg-border text-muted cursor-not-allowed opacity-60'
+            : isLong
+              ? 'bg-bull/15 border border-bull/30 text-bull hover:bg-bull/25'
+              : 'bg-bear/15 border border-bear/30 text-bear hover:bg-bear/25',
         )}
       >
-        {isLong ? 'Execute Long' : 'Execute Short'} &middot; {trade.ticker}
+        {isExpired
+          ? `Expired · ${trade.ticker}`
+          : isLong
+            ? `Execute Long · ${trade.ticker}`
+            : `Execute Short · ${trade.ticker}`}
       </button>
     </div>
   )

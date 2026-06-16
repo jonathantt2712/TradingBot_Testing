@@ -1,8 +1,8 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   TrendingUp, TrendingDown, BarChart2, Target, AlertTriangle,
-  RefreshCw, CheckCircle2, XCircle, Clock, Activity,
+  RefreshCw, CheckCircle2, XCircle, Clock, Activity, Play, Loader2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -168,6 +168,8 @@ export default function BacktestPage() {
   const [data,    setData]    = useState<BacktestPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   async function load() {
     setLoading(true); setError(null)
@@ -182,7 +184,28 @@ export default function BacktestPage() {
     }
   }
 
+  async function runBacktest() {
+    if (running) return
+    setRunning(true)
+    try {
+      await fetch('/api/backtest/run', { method: 'POST' })
+    } catch { /* ignore trigger errors — bot may queue it */ }
+    // Poll for updated results every 10s while running
+    pollRef.current = setInterval(async () => {
+      const res = await fetch('/api/backtest', { cache: 'no-store' })
+      if (res.ok) {
+        const fresh = await res.json()
+        setData(fresh)
+        if (fresh.results || fresh.optimal) {
+          if (pollRef.current) clearInterval(pollRef.current)
+          setRunning(false)
+        }
+      }
+    }, 10_000)
+  }
+
   useEffect(() => { load() }, [])
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">
@@ -192,10 +215,24 @@ export default function BacktestPage() {
           <h1 className="text-xl font-bold text-primary">Backtest Results</h1>
           <p className="text-xs text-muted mt-0.5">Walk-forward day-trade simulation · research-filtered signals</p>
         </div>
-        <button onClick={load} disabled={loading} className="btn-ghost text-xs">
-          <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={runBacktest}
+            disabled={running}
+            className={cn(
+              'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all',
+              'bg-brand-cyan/15 border border-brand-cyan/30 text-brand-cyan hover:bg-brand-cyan/25',
+              'disabled:opacity-50 disabled:cursor-not-allowed',
+            )}
+          >
+            {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+            {running ? 'Running...' : 'Run Backtest'}
+          </button>
+          <button onClick={load} disabled={loading} className="btn-ghost text-xs">
+            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {loading && (

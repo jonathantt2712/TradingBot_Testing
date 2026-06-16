@@ -137,35 +137,37 @@ export function RationaleModal({ trade, onClose }: Props) {
             </div>
           )}
 
-          {/* Per-agent breakdown — always show all six agents */}
+          {/* Per-agent breakdown — only agents with actual evaluations */}
           <div className="space-y-2">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">What each agent said</p>
-            {AGENT_ORDER.map(role => {
-              const ev = evalMap.get(role)
+            {AGENT_ORDER.filter(role => evalMap.has(role)).map(role => {
+              const ev = evalMap.get(role)!
               return (
                 <div key={role} className="rounded-lg border border-bg-border bg-bg-base px-4 py-3">
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold text-primary">{AGENT_LABELS[role]}</span>
-                      {ev && <LeanIcon score={ev.score} />}
+                      <LeanIcon score={ev.score} />
                     </div>
-                    {ev ? (
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className={cn('font-mono font-bold', bgColorForScore(ev.score).split(' ')[1])}>
-                          {ev.score.toFixed(0)}
-                        </span>
-                        <span className="text-muted">conf {Math.round(ev.confidence * 100)}%</span>
-                      </div>
-                    ) : (
-                      <span className="text-xs text-muted">not available</span>
-                    )}
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className={cn('font-mono font-bold', bgColorForScore(ev.score).split(' ')[1])}>
+                        {ev.score.toFixed(0)}
+                      </span>
+                      <span className="text-muted">conf {Math.round(ev.confidence * 100)}%</span>
+                    </div>
                   </div>
                   <p className="text-xs text-subtle">
-                    {humanizeRationale(role, ev?.rationale) ?? AGENT_BLURBS[role]}
+                    {humanizeRationale(role, ev.rationale) ?? AGENT_BLURBS[role]}
                   </p>
                 </div>
               )
             })}
+            {AGENT_ORDER.filter(role => !evalMap.has(role)).length > 0 && (
+              <p className="text-[10px] text-muted pt-1">
+                Not evaluated:{' '}
+                {AGENT_ORDER.filter(role => !evalMap.has(role)).map(r => AGENT_LABELS[r]).join(', ')}
+              </p>
+            )}
           </div>
         </div>
 
