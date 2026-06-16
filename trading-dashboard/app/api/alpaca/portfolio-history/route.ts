@@ -3,19 +3,33 @@ import { getPortfolioHistory } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import type { PnLPoint } from '@/types/trading'
 
-export async function GET() {
+export async function GET(req: Request) {
   const creds = await getAlpacaCreds()
   if (!creds) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  const { searchParams } = new URL(req.url)
+  const period    = searchParams.get('period')    ?? '1M'
+  const timeframe = searchParams.get('timeframe') ?? '1D'
+  const intraday  = timeframe !== '1D'
+
   try {
-    const history = await getPortfolioHistory(creds, '1M', '1D')
+    const history = await getPortfolioHistory(creds, period, timeframe)
     const { timestamp, profit_loss } = history
 
     const points: PnLPoint[] = timestamp.map((ts, i) => {
       const cum   = profit_loss[i] ?? 0
       const prev  = i > 0 ? (profit_loss[i - 1] ?? 0) : 0
       const daily = i === 0 ? cum : cum - prev
-      const date  = new Date(ts * 1000).toISOString().slice(0, 10)
+
+      let date: string
+      if (intraday) {
+        const d = new Date(ts * 1000)
+        const h = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' })
+        date = h
+      } else {
+        date = new Date(ts * 1000).toISOString().slice(0, 10)
+      }
+
       return { date, cumulative_pnl: +cum.toFixed(2), daily_pnl: +daily.toFixed(2), trade_count: 0 }
     })
 

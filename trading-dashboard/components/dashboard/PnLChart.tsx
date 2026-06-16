@@ -3,7 +3,7 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, BarChart, Bar, Cell,
 } from 'recharts'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { PnLPoint } from '@/types/trading'
 import { formatCurrency } from '@/lib/utils'
 
@@ -26,92 +26,138 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   )
 }
 
+type View = 'cumulative' | 'daily' | 'today'
+
 export function PnLChart({ data }: Props) {
-  const [view, setView] = useState<'cumulative' | 'daily'>('cumulative')
-  const isPositive = (data.at(-1)?.cumulative_pnl ?? 0) >= 0
+  const [view,         setView]         = useState<View>('cumulative')
+  const [todayData,    setTodayData]    = useState<PnLPoint[]>([])
+  const [todayLoading, setTodayLoading] = useState(false)
+  const [todayError,   setTodayError]   = useState<string | null>(null)
+
+  useEffect(() => {
+    if (view !== 'today') return
+    setTodayLoading(true)
+    setTodayError(null)
+    fetch('/api/alpaca/portfolio-history?period=1D&timeframe=1H')
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) throw new Error(d.error)
+        setTodayData(d)
+      })
+      .catch(e => setTodayError(e.message))
+      .finally(() => setTodayLoading(false))
+  }, [view])
+
+  const displayData = view === 'today' ? todayData : data
+  const isPositive  = (displayData.at(-1)?.cumulative_pnl ?? 0) >= 0
+
+  const tabs: { key: View; label: string }[] = [
+    { key: 'cumulative', label: 'Cumulative' },
+    { key: 'daily',      label: 'Daily' },
+    { key: 'today',      label: 'Today' },
+  ]
 
   return (
     <div className="card p-5">
       <div className="flex items-center justify-between mb-5">
         <div>
           <h2 className="text-sm font-semibold text-primary">Equity Curve</h2>
-          <p className="text-xs text-muted mt-0.5">30-day rolling P&L</p>
+          <p className="text-xs text-muted mt-0.5">
+            {view === 'today' ? 'Intraday — market hours (ET)' : '30-day rolling P&L'}
+          </p>
         </div>
         <div className="flex items-center gap-1 rounded-lg border border-bg-border p-0.5">
-          {(['cumulative', 'daily'] as const).map(v => (
+          {tabs.map(({ key, label }) => (
             <button
-              key={v}
-              onClick={() => setView(v)}
+              key={key}
+              onClick={() => setView(key)}
               className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
-                view === v
+                view === key
                   ? 'bg-brand-cyan/10 text-brand-cyan'
                   : 'text-muted hover:text-subtle'
               }`}
             >
-              {v === 'cumulative' ? 'Cumulative' : 'Daily'}
+              {label}
             </button>
           ))}
         </div>
       </div>
 
       <div className="h-[240px]">
-        <ResponsiveContainer width="100%" height="100%">
-          {view === 'cumulative' ? (
-            <AreaChart data={data} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id="cumulativeGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%"   stopColor={isPositive ? '#22C55E' : '#EF4444'} stopOpacity={0.25} />
-                  <stop offset="100%" stopColor={isPositive ? '#22C55E' : '#EF4444'} stopOpacity={0.0}  />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
-              <XAxis
-                dataKey="date"
-                tick={{ fontSize: 10, fill: '#64748B' }}
-                tickFormatter={d => d.slice(5)}
-                axisLine={false} tickLine={false}
-              />
-              <YAxis
-                tick={{ fontSize: 10, fill: '#64748B' }}
-                tickFormatter={v => `$${(v / 1000).toFixed(1)}k`}
-                axisLine={false} tickLine={false} width={48}
-              />
-              <Tooltip content={<CustomTooltip />} />
-              <ReferenceLine y={0} stroke="#334155" strokeDasharray="4 4" />
-              <Area
-                type="monotone"
-                dataKey="cumulative_pnl"
-                stroke={isPositive ? '#22C55E' : '#EF4444'}
-                strokeWidth={2}
-                fill="url(#cumulativeGrad)"
-                dot={false}
-                activeDot={{ r: 4, fill: isPositive ? '#22C55E' : '#EF4444', strokeWidth: 0 }}
-              />
-            </AreaChart>
-          ) : (
-            <BarChart data={data} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" vertical={false} />
-              <XAxis
-                dataKey="date"
-                tick={{ fontSize: 10, fill: '#64748B' }}
-                tickFormatter={d => d.slice(5)}
-                axisLine={false} tickLine={false}
-              />
-              <YAxis
-                tick={{ fontSize: 10, fill: '#64748B' }}
-                tickFormatter={v => `$${v}`}
-                axisLine={false} tickLine={false} width={48}
-              />
-              <Tooltip content={<CustomTooltip />} />
-              <ReferenceLine y={0} stroke="#334155" />
-              <Bar dataKey="daily_pnl" radius={[2, 2, 0, 0]}>
-                {data.map(d => (
-                  <Cell key={d.date} fill={d.daily_pnl >= 0 ? '#22C55E' : '#EF4444'} />
-                ))}
-              </Bar>
-            </BarChart>
-          )}
-        </ResponsiveContainer>
+        {view === 'today' && todayLoading && (
+          <div className="flex h-full items-center justify-center text-xs text-muted">
+            Loading intraday data…
+          </div>
+        )}
+        {view === 'today' && todayError && (
+          <div className="flex h-full items-center justify-center text-xs text-bear">
+            {todayError}
+          </div>
+        )}
+        {view === 'today' && !todayLoading && !todayError && todayData.length === 0 && (
+          <div className="flex h-full items-center justify-center text-xs text-muted">
+            No intraday data yet (market may be closed)
+          </div>
+        )}
+        {!todayLoading && !todayError && (view !== 'today' || todayData.length > 0) && (
+          <ResponsiveContainer width="100%" height="100%">
+            {view === 'daily' ? (
+              <BarChart data={displayData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" vertical={false} />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 10, fill: '#64748B' }}
+                  tickFormatter={d => d.slice(5)}
+                  axisLine={false} tickLine={false}
+                />
+                <YAxis
+                  tick={{ fontSize: 10, fill: '#64748B' }}
+                  tickFormatter={v => `$${v}`}
+                  axisLine={false} tickLine={false} width={48}
+                />
+                <Tooltip content={<CustomTooltip />} />
+                <ReferenceLine y={0} stroke="#334155" />
+                <Bar dataKey="daily_pnl" radius={[2, 2, 0, 0]}>
+                  {displayData.map(d => (
+                    <Cell key={d.date} fill={d.daily_pnl >= 0 ? '#22C55E' : '#EF4444'} />
+                  ))}
+                </Bar>
+              </BarChart>
+            ) : (
+              <AreaChart data={displayData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="cumulativeGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%"   stopColor={isPositive ? '#22C55E' : '#EF4444'} stopOpacity={0.25} />
+                    <stop offset="100%" stopColor={isPositive ? '#22C55E' : '#EF4444'} stopOpacity={0.0}  />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 10, fill: '#64748B' }}
+                  tickFormatter={d => view === 'today' ? d : d.slice(5)}
+                  axisLine={false} tickLine={false}
+                />
+                <YAxis
+                  tick={{ fontSize: 10, fill: '#64748B' }}
+                  tickFormatter={v => `$${(v / 1000).toFixed(1)}k`}
+                  axisLine={false} tickLine={false} width={48}
+                />
+                <Tooltip content={<CustomTooltip />} />
+                <ReferenceLine y={0} stroke="#334155" strokeDasharray="4 4" />
+                <Area
+                  type="monotone"
+                  dataKey="cumulative_pnl"
+                  stroke={isPositive ? '#22C55E' : '#EF4444'}
+                  strokeWidth={2}
+                  fill="url(#cumulativeGrad)"
+                  dot={false}
+                  activeDot={{ r: 4, fill: isPositive ? '#22C55E' : '#EF4444', strokeWidth: 0 }}
+                />
+              </AreaChart>
+            )}
+          </ResponsiveContainer>
+        )}
       </div>
     </div>
   )
