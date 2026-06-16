@@ -49,10 +49,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config.settings import load_settings
 from core.enums import Decision
 from core.models import AnalysisContext, RiskParameters
-from agents.technical_agent import TechnicalAgent
-from agents.fundamental_agent import FundamentalAgent
-from agents.risk_agent import RiskAgent
-from execution.portfolio_manager import PortfolioManager
+from bootstrap import build_manager, build_news
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +59,21 @@ logging.basicConfig(
 logger = logging.getLogger("bt30")
 
 RESULTS_FILE = Path(__file__).parent.parent / "backtest_results.json"
+
+# -- Slippage model ------------------------------------------------------------
+SLIPPAGE_PCT = float(os.getenv("BACKTEST_SLIPPAGE_PCT", "0.0005"))  # 0.05% per side
+
+# -- Strategy weights file -----------------------------------------------------
+_WEIGHTS_FILE = Path(__file__).parent / "data" / "strategy_weights.json"
+
+
+def _load_current_weights() -> dict:
+    defaults = {"atr_stop_multiple": 2.0, "atr_target_multiple": 4.0}
+    try:
+        return {**defaults, **json.loads(_WEIGHTS_FILE.read_text())}
+    except Exception:
+        return defaults
+
 
 # -- Data model ----------------------------------------------------------------
 
@@ -160,6 +172,7 @@ def simulate_day_trade(
     stop_loss: float,
     take_profit: float,
     qty: float,
+    slippage_pct: float = 0.0,
 ) -> tuple[str, float, str, float, float]:
     """Walk forward bars; force exit by 15:55 ET same calendar day."""
     entry_date = future_bars.index[0].astimezone(_ET).date() if len(future_bars) else date.today()
@@ -173,6 +186,7 @@ def simulate_day_trade(
         if bar_date > entry_date or (bar_date == entry_date and bar_time.hour == 15 and bar_time.minute >= 55):
             exit_px = float(bar["open"])
             pnl = mult * (exit_px - entry) * qty
+            pnl -= abs(entry) * slippage_pct * 2 * qty
             return "EOD_CLOSE", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
 
         high = float(bar["high"])
@@ -189,21 +203,44 @@ def simulate_day_trade(
             # Both triggered same bar -> worst case SL
             exit_px = stop_loss
             pnl = mult * (exit_px - entry) * qty
+            pnl -= abs(entry) * slippage_pct * 2 * qty
             return "SL_HIT", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
         elif tp_hit:
             exit_px = take_profit
             pnl = mult * (exit_px - entry) * qty
+            pnl -= abs(entry) * slippage_pct * 2 * qty
             return "TP_HIT", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
         elif sl_hit:
             exit_px = stop_loss
             pnl = mult * (exit_px - entry) * qty
+            pnl -= abs(entry) * slippage_pct * 2 * qty
             return "SL_HIT", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
 
     # Fallback: use last bar's close
     last_ts  = future_bars.index[-1]
     last_px  = float(future_bars["close"].iloc[-1])
     pnl = mult * (last_px - entry) * qty
+    pnl -= abs(entry) * slippage_pct * 2 * qty
     return "EOD_CLOSE", last_px, str(last_ts), pnl, mult * (last_px - entry) / entry * 100
+
+
+# -- SPY regime filter ---------------------------------------------------------
+
+def _spy_regime_at(spy_bars: "pd.DataFrame | None", entry_ts: "pd.Timestamp") -> str:
+    """Bull/bear/neutral from SPY's move on the same trading day up to entry_ts."""
+    if spy_bars is None or spy_bars.empty:
+        return "neutral"
+    entry_date = entry_ts.astimezone(_ET).date()
+    day_spy = spy_bars[spy_bars.index.map(lambda t: t.astimezone(_ET).date()) == entry_date]
+    day_spy = day_spy[day_spy.index <= entry_ts]
+    if len(day_spy) < 2:
+        return "neutral"
+    chg = (float(day_spy["close"].iloc[-1]) / float(day_spy["open"].iloc[0]) - 1) * 100
+    if chg > 0.3:
+        return "bull"
+    elif chg < -0.3:
+        return "bear"
+    return "neutral"
 
 
 # -- Walk-forward for one ticker -----------------------------------------------
@@ -225,9 +262,10 @@ VOLUME_CONFIRM_RATIO = 1.3
 
 
 async def backtest_ticker(
-    pm: PortfolioManager,
+    pm,
     ticker: str,
     bars: pd.DataFrame,
+    spy_bars: "pd.DataFrame | None" = None,
 ) -> list[TradeResult]:
     results: list[TradeResult] = []
     n = len(bars)
@@ -298,6 +336,13 @@ async def backtest_ticker(
         if not decision.is_actionable or decision.risk is None:
             continue
 
+        # Regime filter: skip signals that fight the market
+        regime = _spy_regime_at(spy_bars, entry_ts)
+        if regime == "bear" and decision.decision is Decision.LONG:
+            continue
+        if regime == "bull" and decision.decision is Decision.SHORT:
+            continue
+
         r = decision.risk
         # Entry at next bar's open
         if entry_bar_idx + 1 >= n:
@@ -322,6 +367,7 @@ async def backtest_ticker(
             stop_loss=sl,
             take_profit=tp,
             qty=float(r.qty),
+            slippage_pct=SLIPPAGE_PCT,
         )
 
         results.append(TradeResult(
@@ -449,6 +495,78 @@ def print_summary(all_trades: list[TradeResult]) -> dict:
     return summary
 
 
+# -- Weight learning -----------------------------------------------------------
+
+def _update_weights_from_backtest(backtest_trades: list) -> None:
+    """Combine backtest results with live closed trades and update strategy weights."""
+    live_trades_file = Path(__file__).parent / "data" / "trades.json"
+    live_closed: list = []
+    if live_trades_file.exists():
+        try:
+            live_closed = [
+                t for t in json.loads(live_trades_file.read_text())
+                if t.get("status") == "closed" and t.get("pnl") is not None
+            ]
+        except Exception:
+            pass
+
+    # Convert backtest trades to same dict shape as live trades
+    bt_dicts = [
+        {"pnl": t.pnl_usd, "direction": t.direction.upper(), "status": "closed"}
+        for t in backtest_trades
+    ]
+
+    # Combined dataset: live trades counted 3x (recency bonus) + all backtest
+    combined = bt_dicts + live_closed[-20:] + live_closed[-20:] + live_closed[-20:]
+    if len(combined) < 10:
+        logger.info("Not enough data for weight update (%d trades)", len(combined))
+        return
+
+    pnls   = [t.get("pnl", 0) or 0 for t in combined]
+    wins   = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    win_rate = len(wins) / len(combined)
+
+    cur = _load_current_weights()
+    cur["win_rate_30d"]       = round(win_rate * 100, 1)
+    cur["bt_trades"]          = len(bt_dicts)
+    cur["live_trades_used"]   = len(live_closed)
+    cur["last_bt_update"]     = datetime.utcnow().isoformat()
+    cur["update_count"]       = cur.get("update_count", 0) + 1
+
+    avg_win  = float(np.mean(wins))   if wins   else 0.0
+    avg_loss = float(np.mean(losses)) if losses else 0.0
+    profit_factor = (avg_win * len(wins)) / abs(avg_loss * len(losses)) \
+                    if losses and avg_loss != 0 else 2.0
+
+    if win_rate > 0.58 and profit_factor > 1.4:
+        cur["atr_target_multiple"] = round(min(5.5, cur.get("atr_target_multiple", 4.0) * 1.05), 3)
+    elif win_rate < 0.40 or profit_factor < 0.9:
+        cur["atr_stop_multiple"]   = round(max(1.0, cur.get("atr_stop_multiple",   2.0) * 0.95), 3)
+        cur["atr_target_multiple"] = round(max(2.0, cur.get("atr_target_multiple", 4.0) * 0.97), 3)
+
+    long_trades  = [t for t in combined if t.get("direction", "").upper() == "LONG"]
+    short_trades = [t for t in combined if t.get("direction", "").upper() == "SHORT"]
+    lwr = len([t for t in long_trades  if (t.get("pnl") or 0) > 0]) / len(long_trades)  if long_trades  else 0.5
+    swr = len([t for t in short_trades if (t.get("pnl") or 0) > 0]) / len(short_trades) if short_trades else 0.5
+    if lwr > swr + 0.15:
+        cur["bias"] = "long"
+    elif swr > lwr + 0.15:
+        cur["bias"] = "short"
+    else:
+        cur["bias"] = "neutral"
+
+    _WEIGHTS_FILE.parent.mkdir(exist_ok=True)
+    _WEIGHTS_FILE.write_text(json.dumps(cur, indent=2))
+    logger.info(
+        "Weights updated from combined analysis — win_rate=%.1f%% PF=%.2f "
+        "bias=%s atr_stop=%.2f atr_tp=%.2f (bt=%d live=%d)",
+        win_rate * 100, profit_factor, cur["bias"],
+        cur["atr_stop_multiple"], cur["atr_target_multiple"],
+        len(bt_dicts), len(live_closed),
+    )
+
+
 # -- Main ----------------------------------------------------------------------
 
 DEFAULT_TICKERS = [
@@ -485,33 +603,22 @@ async def run(tickers: list[str], days: int) -> None:
         else:
             logger.warning("Skipping %s -- not enough data", ticker)
 
-    import os
-    os.environ.setdefault("LONG_THRESHOLD",    "65")
-    os.environ.setdefault("SHORT_THRESHOLD",   "35")
-    os.environ.setdefault("ATR_STOP_MULTIPLE", "2.0")
-    os.environ.setdefault("ATR_TARGET_MULTIPLE", "4.0")
+    # Apply self-tuned parameters (overrides any hardcoded defaults)
+    cur_w = _load_current_weights()
+    os.environ["ATR_STOP_MULTIPLE"]   = str(cur_w.get("atr_stop_multiple", 2.0))
+    os.environ["ATR_TARGET_MULTIPLE"] = str(cur_w.get("atr_target_multiple", 4.0))
 
     settings = load_settings()
 
-    technical_agent = TechnicalAgent(weight=settings.weights.technical)
-
-    if "SPY" in all_bars:
-        technical_agent.spy_bars = all_bars["SPY"]
-        logger.info("SPY bars injected into TechnicalAgent (%d bars)", len(all_bars["SPY"]))
-
-    pm = PortfolioManager(
-        settings=settings,
-        broker=None,
-        fundamental=FundamentalAgent(
-            news_source=None,
-            weight=settings.weights.fundamental,
-            anthropic_api_key=settings.anthropic_api_key,
-            model=settings.llm_model,
-        ),
-        vision=None,
-        technical=technical_agent,
-        risk=RiskAgent(settings.risk),
+    pm = build_manager(
+        settings, broker=None, ai4=None,
+        include_live_only_agents=False,
+        include_vision=False,
+        include_decision_agent=False,
     )
+    if "SPY" in all_bars:
+        pm.technical.spy_bars = all_bars["SPY"]
+        logger.info("SPY bars injected into TechnicalAgent (%d bars)", len(all_bars["SPY"]))
 
     all_trades: list[TradeResult] = []
 
@@ -520,7 +627,7 @@ async def run(tickers: list[str], days: int) -> None:
             continue
         bars = all_bars[ticker]
         logger.info("Running walk-forward for %s (%d bars)...", ticker, len(bars))
-        trades = await backtest_ticker(pm, ticker, bars)
+        trades = await backtest_ticker(pm, ticker, bars, spy_bars=all_bars.get("SPY"))
         all_trades.extend(trades)
         logger.info("%s done: %d trades, P&L=$%.2f",
                     ticker, len(trades), sum(t.pnl_usd for t in trades))
@@ -530,6 +637,8 @@ async def run(tickers: list[str], days: int) -> None:
     if summary:
         RESULTS_FILE.write_text(json.dumps(summary, indent=2, default=str))
         logger.info("Results saved to %s", RESULTS_FILE)
+
+    _update_weights_from_backtest(all_trades)
 
     return summary
 

@@ -85,6 +85,7 @@ def build_manager(
     publisher: SignalPublisher | None = None,
     include_live_only_agents: bool = True,
     include_vision: bool = True,
+    include_decision_agent: bool = True,
 ) -> PortfolioManager:
     """Single composition point for every runner, including backtests.
 
@@ -95,6 +96,10 @@ def build_manager(
     ``include_vision=False`` (backtests) skips VisionAgent's LLM chart analysis.
     Historical backtests evaluate hundreds of windows; each LLM call costs money
     and time, making it impractical to include vision in offline simulations.
+
+    ``include_decision_agent=False`` (backtests) skips DecisionAgent's LLM call.
+    A 30-day backtest generates ~500 evaluation windows, making per-window LLM
+    calls prohibitively expensive.
     """
     news = build_news(settings, ai4)
     live_extras = include_live_only_agents
@@ -120,7 +125,7 @@ def build_manager(
             anthropic_api_key=settings.anthropic_api_key,
             gemini_api_key=settings.gemini_api_key,
             model=settings.llm_model,
-        ),
+        ) if include_decision_agent else None,
     )
 
 
