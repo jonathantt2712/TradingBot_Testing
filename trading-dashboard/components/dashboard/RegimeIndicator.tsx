@@ -58,7 +58,14 @@ export function RegimeIndicator({ regime }: Props) {
           <p className={cn('text-lg font-bold leading-tight', color.split(' ')[0])}>
             {regimeLabel(regime.regime)}
           </p>
-          <p className="text-xs text-muted">Updated just now</p>
+          <p className="text-xs text-muted">
+            {regime?.timestamp
+              ? (() => {
+                  const mins = Math.floor((Date.now() - new Date(regime.timestamp).getTime()) / 60000)
+                  return mins < 1 ? 'Updated just now' : `Updated ${mins}m ago`
+                })()
+              : 'No data'}
+          </p>
         </div>
       </div>
 
