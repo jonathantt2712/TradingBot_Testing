@@ -68,6 +68,9 @@ def _next_market_open() -> datetime:
 
 
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
+DAILY_LOSS_LIMIT_PCT    = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))   # 2% daily drawdown halt
+MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 3 consecutive losses halt
+TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", "0.05"))  # 5% trailing distance
 
 # Daily scan stats (reset at midnight by _background_loop)
 _scan_stats: Dict[str, Any] = {
@@ -217,6 +220,8 @@ PNL_FILE     = DATA_DIR / "pnl.json"
 CONTEXT_FILE = DATA_DIR / "context.json"
 WEIGHTS_FILE = DATA_DIR / "strategy_weights.json"
 REGIME_FILE  = DATA_DIR / "regime.json"
+REJECT_LOG   = DATA_DIR / "risk_rejections.jsonl"
+SNAPSHOT_LOG = DATA_DIR / "daily_snapshots.jsonl"
 
 
 def _load(path: Path, default: Any) -> Any:
@@ -288,6 +293,41 @@ DEFAULT_WEIGHTS: Dict[str, Any] = {
 
 def _load_weights() -> Dict[str, Any]:
     return {**DEFAULT_WEIGHTS, **_load(WEIGHTS_FILE, {})}
+
+
+def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
+    """Append a trade rejection record to risk_rejections.jsonl."""
+    entry = {
+        "ts":              datetime.utcnow().isoformat(),
+        "ticker":          ticker,
+        "reason":          reason,
+        "composite_score": round(score, 1),
+        **details,
+    }
+    try:
+        with open(REJECT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as exc:
+        logger.debug("rejection log write failed: %s", exc)
+
+
+def _close_simulated_trade(trade: dict, exit_price: float, reason: str) -> None:
+    """Mark a trade as closed in-place (used by trailing stop and EoD flatten)."""
+    direction = trade.get("direction", "LONG")
+    entry     = float(trade.get("entry") or 0)
+    qty       = int(trade.get("qty", 1))
+    if direction == "LONG":
+        pnl     = (exit_price - entry) * qty
+        pnl_pct = (exit_price - entry) / entry * 100 if entry else 0.0
+    else:
+        pnl     = (entry - exit_price) * qty
+        pnl_pct = (entry - exit_price) / entry * 100 if entry else 0.0
+    trade["status"]      = "closed"
+    trade["exit"]        = round(exit_price, 2)
+    trade["exit_reason"] = reason
+    trade["pnl"]         = round(pnl, 2)
+    trade["pnl_pct"]     = round(pnl_pct, 2)
+    trade["closed_at"]   = datetime.utcnow().isoformat()
 
 
 def _save_weights(w: Dict[str, Any]) -> None:
@@ -661,6 +701,14 @@ _backtest_stats: Dict[str, Any] = {
     "last_error":    None,
 }
 
+_circuit_breaker: Dict[str, Any] = {
+    "halted":          False,
+    "reason":          None,      # "daily_loss" | "consecutive_losses" | None
+    "halted_at":       None,
+    "consecutive_losses": 0,
+    "daily_pnl_pct":   0.0,
+}
+
 
 def _reset_scan_stats_if_needed() -> None:
     today = str(date.today())
@@ -675,6 +723,72 @@ def _reset_scan_stats_if_needed() -> None:
             "last_scan_at":     None,
             "market_closed_skips": 0,
         })
+
+
+def _daily_pnl_pct() -> float:
+    """Today's realized P&L as fraction of current equity (negative = loss)."""
+    today = str(date.today())
+    trades = _load(TRADES_FILE, [])
+    if not isinstance(trades, list):
+        return 0.0
+    today_trades = [
+        t for t in trades
+        if t.get("status") == "closed"
+        and (t.get("closed_at") or "")[:10] == today
+        and t.get("pnl") is not None
+    ]
+    if not today_trades:
+        return 0.0
+    total_pnl = sum(float(t["pnl"]) for t in today_trades)
+    # Use yesterday's equity as baseline (we don't have real-time equity here)
+    # Estimate from total account trades — minimum $1000 guard
+    all_pnl = sum(float(t.get("pnl", 0)) for t in trades if t.get("status") == "closed")
+    est_equity = max(abs(all_pnl) * 3 + 1000, 1000)  # conservative floor
+    return total_pnl / est_equity
+
+
+def _consecutive_losses() -> int:
+    """Count of most recent consecutive losing closed trades."""
+    trades = _load(TRADES_FILE, [])
+    if not isinstance(trades, list):
+        return 0
+    closed = sorted(
+        [t for t in trades if t.get("status") == "closed" and t.get("pnl") is not None],
+        key=lambda t: t.get("closed_at") or t.get("executed_at") or "",
+        reverse=True,
+    )
+    count = 0
+    for t in closed:
+        if float(t["pnl"]) < 0:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _check_circuit_breaker() -> Optional[str]:
+    """Return a halt reason string if trading should be stopped, None if clear."""
+    # Consecutive loss check
+    consec = _consecutive_losses()
+    _circuit_breaker["consecutive_losses"] = consec
+    if consec >= MAX_CONSECUTIVE_LOSSES:
+        reason = f"{consec} consecutive losses — trading halted until manual reset"
+        _circuit_breaker.update({"halted": True, "reason": "consecutive_losses",
+                                  "halted_at": datetime.utcnow().isoformat()})
+        return reason
+
+    # Daily P&L check
+    daily_loss = _daily_pnl_pct()
+    _circuit_breaker["daily_pnl_pct"] = round(daily_loss * 100, 2)
+    if daily_loss <= -DAILY_LOSS_LIMIT_PCT:
+        reason = f"Daily loss limit hit ({daily_loss*100:.1f}%) — trading halted for today"
+        _circuit_breaker.update({"halted": True, "reason": "daily_loss",
+                                  "halted_at": datetime.utcnow().isoformat()})
+        return reason
+
+    _circuit_breaker["halted"] = False
+    _circuit_breaker["reason"] = None
+    return None
 
 
 async def _run_market_scan() -> None:
@@ -1029,6 +1143,167 @@ async def _run_backtest() -> None:
         })
 
 
+async def _eod_snapshot(session: aiohttp.ClientSession) -> None:
+    """Record daily P&L vs SPY/QQQ benchmark at ~15:55 ET."""
+    try:
+        today = str(date.today())
+
+        # Fetch account equity
+        equity_now = await _get_account_equity(session)
+
+        # Fetch SPY and QQQ latest quotes for day return
+        async def _day_return(sym: str) -> Optional[float]:
+            try:
+                async with session.get(
+                    f"{_DATA_BASE}/v2/stocks/{sym}/bars",
+                    params={"timeframe": "1Day", "limit": "2", "feed": "iex"},
+                    headers=_ALPACA_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as r:
+                    if r.status != 200:
+                        return None
+                    data = await r.json()
+                    bars = data.get("bars", [])
+                    if len(bars) < 2:
+                        return None
+                    prev_close = float(bars[-2].get("c", 0))
+                    last_close = float(bars[-1].get("c", 0))
+                    if prev_close <= 0:
+                        return None
+                    return round((last_close - prev_close) / prev_close * 100, 3)
+            except Exception:
+                return None
+
+        spy_ret, qqq_ret = await asyncio.gather(_day_return("SPY"), _day_return("QQQ"))
+
+        # Compute today's trade P&L
+        trades = _load(TRADES_FILE, [])
+        today_closed = [
+            t for t in trades
+            if t.get("status") == "closed" and (t.get("closed_at") or "")[:10] == today
+        ]
+        day_pnl = sum(float(t.get("pnl", 0)) for t in today_closed)
+        open_count = len([t for t in trades if t.get("status") == "open"])
+
+        snapshot = {
+            "date":              today,
+            "equity":            round(equity_now, 2) if equity_now > 0 else None,
+            "day_pnl":           round(day_pnl, 2),
+            "day_trades":        len(today_closed),
+            "open_positions":    open_count,
+            "spy_day_return_pct": spy_ret,
+            "qqq_day_return_pct": qqq_ret,
+        }
+
+        with open(SNAPSHOT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(snapshot) + "\n")
+        logger.info("EoD snapshot: pnl=$%.2f SPY=%.2f%% QQQ=%.2f%%",
+                    day_pnl, spy_ret or 0.0, qqq_ret or 0.0)
+
+    except Exception as exc:
+        logger.warning("EoD snapshot failed: %s", exc)
+
+
+async def _trailing_stop_loop() -> None:
+    """Update stop prices upward (LONG) or downward (SHORT) as positions move in our favor.
+
+    Runs every 60 seconds during market hours. Never moves stop in the losing direction.
+    Closes position immediately when trailing stop is hit (for PAPER- simulated orders).
+    """
+    if not _ALPACA_KEY or not _ALPACA_SECRET:
+        return
+
+    while True:
+        await asyncio.sleep(60)
+        if not _is_market_open():
+            continue
+
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+            ) as session:
+                trades = _load(TRADES_FILE, [])
+                open_trades = [t for t in trades if t.get("status") == "open"]
+                if not open_trades:
+                    continue
+
+                # Fetch current prices for all open tickers
+                tickers = list({t["ticker"] for t in open_trades})
+                try:
+                    async with session.get(
+                        f"{_DATA_BASE}/v2/stocks/snapshots?symbols={','.join(tickers)}",
+                        headers=_ALPACA_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as r:
+                        if r.status != 200:
+                            continue
+                        snaps: Dict[str, Any] = await r.json()
+                except Exception:
+                    continue
+
+                modified = False
+                for trade in open_trades:
+                    ticker    = trade.get("ticker", "")
+                    direction = trade.get("direction", "LONG")
+                    snap      = snaps.get(ticker, {})
+                    lt        = snap.get("latestTrade") or {}
+                    db        = snap.get("dailyBar") or {}
+                    price     = float(lt.get("p") or db.get("c") or 0)
+                    if price <= 0:
+                        continue
+
+                    risk = trade.get("risk") or trade
+                    stop = float(risk.get("stop_loss") or trade.get("stop_loss") or 0)
+                    if stop <= 0:
+                        continue
+
+                    if direction == "LONG":
+                        # Ratchet stop UP: new_stop = price × (1 - TRAIL_PCT)
+                        new_stop = round(price * (1.0 - TRAIL_STOP_PCT), 2)
+                        if new_stop > stop:
+                            if "risk" in trade and isinstance(trade["risk"], dict):
+                                trade["risk"]["stop_loss"] = new_stop
+                                trade["risk"]["high_water_mark"] = max(
+                                    price, trade["risk"].get("high_water_mark", price)
+                                )
+                            trade["stop_loss"] = new_stop
+                            modified = True
+                            logger.debug("Trail stop updated %s LONG stop %.2f -> %.2f",
+                                         ticker, stop, new_stop)
+                        # Check if current price hit the stop
+                        effective_stop = max(stop, new_stop) if new_stop > stop else stop
+                        if price <= effective_stop:
+                            _close_simulated_trade(trade, effective_stop, "trailing_stop")
+                            modified = True
+                            logger.info("Trailing stop hit: %s LONG closed @ %.2f", ticker, effective_stop)
+
+                    else:  # SHORT
+                        # Ratchet stop DOWN: new_stop = price × (1 + TRAIL_PCT)
+                        new_stop = round(price * (1.0 + TRAIL_STOP_PCT), 2)
+                        if new_stop < stop:
+                            if "risk" in trade and isinstance(trade["risk"], dict):
+                                trade["risk"]["stop_loss"] = new_stop
+                                trade["risk"]["low_water_mark"] = min(
+                                    price, trade["risk"].get("low_water_mark", price)
+                                )
+                            trade["stop_loss"] = new_stop
+                            modified = True
+                            logger.debug("Trail stop updated %s SHORT stop %.2f -> %.2f",
+                                         ticker, stop, new_stop)
+                        effective_stop = min(stop, new_stop) if new_stop < stop else stop
+                        if price >= effective_stop:
+                            _close_simulated_trade(trade, effective_stop, "trailing_stop")
+                            modified = True
+                            logger.info("Trailing stop hit: %s SHORT closed @ %.2f", ticker, effective_stop)
+
+                if modified:
+                    async with _trades_lock:
+                        _save(TRADES_FILE, trades)
+
+        except Exception as exc:
+            logger.warning("Trailing stop loop error: %s", exc)
+
+
 async def _background_loop() -> None:
     await asyncio.sleep(5)
     await _run_market_scan()
@@ -1040,12 +1315,30 @@ async def _background_loop() -> None:
     consecutive_errors = 0
     last_day = ""
     last_backtest_day = ""
+    last_snapshot_day = ""
     while True:
         # Reset daily scan stats at midnight
         today = str(date.today())
         if today != last_day:
             _reset_scan_stats_if_needed()
             last_day = today
+
+        # EoD benchmark snapshot at ~15:55 ET (before backtest at 17:00+)
+        if _ET is not None and _ALPACA_KEY and _ALPACA_SECRET:
+            now_et = datetime.now(_ET)
+            if (today != last_snapshot_day
+                    and now_et.weekday() < 5
+                    and now_et.hour == 15 and now_et.minute >= 55):
+                last_snapshot_day = today
+                try:
+                    async with aiohttp.ClientSession(
+                        connector=aiohttp.TCPConnector(
+                            resolver=aiohttp.resolver.ThreadedResolver()
+                        )
+                    ) as _snap_session:
+                        await _eod_snapshot(_snap_session)
+                except Exception as exc:
+                    logger.warning("EoD snapshot task failed: %s", exc)
 
         # Run backtest once per day after market close (17:00+ ET)
         if _ET is not None:
@@ -1103,13 +1396,16 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             logger.warning("AI4Trade session failed to open: %s", _e)
 
-    task = asyncio.create_task(_background_loop())
+    task  = asyncio.create_task(_background_loop())
+    trail = asyncio.create_task(_trailing_stop_loop())
     yield
     task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    trail.cancel()
+    for t in [task, trail]:
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
     # Close AI4Trade session on shutdown
     if _ai4trade_client is not None and _ai4trade_client._session is not None:
@@ -1342,8 +1638,17 @@ async def execute_trade(body: ExecuteBody):
         if not isinstance(history, list):
             history = []
 
+        # Circuit breaker checks
+        cb_reason = _check_circuit_breaker()
+        if cb_reason:
+            _log_rejection(body.ticker, "circuit_breaker", body.composite_score or 0.0,
+                           {"circuit_breaker_reason": cb_reason})
+            raise HTTPException(status_code=409, detail=cb_reason)
+
         open_count = len([t for t in history if t.get("status") == "open"])
         if open_count >= MAX_OPEN_POSITIONS:
+            _log_rejection(body.ticker, "max_positions", body.composite_score or 0.0,
+                           {"open_count": open_count, "max": MAX_OPEN_POSITIONS})
             raise HTTPException(status_code=409, detail=f"Max open positions ({MAX_OPEN_POSITIONS}) reached")
 
         trade = {
@@ -1386,6 +1691,56 @@ async def execute_trade(body: ExecuteBody):
 async def trigger_scan():
     asyncio.create_task(_run_market_scan())
     return {"status": "scan_triggered", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/api/reset-circuit-breaker", dependencies=[Depends(_verify_bot_secret)])
+async def reset_circuit_breaker():
+    """Manually reset the circuit breaker after reviewing losses."""
+    _circuit_breaker.update({
+        "halted":    False,
+        "reason":    None,
+        "halted_at": None,
+    })
+    logger.info("Circuit breaker manually reset")
+    return {"status": "reset", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/rejections", dependencies=[Depends(_verify_bot_secret)])
+def get_rejections(limit: int = 50):
+    """Return the last `limit` trade rejection records."""
+    try:
+        lines = REJECT_LOG.read_text(encoding="utf-8").strip().splitlines()
+        records = []
+        for line in reversed(lines[-limit * 2:]):
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                continue
+        return records[-limit:]
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        logger.warning("rejection log read failed: %s", exc)
+        return []
+
+
+@app.get("/api/snapshots", dependencies=[Depends(_verify_bot_secret)])
+def get_snapshots(days: int = 30):
+    """Return daily benchmark snapshots (last N days)."""
+    try:
+        lines = SNAPSHOT_LOG.read_text(encoding="utf-8").strip().splitlines()
+        records = []
+        for line in lines[-days:]:
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                continue
+        return records
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        logger.warning("snapshot log read failed: %s", exc)
+        return []
 
 
 _REPO_ROOT = _HERE.parent  # trading_bot/ -> repo root
@@ -1432,6 +1787,7 @@ def get_scan_stats():
         "max_positions":  MAX_OPEN_POSITIONS,
         "open_positions": open_count,
         "agents_active":  _AGENTS_AVAILABLE,
+        "circuit_breaker": _circuit_breaker,
     }
 
 
@@ -1445,6 +1801,7 @@ def health():
         "agents":    _AGENTS_AVAILABLE,
         "timestamp": datetime.utcnow().isoformat(),
         "backtest":  _backtest_stats,
+        "circuit_breaker": _circuit_breaker,
         "keys": {
             "gemini":    gemini_set,
             "anthropic": anthropic_set,
