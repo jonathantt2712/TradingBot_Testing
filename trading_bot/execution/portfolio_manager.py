@@ -288,6 +288,9 @@ class PortfolioManager:
             "composite": decision.composite_score,
             "halted": self._halted,
             "regime": self._regime.regime.value if self._regime else None,
+            "regime_weights": self._REGIME_MULTIPLIERS.get(
+                self._regime.regime.value if self._regime else "neutral", {}
+            ),
             "agents": [
                 {
                     "role": e.role.value,
@@ -356,6 +359,43 @@ class PortfolioManager:
         except Exception:
             logger.debug("fill tracking failed for %s", decision.ticker, exc_info=True)
 
+    # Regime-adaptive weight multipliers.
+    # Values > 1.0 boost the agent's effective weight; < 1.0 reduces it.
+    # Applied on top of the base weights — normalisation happens inside _composite.
+    _REGIME_MULTIPLIERS: dict = {
+        "risk_on": {
+            # Bullish trend regime: momentum signals reliable, fundas lag
+            "technical":   1.30,
+            "liquid":      1.20,
+            "social":      1.10,
+            "fundamental": 0.80,
+            "vision":      0.90,
+            "insider":     0.90,
+        },
+        "risk_off": {
+            # Defensive regime: fundas + risk matter most, pure momentum dangerous
+            "fundamental": 1.30,
+            "vision":      1.10,
+            "risk":        1.20,   # risk agent score matters more
+            "technical":   0.75,
+            "social":      0.80,
+            "liquid":      0.85,
+            "insider":     1.00,
+        },
+        "choppy": {
+            # Range-bound: mean-reversion agents (liquid/insider) more reliable
+            "liquid":      1.25,
+            "insider":     1.15,
+            "fundamental": 1.10,
+            "technical":   0.80,   # trend signals unreliable in chop
+            "social":      0.85,
+            "vision":      0.95,
+        },
+        "neutral": {
+            # Default — no adjustment
+        },
+    }
+
     def _composite(
         self,
         f: AgentEvaluation,
@@ -377,14 +417,22 @@ class PortfolioManager:
         if insider is not None:
             agents.append(("insider", insider))
 
+        # Look up regime multipliers (default = no adjustment)
+        regime_val = self._regime.regime.value if self._regime is not None else "neutral"
+        multipliers = self._REGIME_MULTIPLIERS.get(regime_val, {})
+
         num = den = 0.0
         for key, ev in agents:
             if ev is None:
                 continue
-            w = self._weights.get(key, 0.0) * max(ev.confidence, 0.05)
+            base_w = self._weights.get(key, 0.0)
+            regime_mult = multipliers.get(key, 1.0)
+            w = base_w * regime_mult * max(ev.confidence, 0.05)
             num += ev.score * w
             den += w
-        return round(num / den, 2) if den else 50.0
+
+        result = round(num / den, 2) if den else 50.0
+        return result
 
     def _direction(
         self,
