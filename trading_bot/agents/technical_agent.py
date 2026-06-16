@@ -34,16 +34,21 @@ except Exception:
 
 # Signal weights (must sum to 1.0)
 _WEIGHTS = {
-    "rsi":              0.14,
-    "macd":             0.13,
-    "ema_cross":        0.11,
-    "vwap":             0.12,
-    "rel_strength":     0.14,  # vs SPY
-    "volume_surge":     0.12,  # unusual volume
-    "intraday_mom":     0.07,  # price vs open (reduced to accommodate ORB)
-    "day_range_pos":    0.04,  # where in today's H-L range (reduced)
-    "orb":              0.07,  # Opening Range Breakout (9:30–9:45 ET range)
-    "vol_confirm":      0.06,  # Research #3: volume confirmation gate
+    "rsi":           0.11,
+    "macd":          0.10,
+    "ema_cross":     0.09,
+    "vwap":          0.10,
+    "rel_strength":  0.11,
+    "volume_surge":  0.09,
+    "intraday_mom":  0.05,
+    "day_range_pos": 0.03,
+    "orb":           0.06,
+    "vol_confirm":   0.05,
+    "adx_filter":    0.05,
+    "bb_squeeze":    0.05,
+    "zscore":        0.04,
+    "stochastic":    0.04,
+    "divergence":    0.03,
 }
 
 # ── Research-derived thresholds ──────────────────────────────────────────────
@@ -194,6 +199,31 @@ class TechnicalAgent(BaseAgent):
             if pat_score is not None:
                 signals["patterns"] = pat_score
 
+        # 7. ADX Trend Strength
+        adx_val = self._adx_signal(df)
+        if adx_val is not None:
+            signals["adx_filter"] = adx_val
+
+        # 8. Bollinger Band Squeeze
+        bb_val = self._bollinger_squeeze_signal(df)
+        if bb_val is not None:
+            signals["bb_squeeze"] = bb_val
+
+        # 9. Z-Score Mean Reversion
+        zs_val = self._zscore_signal(df)
+        if zs_val is not None:
+            signals["zscore"] = zs_val
+
+        # 10. Stochastic Oscillator
+        sto_val = self._stochastic_signal(df)
+        if sto_val is not None:
+            signals["stochastic"] = sto_val
+
+        # 11. RSI Divergence
+        div_val = self._divergence_signal(df)
+        if div_val is not None:
+            signals["divergence"] = div_val
+
         # ── Research-derived filters ─────────────────────────────────────
         # Research #3 (Barber & Odean): Volume confirmation gate.
         # Only count a signal as high-conviction if current bar volume
@@ -244,7 +274,7 @@ class TechnicalAgent(BaseAgent):
         score = clamp_score(raw_score)
 
         spread = float(np.std(list(clean.values())))
-        confidence = float(max(0.3, 1.0 - spread / 50.0))
+        confidence = float(max(0.3, min(0.90, 1.0 - spread / 50.0)))
 
         rationale = (
             f"RSI={rsi:.1f} MACD_h={macd_hist:.4f} "
@@ -264,6 +294,14 @@ class TechnicalAgent(BaseAgent):
             rationale += f" [LOTTERY pen={lottery_penalty:.0f}]"
         if retail_surcharge > 0:
             rationale += " [RETAIL-DRIVEN +5thr]"
+        if "adx_filter" in clean and abs(clean["adx_filter"] - 50) > 5:
+            rationale += f" ADX={'trend' if clean['adx_filter'] > 55 else 'weak'}"
+        if "bb_squeeze" in clean and (clean["bb_squeeze"] > 62 or clean["bb_squeeze"] < 38):
+            rationale += f" BB={'BRK↑' if clean['bb_squeeze'] > 62 else 'BRK↓'}"
+        if "zscore" in clean and (clean["zscore"] > 65 or clean["zscore"] < 35):
+            rationale += f" Z={'oversold' if clean['zscore'] > 65 else 'overbought'}"
+        if "divergence" in clean and (clean["divergence"] > 65 or clean["divergence"] < 35):
+            rationale += f" {'BULL-DIV' if clean['divergence'] > 65 else 'BEAR-DIV'}"
 
         # ── Elaborate reasoning for dashboard/audit ──────────────────────────
         def _dir(s: float) -> str:
@@ -325,6 +363,31 @@ class TechnicalAgent(BaseAgent):
                 "Candlestick Patterns",
                 f"score {clean.get('patterns', 50):.0f}",
                 "Bullish patterns outweigh bearish" if clean.get("patterns", 50) > 55 else ("Bearish patterns outweigh bullish" if clean.get("patterns", 50) < 45 else "No significant candlestick pattern"),
+            ),
+            "adx_filter": (
+                "ADX Trend Strength",
+                f"{adx_val:.1f}" if adx_val is not None else "N/A",
+                f"ADX {'trending (>25)' if adx_val is not None and abs(adx_val - 50) > 5 else 'ranging (<25)'}. Strong trend = directional signals weighted higher",
+            ),
+            "bb_squeeze": (
+                "Bollinger Squeeze",
+                "squeeze→breakout" if bb_val is not None and (bb_val > 60 or bb_val < 40) else "coiling/ranging",
+                "Band squeeze resolving with directional breakout" if bb_val is not None and (bb_val > 60 or bb_val < 40) else "Bands still compressed — potential energy building",
+            ),
+            "zscore": (
+                "Z-Score (50-bar)",
+                "N/A" if zs_val is None else f"score {zs_val:.0f}",
+                "Price deeply oversold vs 50-bar mean (bullish reversal candidate)" if zs_val is not None and zs_val > 65 else ("Price deeply overbought vs 50-bar mean (bearish reversal candidate)" if zs_val is not None and zs_val < 35 else "Price near 50-bar mean — no mean-reversion edge"),
+            ),
+            "stochastic": (
+                "Stochastic (14,3,3)",
+                "N/A" if sto_val is None else f"score {sto_val:.0f}",
+                "Stochastic %K crossing %D — oversold/overbought condition and momentum cross",
+            ),
+            "divergence": (
+                "RSI Divergence",
+                "N/A" if div_val is None else ("bullish div" if div_val > 60 else ("bearish div" if div_val < 40 else "no divergence")),
+                "Bullish divergence: price at lows but RSI making higher low — potential reversal" if div_val is not None and div_val > 60 else ("Bearish divergence: price at highs but RSI making lower high — potential reversal" if div_val is not None and div_val < 40 else "No RSI/price divergence detected"),
             ),
         }
         for key, sig_score in clean.items():
@@ -519,6 +582,257 @@ class TechnicalAgent(BaseAgent):
         # Inside range: neutral with slight position bias (45–55)
         pos_in_range = (last - orb_low) / orb_range
         return float(np.clip(45 + pos_in_range * 10, 45, 55))
+
+    def _adx_signal(self, df: pd.DataFrame, length: int = 14) -> Optional[float]:
+        """ADX trend strength. ADX>25 = trending market. Used to amplify trend signals."""
+        if len(df) < length * 2:
+            return None
+        try:
+            high, low, close = df["high"], df["low"], df["close"]
+            prev_high = high.shift(1)
+            prev_low  = low.shift(1)
+            prev_close = close.shift(1)
+
+            plus_dm  = (high - prev_high).clip(lower=0)
+            minus_dm = (prev_low - low).clip(lower=0)
+            # When both are positive, keep only the larger one
+            mask = plus_dm <= minus_dm
+            plus_dm[mask]  = 0.0
+            mask2 = minus_dm <= plus_dm
+            minus_dm[mask2] = 0.0
+
+            tr = pd.concat([
+                (high - low),
+                (high - prev_close).abs(),
+                (low  - prev_close).abs(),
+            ], axis=1).max(axis=1)
+
+            atr_smooth    = tr.ewm(alpha=1/length, adjust=False).mean()
+            plus_di_raw   = plus_dm.ewm(alpha=1/length, adjust=False).mean()
+            minus_di_raw  = minus_dm.ewm(alpha=1/length, adjust=False).mean()
+
+            atr_safe = atr_smooth.replace(0, np.nan)
+            plus_di  = 100 * plus_di_raw / atr_safe
+            minus_di = 100 * minus_di_raw / atr_safe
+
+            dx_denom = (plus_di + minus_di).replace(0, np.nan)
+            dx  = 100 * (plus_di - minus_di).abs() / dx_denom
+            adx = dx.ewm(alpha=1/length, adjust=False).mean().iloc[-1]
+            pdi = float(plus_di.iloc[-1])
+            mdi = float(minus_di.iloc[-1])
+
+            if np.isnan(adx):
+                return None
+
+            adx_val = float(adx)
+            if adx_val >= 25:
+                # Strong trend — directional based on +DI vs -DI
+                if pdi > mdi:
+                    score = float(np.clip(55 + (adx_val - 25) * 0.8, 55, 85))
+                else:
+                    score = float(np.clip(45 - (adx_val - 25) * 0.8, 15, 45))
+            else:
+                # Weak/no trend (ADX < 25) — neutral, slight pull toward 50
+                score = 50.0
+            return score
+        except Exception:
+            return None
+
+    def _bollinger_squeeze_signal(self, df: pd.DataFrame, length: int = 20) -> Optional[float]:
+        """Bollinger Band squeeze detector.
+
+        Squeeze: BB width below its 20-period rolling average.
+        Signal fires when squeeze resolves (width expands) with directional price move.
+        """
+        if len(df) < length * 2:
+            return None
+        try:
+            close = df["close"]
+            sma   = close.rolling(length).mean()
+            std   = close.rolling(length).std()
+            upper = sma + 2 * std
+            lower = sma - 2 * std
+            bb_width = ((upper - lower) / sma).fillna(0)
+
+            if len(bb_width) < length + 5:
+                return None
+
+            width_now  = float(bb_width.iloc[-1])
+            width_avg  = float(bb_width.iloc[-length:].mean())
+            prev_width = float(bb_width.iloc[-2])
+
+            in_squeeze    = prev_width < width_avg
+            breakout_now  = width_now > prev_width * 1.1  # width expanding ≥10%
+
+            last_px = float(close.iloc[-1])
+            mid_px  = float(sma.iloc[-1])
+
+            if in_squeeze and breakout_now:
+                # Squeeze resolving — direction from price vs midband
+                if last_px > mid_px:
+                    pct_above = (last_px - mid_px) / mid_px * 100
+                    return float(np.clip(65 + pct_above * 5, 65, 88))
+                else:
+                    pct_below = (mid_px - last_px) / mid_px * 100
+                    return float(np.clip(35 - pct_below * 5, 12, 35))
+            elif in_squeeze:
+                # Still coiling — neutral; slight bias from price position
+                return float(np.clip(50 + (last_px - mid_px) / mid_px * 200, 42, 58))
+            else:
+                # No squeeze — mild signal from price position relative to bands
+                ub = float(upper.iloc[-1])
+                lb = float(lower.iloc[-1])
+                if ub > lb:
+                    position = (last_px - lb) / (ub - lb)
+                    return float(np.clip(30 + position * 40, 30, 70))
+                return None
+        except Exception:
+            return None
+
+    def _zscore_signal(self, df: pd.DataFrame, length: int = 50) -> Optional[float]:
+        """Z-Score mean reversion.
+
+        Z < -2: deeply oversold → bullish.
+        Z > +2: deeply overbought → bearish.
+        """
+        if len(df) < length + 5:
+            return None
+        try:
+            close = df["close"]
+            mu    = close.rolling(length).mean()
+            sigma = close.rolling(length).std()
+
+            if sigma.iloc[-1] == 0 or np.isnan(sigma.iloc[-1]):
+                return None
+
+            z = float((close.iloc[-1] - mu.iloc[-1]) / sigma.iloc[-1])
+
+            if np.isnan(z):
+                return None
+
+            # Z < -2: oversold → bullish (score 70-85)
+            # Z > +2: overbought → bearish (score 15-30)
+            # |Z| < 1: near mean → neutral (50)
+            if z <= -2.0:
+                return float(np.clip(70 + (-z - 2.0) * 5, 70, 85))
+            elif z >= 2.0:
+                return float(np.clip(30 - (z - 2.0) * 5, 15, 30))
+            else:
+                # Linear interpolation toward neutral
+                return float(np.clip(50 - z * 10, 30, 70))
+        except Exception:
+            return None
+
+    def _stochastic_signal(self, df: pd.DataFrame, k_length: int = 14, d_length: int = 3) -> Optional[float]:
+        """Slow Stochastic Oscillator (%K and %D).
+
+        Buy: %K crosses above %D while both below 20 (oversold).
+        Sell: %K crosses below %D while both above 80 (overbought).
+        """
+        if len(df) < k_length + d_length + 5:
+            return None
+        try:
+            high  = df["high"].rolling(k_length).max()
+            low   = df["low"].rolling(k_length).min()
+            close = df["close"]
+
+            denom = (high - low).replace(0, np.nan)
+            fast_k = 100 * (close - low) / denom
+
+            # Slow %K = 3-period SMA of fast %K
+            slow_k = fast_k.rolling(3).mean()
+            # Slow %D = 3-period SMA of slow %K
+            slow_d = slow_k.rolling(d_length).mean()
+
+            sk_now  = float(slow_k.iloc[-1])
+            sd_now  = float(slow_d.iloc[-1])
+            sk_prev = float(slow_k.iloc[-2])
+            sd_prev = float(slow_d.iloc[-2])
+
+            if any(np.isnan(x) for x in [sk_now, sd_now, sk_prev, sd_prev]):
+                return None
+
+            # Cross detection
+            bullish_cross = sk_prev <= sd_prev and sk_now > sd_now  # K crossed above D
+            bearish_cross = sk_prev >= sd_prev and sk_now < sd_now  # K crossed below D
+
+            if bullish_cross and sd_now < 30:
+                # Oversold cross up → bullish
+                return float(np.clip(70 + (30 - sd_now) * 0.5, 70, 85))
+            elif bearish_cross and sd_now > 70:
+                # Overbought cross down → bearish
+                return float(np.clip(30 - (sd_now - 70) * 0.5, 15, 30))
+            elif sk_now > sd_now and sd_now < 20:
+                # Above D in oversold territory → moderate bull
+                return 65.0
+            elif sk_now < sd_now and sd_now > 80:
+                # Below D in overbought territory → moderate bear
+                return 35.0
+            else:
+                # No actionable signal — interpolate K position
+                return float(np.clip(sk_now * 0.6 + 50 * 0.4, 20, 80))
+        except Exception:
+            return None
+
+    def _divergence_signal(self, df: pd.DataFrame, lookback: int = 10) -> Optional[float]:
+        """Detect RSI/Price divergence over the last `lookback` bars.
+
+        Bullish divergence: price lower low but RSI higher low → score 72-80.
+        Bearish divergence: price higher high but RSI lower high → score 20-28.
+        Returns neutral 50 when no divergence detected.
+        """
+        if len(df) < lookback + 20:
+            return None
+        try:
+            close = df["close"]
+            # Compute RSI for divergence comparison
+            delta = close.diff()
+            gain  = delta.clip(lower=0).rolling(14).mean()
+            loss  = (-delta.clip(upper=0)).rolling(14).mean()
+            rs    = gain / loss.replace(0, np.nan)
+            rsi   = 100 - 100 / (1 + rs)
+
+            recent_close = close.iloc[-lookback:]
+            recent_rsi   = rsi.iloc[-lookback:]
+
+            if recent_close.isna().any() or recent_rsi.isna().any():
+                return None
+
+            # Price and RSI extremes in the lookback window
+            price_argmin = int(recent_close.values.argmin())
+            price_argmax = int(recent_close.values.argmax())
+            rsi_argmin   = int(recent_rsi.values.argmin())
+            rsi_argmax   = int(recent_rsi.values.argmax())
+
+            price_min = float(recent_close.iloc[price_argmin])
+            price_max = float(recent_close.iloc[price_argmax])
+            rsi_min   = float(recent_rsi.iloc[rsi_argmin])
+            rsi_max   = float(recent_rsi.iloc[rsi_argmax])
+
+            last_close = float(close.iloc[-1])
+            last_rsi   = float(rsi.iloc[-1])
+
+            if np.isnan(last_rsi):
+                return None
+
+            # Bullish divergence: new price low but RSI not confirming
+            near_low = last_close <= price_min * 1.01   # within 1% of recent low
+            rsi_higher = last_rsi > rsi_min + 3.0         # RSI made a higher low
+
+            # Bearish divergence: new price high but RSI not confirming
+            near_high  = last_close >= price_max * 0.99  # within 1% of recent high
+            rsi_lower  = last_rsi < rsi_max - 3.0         # RSI made a lower high
+
+            if near_low and rsi_higher and last_rsi < 45:
+                divergence_strength = min((last_rsi - rsi_min) / 20.0, 1.0)
+                return float(np.clip(72 + divergence_strength * 8, 72, 80))
+            elif near_high and rsi_lower and last_rsi > 55:
+                divergence_strength = min((rsi_max - last_rsi) / 20.0, 1.0)
+                return float(np.clip(28 - divergence_strength * 8, 20, 28))
+            else:
+                return 50.0
+        except Exception:
+            return None
 
     def _pattern_score(self, df: pd.DataFrame) -> Optional[float]:
         """Candlestick pattern score via pandas-ta."""
