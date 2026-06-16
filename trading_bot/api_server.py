@@ -712,7 +712,7 @@ async def _run_market_scan() -> None:
                         equity, weights.get("update_count", 0), _AGENTS_AVAILABLE)
 
             async with session.get(
-                f"{_DATA_BASE}/v1beta1/screener/stocks/most-actives?by=volume&top=25",
+                f"{_DATA_BASE}/v1beta1/screener/stocks/most-actives?by=volume&top=50",
                 headers=_ALPACA_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as r:
@@ -724,7 +724,7 @@ async def _run_market_scan() -> None:
                 item["symbol"]
                 for item in actives_data.get("most_actives", [])
                 if item.get("symbol") and "." not in item["symbol"]
-            ][:20]
+            ][:50]
 
             if not symbols_raw:
                 return

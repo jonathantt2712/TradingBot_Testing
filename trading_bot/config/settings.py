@@ -64,7 +64,7 @@ class DecisionThresholds:
 @dataclass(slots=True)
 class ScannerConfig:
     enabled:         bool  = field(default_factory=lambda: _env_bool("SCANNER_ENABLED", True))
-    top_n:           int   = field(default_factory=lambda: int(_env_float("SCANNER_TOP_N", 20)))
+    top_n:           int   = field(default_factory=lambda: int(_env_float("SCANNER_TOP_N", 50)))
     min_price:       float = field(default_factory=lambda: _env_float("SCANNER_MIN_PRICE", 5.0))
     max_price:       float = field(default_factory=lambda: _env_float("SCANNER_MAX_PRICE", 2000.0))
     min_volume:      int   = field(default_factory=lambda: int(_env_float("SCANNER_MIN_VOLUME", 500000)))

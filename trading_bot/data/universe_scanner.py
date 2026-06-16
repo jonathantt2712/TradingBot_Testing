@@ -78,8 +78,8 @@ class UniverseScanner:
         momentum, and returns the best candidates.
         """
         async with aiohttp.ClientSession(headers=self._headers) as session:
-            active_task  = self._fetch_most_active(session, top=50)
-            movers_task  = self._fetch_market_movers(session, top=25)
+            active_task  = self._fetch_most_active(session, top=100)
+            movers_task  = self._fetch_market_movers(session, top=50)
 
             active_raw, movers_raw = await asyncio.gather(
                 active_task, movers_task, return_exceptions=True
