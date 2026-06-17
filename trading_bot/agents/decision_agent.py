@@ -26,6 +26,8 @@ _DIRECTIONAL_ROLES = {
     AgentRole.TECHNICAL,
     AgentRole.LIQUID,
     AgentRole.SOCIAL,
+    AgentRole.INSIDER,
+    AgentRole.SQUEEZE,
 }
 
 _SYSTEM_PROMPT = (
@@ -80,6 +82,20 @@ def _format_agent_block(ev: AgentEvaluation) -> str:
             lines.append(
                 f"  Bull weight: {r.get('bull_weight', 'n/a')}  "
                 f"Bear weight: {r.get('bear_weight', 'n/a')}"
+            )
+
+    elif ev.role is AgentRole.INSIDER:
+        if "trade_count" in r:
+            lines.append(f"  Congressional trades (recent): {r.get('trade_count', 0)}")
+        elif ev.rationale:
+            lines.append(f"  {ev.rationale}")
+
+    elif ev.role is AgentRole.SQUEEZE:
+        if "short_ratio_pct" in r:
+            lines.append(
+                f"  Short ratio: {r.get('short_ratio_pct', 'n/a')}  "
+                f"Setup: {r.get('setup', 'n/a')}  "
+                f"Rel-vol: {r.get('relative_volume', 'n/a')}x"
             )
 
     return "\n".join(lines)
@@ -179,6 +195,16 @@ class DecisionAgent:
             risk_block = _format_risk_block(risk_eval)
             perf_block = _load_perf_block()
 
+            # Check for social+squeeze convergence
+            social_ev = next((ev for ev in evaluations if ev.role is AgentRole.SOCIAL), None)
+            squeeze_ev = next((ev for ev in evaluations if ev.role is AgentRole.SQUEEZE), None)
+            convergence_note = ""
+            if social_ev is not None and squeeze_ev is not None:
+                if social_ev.score >= 60 and squeeze_ev.score >= 60:
+                    convergence_note = "\n- SIGNAL CONVERGENCE: Social AND Squeeze both bullish — elevated conviction."
+                elif social_ev.score <= 40 and squeeze_ev.score <= 40:
+                    convergence_note = "\n- SIGNAL CONVERGENCE: Social AND Squeeze both bearish — elevated conviction."
+
             user_prompt = (
                 f"Stock: {ticker}  Price: ${price:.2f}\n"
                 f"Regime: {regime_value.upper()} — {regime_rationale}\n"
@@ -191,7 +217,9 @@ class DecisionAgent:
                 "- Consider where agents agree and where they conflict.\n"
                 "- In RISK_OFF regime, only enter LONG with very high conviction "
                 "(multiple agents bullish).\n"
-                "- composite_score: 1-100 (>60=bullish, <40=bearish, 40-60=neutral)\n"
+                "- INSIDER and SQUEEZE are directional signals — include them in your analysis.\n"
+                "- Gap fade signals (small gaps <0.5%) have 88% intraday fill rate — weight accordingly.\n"
+                f"- composite_score: 1-100 (>60=bullish, <40=bearish, 40-60=neutral){convergence_note}\n"
                 "\nOutput JSON only:\n"
                 '{"decision":"LONG|SHORT|PASS","composite_score":<int>,'
                 '"rationale":"<max 30 words>","key_factors":["...","..."],'

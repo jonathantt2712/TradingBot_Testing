@@ -422,7 +422,11 @@ def calc_summary(all_trades: list[TradeResult]) -> dict:
     cum = df_sorted["pnl_usd"].cumsum()
     max_dd = float((cum - cum.cummax()).min())
 
-    ev_per_trade = (win_rate / 100 * avg_win) + ((1 - win_rate / 100) * avg_loss)
+    # True expected value per trade: mean realized P&L across ALL outcomes,
+    # including EOD_CLOSE (forced 15:55 exits), which are usually the majority
+    # of day trades. The old TP/SL-only formula silently ignored them, so the
+    # optimizer was maximizing a number that excluded most actual trade results.
+    ev_per_trade = total_pnl / total if total else 0.0
 
     by_tk = df.groupby("ticker").agg(
         trades=("pnl_usd", "count"),

@@ -123,6 +123,8 @@ class SqueezeAgent(BaseAgent):
                 base  = float(np.interp(short_ratio, [0.50, 0.65, 0.80], [62, 72, 82]))
                 if rel_vol > 2.0:
                     base = min(90.0, base + 8.0)
+                elif rel_vol < 2.0:
+                    base = min(base, 65.0)  # unconfirmed squeeze — cap below action threshold
                 score = base
                 setup = "squeeze_long"
             elif price_dir < 0:

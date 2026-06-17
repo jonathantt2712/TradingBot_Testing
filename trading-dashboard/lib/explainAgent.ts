@@ -162,6 +162,34 @@ function humanizeLiquid(r: string): string {
   return `Order-flow read: ${out.join(', ')}.`
 }
 
+function humanizeInsider(r: string): string {
+  if (/no congressional trades/i.test(r))        return 'No congressional trading disclosures found in the last 30 days.'
+  if (/no valid congress trades/i.test(r))        return 'No valid disclosures found for this ticker in the last 30 days.'
+  if (/fetch failed/i.test(r))                    return 'House Stock Watcher data fetch failed — check network.'
+  if (/mixed.*buyers.*sellers/i.test(r))          return r
+  const m = r.match(/^(bullish|bearish) past (\d+)d \((\d+) disclosures?\)/)
+  if (m) {
+    const [, dir, days, n] = m
+    return `${n} congressional disclosure${parseInt(n) > 1 ? 's' : ''} are ${dir} over the past ${days} days.`
+  }
+  return r
+}
+
+function humanizeSqueeze(r: string): string {
+  if (/no FINRA short volume data/i.test(r))      return 'No FINRA RegSHO short volume data found for today.'
+  if (/ticker not found/i.test(r))                return 'Ticker not in FINRA short volume report today (OTC/non-exchange).'
+  const ratio = r.match(/short_ratio=([\d.]+)/)
+  if (ratio) {
+    const v = parseFloat(ratio[1])
+    const pct = (v * 100).toFixed(1)
+    if (/squeeze/i.test(r))          return `Short ratio is ${pct}% with price moving up — squeeze setup detected.`
+    if (/short pressure/i.test(r))   return `Short ratio is ${pct}% with price falling — heavy short selling pressure.`
+    if (/heavy shorted/i.test(r))    return `Short ratio is ${pct}% — heavily shorted but no clear directional catalyst.`
+    return `Short ratio is ${pct}%.`
+  }
+  return r
+}
+
 /** Returns a plain-English explanation for an agent's rationale, or null if there's nothing to translate. */
 export function humanizeRationale(role: string, rationale?: string): string | null {
   if (!rationale) return null
@@ -172,6 +200,8 @@ export function humanizeRationale(role: string, rationale?: string): string | nu
     case 'risk':        return humanizeRisk(rationale)
     case 'social':      return humanizeSocial(rationale)
     case 'liquid':      return humanizeLiquid(rationale)
+    case 'insider':     return humanizeInsider(rationale)
+    case 'squeeze':     return humanizeSqueeze(rationale)
     default:            return rationale
   }
 }
