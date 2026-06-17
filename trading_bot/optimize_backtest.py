@@ -55,7 +55,7 @@ sys.path.insert(0, str(_here))
 from backtest_30day import (
     fetch_bars_range, simulate_day_trade, calc_summary, print_summary,
     TradeResult, LOOKBACK_BARS, STEP_BARS, ENTRY_CUTOFF_UTC_HOUR, _ET,
-    DEFAULT_TICKERS,
+    DEFAULT_TICKERS, SLIPPAGE_PCT,
 )
 from config.settings import load_settings
 from core.enums import Decision
@@ -396,6 +396,7 @@ def replay_records(
             stop_loss=sl,
             take_profit=tp,
             qty=qty,
+            slippage_pct=SLIPPAGE_PCT,
         )
 
         results.append(TradeResult(
