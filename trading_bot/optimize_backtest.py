@@ -580,6 +580,111 @@ def phase2_grid_fast(
     return best_params, best_stats, leaderboard
 
 
+# -- Walk-forward out-of-sample validation -------------------------------------
+
+def _global_cutoff_date(records_by_ticker: dict[str, list], oos_frac: float) -> Optional[date]:
+    """Date at the (1 - oos_frac) quantile across ALL records' entry dates.
+
+    A single global cutoff keeps the in-sample / out-of-sample split temporally
+    clean across every ticker (no look-ahead: OOS is strictly later in time).
+    """
+    all_dates = sorted(
+        rec.entry_date_et for recs in records_by_ticker.values() for rec in recs
+    )
+    if not all_dates:
+        return None
+    idx = int(len(all_dates) * (1.0 - oos_frac))
+    idx = max(0, min(idx, len(all_dates) - 1))
+    return all_dates[idx]
+
+
+def _split_records_by_date(
+    records_by_ticker: dict[str, list], cutoff: date,
+) -> tuple[dict[str, list], dict[str, list]]:
+    """Partition each ticker's records into (in_sample < cutoff, oos >= cutoff)."""
+    in_sample: dict[str, list] = {}
+    out_sample: dict[str, list] = {}
+    for ticker, recs in records_by_ticker.items():
+        in_sample[ticker]  = [r for r in recs if r.entry_date_et <  cutoff]
+        out_sample[ticker] = [r for r in recs if r.entry_date_et >= cutoff]
+    return in_sample, out_sample
+
+
+def walk_forward_validate(
+    records_by_ticker: dict[str, list],
+    windowed: dict[str, pd.DataFrame],
+    best_days: int,
+    *,
+    oos_frac: float = 0.3,
+) -> Optional[dict]:
+    """Honest validation: pick params on in-sample data, REPORT on out-of-sample.
+
+    The default optimizer selects the best of 96 configs on the full window and
+    reports that same window — guaranteed-optimistic (it fits noise). Here we
+    select on the earlier (1-oos_frac) of the data and measure the chosen config
+    on the held-out later oos_frac it never saw. A large IS→OOS degradation is
+    the signature of overfitting; similar IS/OOS numbers mean the edge is real.
+    """
+    cutoff = _global_cutoff_date(records_by_ticker, oos_frac)
+    if cutoff is None:
+        logger.warning("walk-forward: no records to split")
+        return None
+
+    is_records, oos_records = _split_records_by_date(records_by_ticker, cutoff)
+    n_is  = sum(len(v) for v in is_records.values())
+    n_oos = sum(len(v) for v in oos_records.values())
+    logger.info("=====  WALK-FORWARD VALIDATION  =====")
+    logger.info("  Split @ %s  |  in-sample eval points=%d  out-of-sample=%d",
+                cutoff, n_is, n_oos)
+    if n_is < MIN_TRADES or n_oos < MIN_TRADES:
+        logger.warning("  Too few points either side of the split — results unreliable")
+
+    # 1. Select the winning config on IN-SAMPLE only.
+    best_params, is_stats, _ = phase2_grid_fast(is_records, windowed, best_days)
+    if not best_params:
+        logger.warning("  walk-forward: no valid in-sample config")
+        return None
+
+    # 2. Apply that frozen config to OUT-OF-SAMPLE data it never influenced.
+    oos_trades: list[TradeResult] = []
+    for ticker, recs in oos_records.items():
+        if ticker in windowed:
+            oos_trades.extend(replay_records(recs, windowed[ticker], best_params))
+    oos_stats = calc_summary(oos_trades)
+
+    def _g(s: dict, k: str, d=0.0):
+        return s.get(k, d) if s else d
+
+    logger.info("  ---  IN-SAMPLE (param selection)  vs  OUT-OF-SAMPLE (held out)  ---")
+    logger.info("  metric            in-sample     out-of-sample")
+    logger.info("  trades            %9d     %9d",
+                _g(is_stats, "total_trades"), _g(oos_stats, "total_trades"))
+    logger.info("  win_rate          %8.1f%%     %8.1f%%",
+                _g(is_stats, "win_rate"), _g(oos_stats, "win_rate"))
+    logger.info("  EV/trade          %+9.2f     %+9.2f",
+                _g(is_stats, "ev_per_trade"), _g(oos_stats, "ev_per_trade"))
+    logger.info("  profit_factor     %9.2f     %9.2f",
+                _g(is_stats, "profit_factor"), _g(oos_stats, "profit_factor"))
+
+    is_ev  = _g(is_stats, "ev_per_trade")
+    oos_ev = _g(oos_stats, "ev_per_trade")
+    if oos_ev <= 0 < is_ev:
+        logger.warning("  ⚠ OVERFIT: positive in-sample EV does NOT survive out-of-sample.")
+    elif is_ev > 0 and oos_ev >= is_ev * 0.5:
+        logger.info("  ✓ Edge holds out-of-sample (OOS EV >= 50%% of in-sample).")
+    else:
+        logger.info("  ~ Partial degradation — treat the live edge as the OOS number.")
+
+    return {
+        "cutoff_date":   str(cutoff),
+        "oos_frac":      oos_frac,
+        "selected_on":   "in_sample",
+        "params":        best_params,
+        "in_sample":     is_stats,
+        "out_of_sample": oos_stats,
+    }
+
+
 # -- Phase 3: final summary + save results -------------------------------------
 
 async def phase3_final(
@@ -701,7 +806,7 @@ def _update_env(params: dict[str, Any]) -> None:
 
 # -- Main ----------------------------------------------------------------------
 
-async def run(tickers: list[str]) -> None:
+async def run(tickers: list[str], *, walk_forward: bool = False, oos_frac: float = 0.3) -> None:
     settings = load_settings()
 
     if not settings.alpaca_key_id or not settings.alpaca_secret:
@@ -744,6 +849,16 @@ async def run(tickers: list[str]) -> None:
         full_bars=all_bars,
     )
 
+    if walk_forward:
+        wf = walk_forward_validate(best_records, best_windowed, best_days, oos_frac=oos_frac)
+        if wf:
+            (_here.parent / "backtest_walkforward.json").write_text(
+                json.dumps(wf, indent=2, default=str)
+            )
+            logger.info("Saved: %s", _here.parent / "backtest_walkforward.json")
+        logger.info("Walk-forward complete. (no .env written — this mode only measures)")
+        return
+
     best_params, best_stats, _ = phase2_grid_fast(
         best_records, best_windowed, best_days,
     )
@@ -761,6 +876,11 @@ async def run(tickers: list[str]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fast backtest optimizer")
     parser.add_argument("--tickers", nargs="+", default=DEFAULT_TICKERS)
+    parser.add_argument("--walk-forward", action="store_true",
+                        help="Select params in-sample, REPORT out-of-sample "
+                             "(honest validation; does not write .env)")
+    parser.add_argument("--oos-frac", type=float, default=0.3,
+                        help="Fraction of the window held out for out-of-sample (default 0.3)")
     args = parser.parse_args()
 
     tickers = [t.upper() for t in args.tickers if t.upper() != "SPY"]
@@ -768,8 +888,11 @@ def main() -> None:
     logger.info("Optimizer starting  tickers: %s", " ".join(tickers))
     logger.info("Search: %d time windows x %d param combos",
                 len(TIME_WINDOWS), n_combos)
+    if args.walk_forward:
+        logger.info("Mode: WALK-FORWARD (out-of-sample validation, %.0f%% held out)",
+                    args.oos_frac * 100)
 
-    asyncio.run(run(tickers))
+    asyncio.run(run(tickers, walk_forward=args.walk_forward, oos_frac=args.oos_frac))
 
 
 if __name__ == "__main__":
