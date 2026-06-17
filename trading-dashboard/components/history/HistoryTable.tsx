@@ -88,8 +88,10 @@ export function HistoryTable({ trades }: Props) {
   }
 
   const totalPnl = filtered.reduce((s, t) => s + (t._pnl ?? 0), 0)
-  const wins     = filtered.filter(t => (t._pnl ?? 0) > 0).length
-  const winRate  = filtered.length ? (wins / filtered.length * 100) : 0
+  // Only count trades where the outcome is known; open/cancelled trades without pnl are excluded
+  const resolved = filtered.filter(t => t._pnl != null)
+  const wins     = resolved.filter(t => (t._pnl ?? 0) > 0).length
+  const winRate  = resolved.length ? (wins / resolved.length * 100) : 0
 
   return (
     <div className="card">

@@ -612,9 +612,54 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
                     exit_reason = "filled"
 
             elif parent_status in ("canceled", "expired", "done_for_day"):
-                trade["status"]    = "cancelled"
-                trade["closed_at"] = datetime.utcnow().isoformat()
-                modified = True
+                # Bracket canceled — likely a manual close from the dashboard.
+                # Look for a filled market sell order to recover the exit price.
+                ticker_sym = trade.get("ticker", "")
+                exit_price = None
+                exit_reason = "manual_close"
+                try:
+                    async with session.get(
+                        f"{_BROKER_BASE}/v2/orders",
+                        params={"status": "closed", "symbols": ticker_sym,
+                                "side": "sell", "limit": 10, "direction": "desc"},
+                        headers=_ALPACA_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as fill_r:
+                        if fill_r.status == 200:
+                            recent = await fill_r.json()
+                            for o in recent:
+                                if (o.get("type") == "market" and
+                                        o.get("status") == "filled" and
+                                        o.get("filled_avg_price")):
+                                    exit_price = float(o["filled_avg_price"])
+                                    break
+                except Exception:
+                    pass
+
+                if exit_price is not None:
+                    direction_local = trade["direction"]
+                    entry_local     = float(trade["entry"])
+                    qty_local       = int(trade.get("qty", 1))
+                    if direction_local == "LONG":
+                        pnl     = (exit_price - entry_local) * qty_local
+                        pnl_pct = (exit_price - entry_local) / entry_local * 100
+                    else:
+                        pnl     = (entry_local - exit_price) * qty_local
+                        pnl_pct = (entry_local - exit_price) / entry_local * 100
+                    trade["status"]      = "closed"
+                    trade["exit"]        = round(exit_price, 2)
+                    trade["exit_reason"] = exit_reason
+                    trade["pnl"]         = round(pnl, 2)
+                    trade["pnl_pct"]     = round(pnl_pct, 2)
+                    trade["closed_at"]   = datetime.utcnow().isoformat()
+                    modified = True
+                    _update_agent_attribution(trade)
+                    logger.info("Closed %s %s via manual_close: exit=%.2f PnL=$%.2f (%.2f%%)",
+                                direction_local, ticker_sym, exit_price, pnl, pnl_pct)
+                else:
+                    trade["status"]    = "cancelled"
+                    trade["closed_at"] = datetime.utcnow().isoformat()
+                    modified = True
                 continue
             else:
                 continue   # entry filled, exit pending
