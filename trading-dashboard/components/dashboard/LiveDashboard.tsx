@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { StatsCards }      from './StatsCards'
 import { PnLChart }        from './PnLChart'
 import { RegimeIndicator } from './RegimeIndicator'
@@ -55,19 +55,9 @@ export function LiveDashboard({
   const [scanStats,      setScanStats]      = useState<ScanStats | null>(null)
   const [circuitBreaker, setCircuitBreaker] = useState<{ halted: boolean; reason?: string } | null>(null)
 
-  // Tracks symbols the user has closed — persists across refreshes until
-  // Alpaca confirms the position is truly gone from their end.
-  const pendingClose = useRef<Set<string>>(new Set())
-
-  const applyPositions = useCallback((raw: AlpacaPosition[]) => {
-    const filtered = raw.filter(p => !pendingClose.current.has(p.symbol))
-    // Once Alpaca stops returning a symbol, remove it from pendingClose
-    const alpacaSymbols = new Set(raw.map(p => p.symbol))
-    for (const sym of pendingClose.current) {
-      if (!alpacaSymbols.has(sym)) pendingClose.current.delete(sym)
-    }
-    return filtered
-  }, [])
+  // Symbols the user closed this session — shown with "pending close" badge
+  // until Alpaca confirms they're gone on next refresh.
+  const [pendingClose, setPendingClose] = useState<Set<string>>(new Set())
 
   // Fast: positions + stats (30s)
   const refreshFast = useCallback(async () => {
@@ -76,16 +66,25 @@ export function LiveDashboard({
       fetch('/api/bot/sectors').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/stats').then(res => res.ok ? res.json() : null),
     ])
-    const rawPositions  = pos.status === 'fulfilled' && Array.isArray(pos.value) ? pos.value as AlpacaPosition[] : null
-    const newPositions  = rawPositions ? applyPositions(rawPositions) : null
-    if (newPositions !== null)                                         setPositions(newPositions)
+    const rawPositions = pos.status === 'fulfilled' && Array.isArray(pos.value) ? pos.value as AlpacaPosition[] : null
+    if (rawPositions !== null) {
+      // Clear pendingClose for symbols Alpaca no longer reports (confirmed closed)
+      setPendingClose(prev => {
+        const next = new Set(prev)
+        for (const sym of prev) {
+          if (!rawPositions.some(p => p.symbol === sym)) next.delete(sym)
+        }
+        return next.size === prev.size ? prev : next
+      })
+      setPositions(rawPositions)
+    }
     if (sec.status === 'fulfilled' && Array.isArray(sec.value))       setSectors(sec.value)
     if (s.status   === 'fulfilled' && s.value && !s.value.error) {
       const newStats = { ...s.value }
-      newStats.open_positions = newPositions !== null ? newPositions.length : s.value.open_positions
+      newStats.open_positions = rawPositions !== null ? rawPositions.length : s.value.open_positions
       setStats(newStats)
     }
-  }, [applyPositions])
+  }, [])
 
   // Slow: PnL chart, regime, scan-stats (5 min)
   const refreshSlow = useCallback(async () => {
@@ -116,11 +115,7 @@ export function LiveDashboard({
   }, [refreshSlow])
 
   function handleClosed(symbol: string) {
-    // Mark as pending close — survives every future Alpaca refresh
-    pendingClose.current.add(symbol)
-    // Remove immediately from every piece of state that mentions positions
-    setPositions(prev => prev.filter(p => p.symbol !== symbol))
-    setStats(prev => ({ ...prev, open_positions: Math.max(0, (prev.open_positions ?? 1) - 1) }))
+    setPendingClose(prev => new Set([...prev, symbol]))
   }
 
   return (
@@ -171,7 +166,7 @@ export function LiveDashboard({
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
         <SectorHeatmap sectors={sectors} />
-        <PositionsTable positions={positions} onClosed={handleClosed} />
+        <PositionsTable positions={positions} onClosed={handleClosed} pendingClose={pendingClose} />
       </div>
     </>
   )

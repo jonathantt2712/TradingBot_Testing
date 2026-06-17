@@ -15,7 +15,7 @@ import type { TradeRecommendation } from '@/types/trading'
 interface Bar { o: number; h: number; l: number; c: number; v: number; t: string }
 type RecAction = 'HOLD' | 'ADD' | 'TAKE_PROFIT' | 'REDUCE' | 'EXIT'
 interface Recommendation { action: RecAction; reason: string; addQty?: number }
-interface Props { positions: AlpacaPosition[]; onClosed?: (symbol: string) => void }
+interface Props { positions: AlpacaPosition[]; onClosed?: (symbol: string) => void; pendingClose?: Set<string> }
 
 interface PositionContext {
   ticker:          string
@@ -136,8 +136,8 @@ function RecBadge({ rec }: { rec: Recommendation }) {
   )
 }
 
-function PositionRow({ position, tradeRec, onClose, closing }: {
-  position: AlpacaPosition; tradeRec?: TradeRecommendation | null; onClose: (sym: string) => void; closing: string | null
+function PositionRow({ position, tradeRec, onClose, closing, isPendingClose }: {
+  position: AlpacaPosition; tradeRec?: TradeRecommendation | null; onClose: (sym: string) => void; closing: string | null; isPendingClose: boolean
 }) {
   const [expanded,    setExpanded]    = useState(false)
   const [bars,        setBars]        = useState<Bar[]>([])
@@ -175,6 +175,12 @@ function PositionRow({ position, tradeRec, onClose, closing }: {
           <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-semibold', isLong ? 'bg-bull/10 text-bull' : 'bg-bear/10 text-bear')}>
             {position.side.toUpperCase()}
           </span>
+          {isPendingClose && (
+            <span className="flex items-center gap-1 rounded-full border border-caution/40 bg-caution/10 px-2 py-0.5 text-[10px] font-semibold text-caution">
+              <span className="h-1.5 w-1.5 rounded-full bg-caution animate-pulse" />
+              ממתין לסגירה
+            </span>
+          )}
           <span className="text-xs font-mono text-muted">{position.qty} sh</span>
           <div className={cn('ml-auto flex flex-col items-end', pnl >= 0 ? 'text-bull' : 'text-bear')}>
             <span className="text-sm font-mono font-semibold">{pnl >= 0 ? '+' : ''}${Math.abs(pnl).toFixed(2)}</span>
@@ -256,7 +262,7 @@ function PositionRow({ position, tradeRec, onClose, closing }: {
 
 const REFRESH_MS = 30_000
 
-export function PositionsTable({ positions, onClosed }: Props) {
+export function PositionsTable({ positions, onClosed, pendingClose = new Set() }: Props) {
   const [closing,     setClosing]     = useState<string | null>(null)
   const [tradeRecs,   setTradeRecs]   = useState<TradeRecommendation[]>([])
   const [refreshing,  setRefreshing]  = useState(false)
@@ -363,6 +369,7 @@ export function PositionsTable({ positions, onClosed }: Props) {
               tradeRec={findRec(pos.symbol)}
               onClose={handleClose}
               closing={closing}
+              isPendingClose={pendingClose.has(pos.symbol)}
             />
           ))}
           <div className="flex items-center justify-between px-4 py-2.5 border-t border-bg-border bg-bg-hover/30 text-xs font-semibold">
