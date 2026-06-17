@@ -689,6 +689,55 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
         except Exception as exc:
             logger.debug("Could not check order %s: %s", trade.get("order_id"), exc)
 
+    # Retroactive reconciliation: cancelled trades with no pnl (e.g. manual
+    # closes from the dashboard that the bot never saw).
+    cancelled_no_pnl = [
+        t for t in trades
+        if t.get("status") == "cancelled" and t.get("pnl") is None and t.get("ticker")
+    ]
+    for trade in cancelled_no_pnl:
+        ticker_sym  = trade.get("ticker", "")
+        executed_at = trade.get("executed_at") or trade.get("opened_at") or ""
+        direction   = trade.get("direction", "LONG")
+        entry       = float(trade.get("entry") or 0)
+        qty         = int(trade.get("qty") or 0)
+        if not entry or not qty or not executed_at:
+            continue
+        side_filter = "sell" if direction == "LONG" else "buy"
+        try:
+            async with session.get(
+                f"{_BROKER_BASE}/v2/orders",
+                params={"status": "closed", "symbols": ticker_sym, "side": side_filter,
+                        "after": executed_at, "direction": "asc", "limit": 5},
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as fill_r:
+                if fill_r.status != 200:
+                    continue
+                for o in await fill_r.json():
+                    if o.get("status") == "filled" and o.get("filled_avg_price"):
+                        exit_price = float(o["filled_avg_price"])
+                        if direction == "LONG":
+                            pnl     = (exit_price - entry) * qty
+                            pnl_pct = (exit_price - entry) / entry * 100
+                        else:
+                            pnl     = (entry - exit_price) * qty
+                            pnl_pct = (entry - exit_price) / entry * 100
+                        trade["status"]      = "closed"
+                        trade["exit"]        = round(exit_price, 2)
+                        trade["exit_reason"] = "manual_close"
+                        trade["pnl"]         = round(pnl, 2)
+                        trade["pnl_pct"]     = round(pnl_pct, 2)
+                        if not trade.get("closed_at"):
+                            trade["closed_at"] = o.get("filled_at", datetime.utcnow().isoformat())
+                        modified = True
+                        _update_agent_attribution(trade)
+                        logger.info("Reconciled %s %s: exit=%.2f PnL=$%.2f",
+                                    direction, ticker_sym, exit_price, pnl)
+                        break
+        except Exception as exc:
+            logger.debug("Reconcile cancelled %s: %s", ticker_sym, exc)
+
     if modified:
         async with _trades_lock:
             _save(TRADES_FILE, trades)
