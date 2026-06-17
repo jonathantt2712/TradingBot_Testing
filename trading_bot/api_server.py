@@ -120,6 +120,7 @@ _ai4trade_client   = None
 _Decision          = None
 _EXIT_DECISIONS: list = []  # rolling log of exit-monitor and EOD review decisions
 _MAX_EXIT_LOG     = 500
+_telegram          = None   # TelegramPublisher — optional push notifications
 
 try:
     import pandas as pd
@@ -129,17 +130,23 @@ try:
     from core.models import AnalysisContext
     from core.enums import Decision
     from data.ai4trade_client import AI4TradeClient as _AI4TC
+    from data.telegram_publisher import TelegramPublisher as _TelegramPublisher
 
     _ai4trade_client = _AI4TC(
         email=os.getenv("AI4TRADE_EMAIL", ""),
         password=os.getenv("AI4TRADE_PASSWORD", ""),
     )
-    _pm = build_manager(load_settings(), broker=None, ai4=_ai4trade_client)
+    _settings = load_settings()
+    _pm = build_manager(_settings, broker=None, ai4=_ai4trade_client)
     # Dashboard scans fetch ~100-bar windows (vs 200 live) — keep the lower
     # bar requirement this endpoint has always used.
     _pm.technical.min_bars = 30
     _Decision = Decision
     _AGENTS_AVAILABLE = True
+    _telegram = _TelegramPublisher(
+        bot_token=_settings.telegram_bot_token,
+        chat_id=_settings.telegram_chat_id,
+    )
     logger.info("Agent pipeline loaded via bootstrap.build_manager — unified with live/backtest")
 
 except Exception as _import_err:
@@ -879,8 +886,31 @@ def _check_circuit_breaker() -> Optional[str]:
     return None
 
 
+async def _fetch_news_catalyst(session: aiohttp.ClientSession, sym: str) -> str:
+    """Return the most recent Benzinga news headline for sym from last 24h, or ''."""
+    try:
+        since = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        async with session.get(
+            f"{_DATA_BASE}/v1beta1/news?symbols={sym}&limit=1&start={since}",
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=6),
+        ) as r:
+            if r.status != 200:
+                return ""
+            data = await r.json()
+            articles = data.get("news", [])
+            if articles:
+                return articles[0].get("headline", "")
+    except Exception:
+        pass
+    return ""
+
+
 async def _run_premarket_scan() -> None:
-    """Identify pre-market gappers (>2% gap) between 9:00-9:25 ET.
+    """Identify pre-market gappers (≥5% gap, price >$3, pre-market volume >50k) between 9:00-9:25 ET.
+
+    Criteria sourced from Humbled Trader scanner: gap >5%, price >$3,
+    pre-market vol >50k, Benzinga news catalyst preferred.
 
     Tags resulting recs with premarket=True and gap_pct. These appear in the
     dashboard with a PRE-MKT badge and give the trader a head start before the
@@ -888,6 +918,9 @@ async def _run_premarket_scan() -> None:
     """
     if not _ALPACA_KEY or not _ALPACA_SECRET:
         return
+
+    gap_min = float(os.getenv("PREMARKET_GAP_MIN_PCT", "5.0"))
+    vol_min = int(os.getenv("PREMARKET_MIN_VOLUME",    "50000"))
 
     try:
         async with aiohttp.ClientSession(
@@ -925,54 +958,73 @@ async def _run_premarket_scan() -> None:
         win_mins = weights.get("time_window_minutes", 45)
         recs: List[Dict[str, Any]] = []
 
-        for sym, snap in snaps.items():
-            try:
-                prev_bar   = snap.get("prevDailyBar") or {}
-                daily_bar  = snap.get("dailyBar") or {}
-                latest_trd = snap.get("latestTrade") or {}
-                prev_close = float(prev_bar.get("c") or 0)
-                price      = float(latest_trd.get("p") or daily_bar.get("o") or 0)
-                if prev_close <= 0 or price <= 0 or price < 5:
-                    continue
-                gap_pct = (price - prev_close) / prev_close * 100
-                if abs(gap_pct) < 2.0:
-                    continue
-                direction  = "LONG" if gap_pct > 0 else "SHORT"
-                entry      = round(price, 2)
-                d          = 1 if direction == "LONG" else -1
-                stop_pct   = weights.get("stop_pct", 0.02)
-                tp_pct     = weights.get("tp_pct",   0.05)
-                stop_loss  = round(entry * (1 - d * stop_pct), 2)
-                take_profit = round(entry * (1 + d * tp_pct),  2)
-                qty        = _kelly_qty(equity, entry, stop_loss, take_profit, 65.0)
-                rr         = round(tp_pct / stop_pct, 2)
-                dollar_rsk = round(abs(entry - stop_loss) * qty, 2)
-                expires_at = (_next_market_open() + timedelta(minutes=win_mins)).isoformat()
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+        ) as news_session:
+            for sym, snap in snaps.items():
+                try:
+                    prev_bar   = snap.get("prevDailyBar") or {}
+                    daily_bar  = snap.get("dailyBar") or {}
+                    latest_trd = snap.get("latestTrade") or {}
+                    prev_close = float(prev_bar.get("c") or 0)
+                    price      = float(latest_trd.get("p") or daily_bar.get("o") or 0)
 
-                recs.append({
-                    "id":              f"{sym}-pm-{int(datetime.utcnow().timestamp())}",
-                    "ticker":          sym,
-                    "direction":       direction,
-                    "composite_score": round(min(max(50.0 + abs(gap_pct) * 3, 55.0), 90.0), 1),
-                    "agent_used":      False,
-                    "rationale":       f"Pre-market gap {gap_pct:+.2f}% (prev close ${prev_close:.2f})",
-                    "risk":            {"entry": entry, "stop_loss": stop_loss,
-                                       "take_profit": take_profit, "qty": qty,
-                                       "risk_reward": rr, "dollar_risk": dollar_rsk},
-                    "regime":          "neutral",
-                    "sector":          _SECTOR_MAP.get(sym, "Other"),
-                    "scanned_at":      datetime.utcnow().isoformat(),
-                    "expires_at":      expires_at,
-                    "reeval_count":    0,
-                    "hot_sector":      False,
-                    "evaluations":     [],
-                    "timestamp":       datetime.utcnow().isoformat(),
-                    "chg_pct":         round(gap_pct, 2),
-                    "premarket":       True,
-                    "gap_pct":         round(gap_pct, 2),
-                })
-            except Exception:
-                continue
+                    # Price filter: must be > $3
+                    if prev_close <= 0 or price <= 0 or price < 3:
+                        continue
+
+                    gap_pct = (price - prev_close) / prev_close * 100
+                    if abs(gap_pct) < gap_min:
+                        continue
+
+                    # Pre-market volume filter
+                    pm_vol = float(daily_bar.get("v") or 0)
+                    if pm_vol < vol_min:
+                        continue
+
+                    # News catalyst (non-blocking — empty string = no catalyst found)
+                    catalyst = await _fetch_news_catalyst(news_session, sym)
+
+                    direction   = "LONG" if gap_pct > 0 else "SHORT"
+                    entry       = round(price, 2)
+                    d           = 1 if direction == "LONG" else -1
+                    stop_pct    = weights.get("stop_pct", 0.02)
+                    tp_pct      = weights.get("tp_pct",   0.05)
+                    stop_loss   = round(entry * (1 - d * stop_pct), 2)
+                    take_profit = round(entry * (1 + d * tp_pct),  2)
+                    qty         = _kelly_qty(equity, entry, stop_loss, take_profit, 65.0)
+                    rr          = round(tp_pct / stop_pct, 2)
+                    dollar_rsk  = round(abs(entry - stop_loss) * qty, 2)
+                    expires_at  = (_next_market_open() + timedelta(minutes=win_mins)).isoformat()
+                    rationale   = f"Pre-market gap {gap_pct:+.2f}% (prev close ${prev_close:.2f})"
+                    if catalyst:
+                        rationale += f" | {catalyst[:80]}"
+
+                    recs.append({
+                        "id":              f"{sym}-pm-{int(datetime.utcnow().timestamp())}",
+                        "ticker":          sym,
+                        "direction":       direction,
+                        "composite_score": round(min(max(50.0 + abs(gap_pct) * 3, 55.0), 90.0), 1),
+                        "agent_used":      False,
+                        "rationale":       rationale,
+                        "risk":            {"entry": entry, "stop_loss": stop_loss,
+                                           "take_profit": take_profit, "qty": qty,
+                                           "risk_reward": rr, "dollar_risk": dollar_rsk},
+                        "regime":          "neutral",
+                        "sector":          _SECTOR_MAP.get(sym, "Other"),
+                        "scanned_at":      datetime.utcnow().isoformat(),
+                        "expires_at":      expires_at,
+                        "reeval_count":    0,
+                        "hot_sector":      False,
+                        "evaluations":     [],
+                        "timestamp":       datetime.utcnow().isoformat(),
+                        "chg_pct":         round(gap_pct, 2),
+                        "premarket":       True,
+                        "gap_pct":         round(gap_pct, 2),
+                        "catalyst":        catalyst,
+                    })
+                except Exception:
+                    continue
 
         if recs:
             recs.sort(key=lambda x: abs(x["gap_pct"]), reverse=True)
@@ -981,7 +1033,12 @@ async def _run_premarket_scan() -> None:
                 existing = []
             non_pm = [r for r in existing if not r.get("premarket")]
             _save(RECS_FILE, recs + non_pm)
-            logger.info("Pre-market scan: %d gappers identified (>2%% gap)", len(recs))
+            logger.info(
+                "Pre-market scan: %d gappers identified (>%.0f%% gap, vol>%d)",
+                len(recs), gap_min, vol_min,
+            )
+            if _telegram is not None:
+                asyncio.create_task(_telegram.send_gapper_alert(recs))
 
     except Exception as exc:
         logger.warning("Pre-market scan failed: %s", exc)
@@ -1289,6 +1346,12 @@ async def _run_market_scan() -> None:
             _save(RECS_FILE, recs)
         # else: market closed and this scan found nothing — keep whatever
         # recommendations are already on disk available until Monday.
+
+        # Push high-conviction signals to Telegram
+        if _telegram is not None and recs:
+            strong_hits = [r for r in recs if r["composite_score"] > 60]
+            if strong_hits:
+                asyncio.create_task(_telegram.send_strategy_alert(strong_hits))
 
         scanned_n = len(symbols_raw)
         skipped_n = scanned_n - len(recs)

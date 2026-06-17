@@ -112,6 +112,11 @@ class Settings:
     gemini_api_key:    str  = field(default_factory=lambda: _env("GEMINI_API_KEY"))
     llm_model:         str  = field(default_factory=lambda: _env("LLM_MODEL", "claude-sonnet-4-6"))
 
+    telegram_bot_token:    str   = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
+    telegram_chat_id:      str   = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID"))
+    premarket_gap_min_pct: float = field(default_factory=lambda: _env_float("PREMARKET_GAP_MIN_PCT", 5.0))
+    premarket_min_volume:  int   = field(default_factory=lambda: int(_env_float("PREMARKET_MIN_VOLUME", 50000)))
+
     weights:    AgentWeights       = field(default_factory=AgentWeights)
     risk:       RiskConfig         = field(default_factory=RiskConfig)
     thresholds: DecisionThresholds = field(default_factory=DecisionThresholds)

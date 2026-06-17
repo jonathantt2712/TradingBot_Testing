@@ -52,6 +52,7 @@ _WEIGHTS = {
     "stochastic":    0.04,
     "divergence":    0.03,
     "gap":           0.04,
+    "trend_join":    0.06,
 }
 
 # ── Research-derived thresholds ──────────────────────────────────────────────
@@ -76,11 +77,13 @@ class TechnicalAgent(BaseAgent):
         *,
         weight: float = 0.5,
         min_bars: int = 50,
-        spy_bars: Optional[pd.DataFrame] = None,   # injected by caller if available
+        spy_bars: Optional[pd.DataFrame] = None,    # injected by caller if available
+        daily_bars: Optional[pd.DataFrame] = None,  # 1-day OHLCV; enables 200-SMA trend filter
     ) -> None:
         super().__init__(weight=weight)
-        self.min_bars = min_bars
-        self.spy_bars = spy_bars   # set externally each cycle: agent.spy_bars = spy_df
+        self.min_bars   = min_bars
+        self.spy_bars   = spy_bars    # set externally each cycle: agent.spy_bars = spy_df
+        self.daily_bars = daily_bars  # set externally: agent.daily_bars = daily_df
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
         bars = ctx.bars
@@ -201,6 +204,11 @@ class TechnicalAgent(BaseAgent):
         gap_val = self._gap_signal(df)
         if gap_val is not None:
             signals["gap"] = gap_val
+
+        # 5c. Trend Join: prev-day high breakout + HOD + pre-market high
+        tj_val = self._trend_join_score(df)
+        if tj_val is not None:
+            signals["trend_join"] = tj_val
 
         # 6. Candlestick Patterns (pandas-ta only)
         if _HAS_PANDAS_TA:
@@ -460,6 +468,11 @@ class TechnicalAgent(BaseAgent):
                 f"score {clean.get('gap', 50):.0f}",
                 f"{'Fade bias — gap expected to fill (small gap <0.5%)' if clean.get('gap', 50) < 50 else 'Continuation bias — gap likely holds (large gap >2%)'}",
             ),
+            "trend_join": (
+                "Trend Join",
+                f"score {clean.get('trend_join', 50):.0f}",
+                f"{'Breaking above prev-day high / HOD — trend continuation' if clean.get('trend_join', 50) > 60 else 'Breaking below prev-day low / LOD — trend breakdown' if clean.get('trend_join', 50) < 40 else 'Price inside prior-day range — no structural breakout'}",
+            ),
         }
         for key, sig_score in clean.items():
             if key not in _meta:
@@ -697,6 +710,108 @@ class TechnicalAgent(BaseAgent):
             else:
                 # Medium gap: mild continuation bias
                 return float(np.clip(50 + gap_pct * 4, 30, 70))
+        except Exception:
+            return None
+
+    def _trend_join_score(self, df: pd.DataFrame) -> Optional[float]:
+        """Trend Join Long/Short: structural breakout above prior-day high.
+
+        Bullish criteria (each = 1 pt):
+          1. Current price > prev-day high (key structural level breakout)
+          2. Price at/near intraday HOD (within 0.5% — strong upward momentum)
+          3. Price > pre-market high (confirms sustained momentum through RTH open)
+          4. Prev close > 200-day SMA via daily_bars (stock in primary uptrend)
+
+        Score: 50 + (bull_met / bull_total) * 40  → [50, 90] when bullish
+               50 - (bear_met / bear_total) * 40  → [10, 50] when bearish
+        Returns None if data is insufficient.
+        """
+        try:
+            et = ZoneInfo("America/New_York")
+            last_price = float(df["close"].iloc[-1])
+
+            # Partition intraday bars into today vs previous day
+            dates = [x.astimezone(et).date() for x in df.index]
+            all_dates = sorted(set(dates))
+            if len(all_dates) < 2:
+                return None
+
+            today_date = all_dates[-1]
+            prev_date  = all_dates[-2]
+            today_bars = df[[d == today_date for d in dates]]
+            prev_bars  = df[[d == prev_date  for d in dates]]
+
+            if today_bars.empty or prev_bars.empty:
+                return None
+
+            prev_high  = float(prev_bars["high"].max())
+            prev_low   = float(prev_bars["low"].min())
+            today_high = float(today_bars["high"].max())
+            today_low  = float(today_bars["low"].min())
+
+            # Pre-market high: bars strictly before 09:30 ET today
+            pm_high = None
+            try:
+                rth_open = today_bars.index[0].astimezone(et).replace(
+                    hour=9, minute=30, second=0, microsecond=0
+                )
+                pm_bars = today_bars[
+                    today_bars.index.map(lambda x: x.astimezone(et)) < rth_open
+                ]
+                if not pm_bars.empty:
+                    pm_high = float(pm_bars["high"].max())
+            except Exception:
+                pass
+
+            # 200-day SMA trend filter from daily_bars (optional)
+            in_uptrend   = None
+            in_downtrend = None
+            daily = self.daily_bars
+            if daily is not None and len(daily) >= 50:
+                try:
+                    sma_len = min(200, len(daily))
+                    sma = float(daily["close"].rolling(sma_len).mean().iloc[-1])
+                    last_daily = float(daily["close"].iloc[-1])
+                    in_uptrend   = last_daily > sma
+                    in_downtrend = last_daily < sma
+                except Exception:
+                    pass
+
+            # --- Bullish criteria ---
+            bull_met   = 0
+            bull_total = 2  # criteria 1+2 always available
+
+            if last_price > prev_high:
+                bull_met += 1
+            if last_price >= today_high * 0.995:
+                bull_met += 1
+            if pm_high is not None:
+                bull_total += 1
+                if last_price > pm_high:
+                    bull_met += 1
+            if in_uptrend is not None:
+                bull_total += 1
+                if in_uptrend:
+                    bull_met += 1
+
+            # --- Bearish criteria ---
+            bear_met   = 0
+            bear_total = 2
+
+            if last_price < prev_low:
+                bear_met += 1
+            if last_price <= today_low * 1.005:
+                bear_met += 1
+
+            bull_frac = bull_met / bull_total if bull_total > 0 else 0.0
+            bear_frac = bear_met / bear_total if bear_total > 0 else 0.0
+
+            if bull_frac > 0 and bull_frac >= bear_frac:
+                return float(np.clip(50.0 + bull_frac * 40.0, 50.0, 90.0))
+            if bear_frac > 0:
+                return float(np.clip(50.0 - bear_frac * 40.0, 10.0, 50.0))
+            return 50.0
+
         except Exception:
             return None
 
