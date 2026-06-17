@@ -231,7 +231,11 @@ export async function closePosition(creds: AlpacaCreds, symbol: string): Promise
   })
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText)
-    throw new Error(`Alpaca close position ${symbol} -> ${res.status}: ${text}`)
+    let msg = `HTTP ${res.status}`
+    try { const j = JSON.parse(text); msg = j.message ?? j.error ?? text } catch { msg = text || msg }
+    throw new Error(msg)
   }
-  return res.json()
+  const text = await res.text()
+  if (!text) return {} as AlpacaOrderResponse
+  return JSON.parse(text)
 }

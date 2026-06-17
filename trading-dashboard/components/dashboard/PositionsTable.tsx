@@ -311,12 +311,14 @@ export function PositionsTable({ positions, onClosed, pendingClose = new Set() }
     setClosing(symbol)
     try {
       const res  = await fetch(`/api/alpaca/positions/${encodeURIComponent(symbol)}`, { method: 'DELETE' })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.message ?? `${res.status}`)
-      toast.success(`${symbol} position closed`, { description: `Order ID: ${data.order?.id ?? 'submitted'}` })
+      let data: any = {}
+      try { data = await res.json() } catch { /* empty body */ }
+      if (res.status === 401) throw new Error('Session expired — please log out and log in again')
+      if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+      toast.success(`${symbol} close order submitted`, { description: `Order ID: ${data.order?.id ?? 'submitted'}` })
       onClosed?.(symbol)
     } catch (err: any) {
-      toast.error(`Failed to close ${symbol}`, { description: err.message })
+      toast.error(`Failed to close ${symbol}`, { description: err.message, duration: 8000 })
     } finally {
       setClosing(null)
     }

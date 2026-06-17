@@ -15,6 +15,7 @@ export async function DELETE(
     const order = await closePosition(creds, symbol)
     return NextResponse.json({ ok: true, symbol, order })
   } catch (err: any) {
-    return NextResponse.json({ message: err.message }, { status: 502 })
+    console.error(`[close-position] ${symbol}:`, err.message)
+    return NextResponse.json({ message: err.message ?? 'Unknown error' }, { status: 502 })
   }
 }
