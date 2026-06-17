@@ -1,6 +1,6 @@
 'use client'
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useRouter } from 'next/navigation'
+
 import {
   X, Loader2, ChevronDown, ChevronUp,
   TrendingUp, TrendingDown, Minus,
@@ -261,8 +261,6 @@ export function PositionsTable({ positions, onClosed }: Props) {
   const [tradeRecs,   setTradeRecs]   = useState<TradeRecommendation[]>([])
   const [refreshing,  setRefreshing]  = useState(false)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
-  const router = useRouter()
-
   // Fetch TP/SL context from bot server; fall back to localStorage
   const fetchCtx = useCallback(async () => {
     try {
@@ -284,19 +282,15 @@ export function PositionsTable({ positions, onClosed }: Props) {
   // Initial fetch
   useEffect(() => { fetchCtx() }, [fetchCtx])
 
-  // Auto-refresh P&L (via server component rerender) + context every 30 s
+  // Auto-refresh context every 30s (positions are managed by LiveDashboard)
   useEffect(() => {
-    const id = setInterval(() => {
-      router.refresh()
-      fetchCtx()
-    }, REFRESH_MS)
+    const id = setInterval(fetchCtx, REFRESH_MS)
     return () => clearInterval(id)
-  }, [router, fetchCtx])
+  }, [fetchCtx])
 
   // Manual refresh handler
   async function handleManualRefresh() {
     setRefreshing(true)
-    router.refresh()
     await fetchCtx()
     setLastRefresh(new Date())
     setRefreshing(false)
@@ -315,7 +309,6 @@ export function PositionsTable({ positions, onClosed }: Props) {
       if (!res.ok) throw new Error(data.message ?? `${res.status}`)
       toast.success(`${symbol} position closed`, { description: `Order ID: ${data.order?.id ?? 'submitted'}` })
       onClosed?.(symbol)
-      router.refresh()
     } catch (err: any) {
       toast.error(`Failed to close ${symbol}`, { description: err.message })
     } finally {

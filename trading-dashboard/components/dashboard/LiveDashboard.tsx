@@ -148,7 +148,15 @@ export function LiveDashboard({
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
         <SectorHeatmap sectors={sectors} />
-        <PositionsTable positions={positions} />
+        <PositionsTable
+          positions={positions}
+          onClosed={symbol => {
+            // Optimistic: remove immediately from UI
+            setPositions(prev => prev.filter(p => p.symbol !== symbol))
+            // Then sync stats (open_positions count) after brief delay for Alpaca to process
+            setTimeout(refreshFast, 2000)
+          }}
+        />
       </div>
     </>
   )
