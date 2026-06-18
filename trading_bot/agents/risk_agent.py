@@ -116,6 +116,31 @@ class RiskAgent(BaseAgent):
 
     # --- planning -------------------------------------------------------
 
+    def _effective_atr_multiples(self, backtest_mode: bool) -> tuple[float, float]:
+        """Live ATR stop/target multiples.
+
+        In LIVE trading, strategy_weights.json — written by the self-tuner and by
+        the optimizer's "Apply Optimal Params" action — overrides the configured
+        (env) values so tuning takes effect WITHOUT a redeploy. In backtests the
+        configured values are used verbatim, so the optimizer's per-combo ATR
+        params are never masked by the live file.
+        """
+        stop, target = self.cfg.atr_stop_multiple, self.cfg.atr_target_multiple
+        if backtest_mode:
+            return stop, target
+        try:
+            with open(_STRATEGY_WEIGHTS_FILE, encoding="utf-8") as f:
+                w = json.load(f)
+            # Only honor the file when tuning has been DELIBERATELY activated
+            # (optimizer Apply or an active self-tune). Otherwise fall back to the
+            # configured env values so baked-in defaults never shift live sizing.
+            if w.get("live_tuning_active"):
+                stop   = float(w.get("atr_stop_multiple", stop))
+                target = float(w.get("atr_target_multiple", target))
+        except Exception:
+            pass
+        return stop, target
+
     def build_plan(self, ctx: AnalysisContext, *, intended: Decision) -> Optional[RiskParameters]:
         if ctx.bars is None or ctx.bars.empty:
             return None
@@ -134,11 +159,12 @@ class RiskAgent(BaseAgent):
             logger.error("no account equity in context — refusing to build a plan")
             return None
 
+        stop_mult, target_mult = self._effective_atr_multiples(getattr(ctx, "backtest_mode", False))
         vol_mult = self._volatility_multiplier(atr, price)
-        kelly_mult = self._kelly_multiplier(self.cfg.atr_target_multiple / max(self.cfg.atr_stop_multiple, 0.1))
+        kelly_mult = self._kelly_multiplier(target_mult / max(stop_mult, 0.1))
         risk_usd = equity * self.cfg.max_risk_per_trade_pct * vol_mult * kelly_mult
-        stop_dist = atr * self.cfg.atr_stop_multiple
-        target_dist = self._target_dist(ctx.bars, intended, price, atr)
+        stop_dist = atr * stop_mult
+        target_dist = self._target_dist(ctx.bars, intended, price, atr, target_mult)
         if target_dist <= 0:
             return None
 
@@ -215,6 +241,7 @@ class RiskAgent(BaseAgent):
         intended: Decision,
         price: float,
         atr: float,
+        target_mult: Optional[float] = None,
     ) -> float:
         """Target distance capped by intraday structure.
 
@@ -225,7 +252,7 @@ class RiskAgent(BaseAgent):
         When price is already at/through the level (breakout territory, within
         0.25×ATR), there is no overhead structure — use the full ATR target.
         """
-        atr_dist = atr * self.cfg.atr_target_multiple
+        atr_dist = atr * (target_mult if target_mult is not None else self.cfg.atr_target_multiple)
 
         session = bars
         if hasattr(bars.index, "date") and len(bars.index) > 0:

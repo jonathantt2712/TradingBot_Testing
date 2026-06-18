@@ -41,6 +41,9 @@ _ET = ZoneInfo("America/New_York")
 # Audit trail: one JSON line per decision/fill, next to the other debug logs.
 _AUDIT_FILE = Path(__file__).parents[2] / "logs" / "decisions.jsonl"
 
+# Runtime tuning file — written by the self-tuner and the optimizer's Apply action.
+_WEIGHTS_FILE = Path(__file__).parents[1] / "data" / "strategy_weights.json"
+
 
 class PortfolioManager:
     def __init__(
@@ -148,7 +151,9 @@ class PortfolioManager:
             retail_surcharge = 0.0
             if technical is not None and technical.data:
                 retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
-            decision = self._direction(composite, retail_surcharge=retail_surcharge)
+            long_base, short_base = self._effective_thresholds(getattr(ctx, "backtest_mode", False))
+            decision = self._direction(composite, retail_surcharge=retail_surcharge,
+                                       long_base=long_base, short_base=short_base)
 
         if risk.veto:
             logger.info("%s vetoed by Risk: %s", ctx.ticker, risk.rationale)
@@ -478,11 +483,36 @@ class PortfolioManager:
 
         return result
 
+    def _effective_thresholds(self, backtest_mode: bool) -> tuple[float, float]:
+        """Live LONG/SHORT entry thresholds.
+
+        In LIVE trading, strategy_weights.json (written by the optimizer's "Apply
+        Optimal Params" action) overrides the configured (env) thresholds so tuned
+        params take effect WITHOUT a redeploy. In backtests the configured values
+        are used verbatim, so the optimizer's per-combo thresholds are never masked
+        by the live file.
+        """
+        long_t  = self._thresholds.long_above
+        short_t = self._thresholds.short_below
+        if backtest_mode:
+            return long_t, short_t
+        try:
+            w = json.loads(_WEIGHTS_FILE.read_text())
+            # Only honor the file when tuning is deliberately active (see RiskAgent).
+            if w.get("live_tuning_active"):
+                long_t  = float(w.get("long_threshold",  long_t))
+                short_t = float(w.get("short_threshold", short_t))
+        except Exception:
+            pass
+        return long_t, short_t
+
     def _direction(
         self,
         composite: float,
         *,
         retail_surcharge: float = 0.0,
+        long_base: Optional[float] = None,
+        short_base: Optional[float] = None,
     ) -> Decision:
         """Map composite score to direction, applying regime threshold shifts.
 
@@ -490,8 +520,10 @@ class PortfolioManager:
         +surcharge on the entry threshold. These setups are exploitable intraday
         (we are already day-trade-only) but require higher conviction to enter.
         """
-        long_thr  = self._thresholds.long_above  + retail_surcharge
-        short_thr = self._thresholds.short_below - retail_surcharge
+        base_long  = long_base  if long_base  is not None else self._thresholds.long_above
+        base_short = short_base if short_base is not None else self._thresholds.short_below
+        long_thr  = base_long  + retail_surcharge
+        short_thr = base_short - retail_surcharge
         if self._regime is not None:
             long_thr  += self._regime.long_delta
             short_thr += self._regime.short_delta
