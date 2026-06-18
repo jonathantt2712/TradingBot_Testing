@@ -9,11 +9,11 @@ export async function GET() {
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   try {
-    const data = await botGet<{ results: unknown; optimal: unknown; configText: string | null }>('/api/backtest')
+    const data = await botGet<{ results: unknown; optimal: unknown; optimizer: unknown; configText: string | null }>('/api/backtest')
     return NextResponse.json(data, { headers: { 'Cache-Control': 'no-store' } })
   } catch {
     return NextResponse.json(
-      { results: null, optimal: null, configText: null },
+      { results: null, optimal: null, optimizer: null, configText: null },
       { status: 502 },
     )
   }

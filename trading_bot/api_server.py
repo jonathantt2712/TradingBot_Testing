@@ -2540,6 +2540,7 @@ def get_backtest():
     return {
         "results":    read_json("backtest_results.json"),
         "optimal":    read_json("backtest_optimal.json"),
+        "optimizer":  read_json("optimization_results.json"),  # full grid for heatmaps
         "configText": read_text("OPTIMAL_CONFIG.txt"),
     }
 

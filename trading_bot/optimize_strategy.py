@@ -505,8 +505,9 @@ async def run(
         "days":            days,
         "objective":       objective,
         "validation":      mode_note,
-        "threshold_grid":  thresh_results[:10],
-        "atr_grid":        atr_results[:10],
+        # Full grids (not just top 10) so the dashboard heatmap shows every cell.
+        "threshold_grid":  thresh_results,
+        "atr_grid":        atr_results,
         "best":            best_overall,
     }, indent=2))
     print(f"Full results saved to {RESULTS_FILE}\n")

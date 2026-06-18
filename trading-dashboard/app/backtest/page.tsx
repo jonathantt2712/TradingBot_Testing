@@ -5,6 +5,7 @@ import {
   RefreshCw, CheckCircle2, XCircle, Clock, Activity, Play, Loader2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { EquityCurve, ParamHeatmap, type BacktestTrade } from '@/components/backtest/BacktestCharts'
 
 interface TickerStat {
   ticker:   string
@@ -27,13 +28,32 @@ interface BacktestData {
   max_drawdown:   number
   ev_per_trade?:  number
   by_ticker:      TickerStat[]
+  trades?:        BacktestTrade[]
   optimal_params?: Record<string, number>
   optimal_window_days?: number
+}
+
+interface GridRecord {
+  params: Record<string, number>
+  oos?:        Record<string, number>
+  in_sample?:  Record<string, number>
+  [key: string]: unknown
+}
+
+interface OptimizerData {
+  run_at?:         string
+  days?:           number
+  objective?:      string
+  validation?:     string
+  threshold_grid?: GridRecord[]
+  atr_grid?:       GridRecord[]
+  best?:           GridRecord
 }
 
 interface BacktestPayload {
   results:    BacktestData | null
   optimal:    BacktestData | null
+  optimizer:  OptimizerData | null
   configText: string | null
 }
 
@@ -449,6 +469,51 @@ export default function BacktestPage() {
           {data.results && !data.optimal && (
             <DatasetPanel data={data.results} title="Latest Backtest (30-day)" />
           )}
+
+          {/* Equity curve — cumulative P&L over the backtest trade sequence */}
+          {data.results?.trades && data.results.trades.length > 0 && (
+            <EquityCurve trades={data.results.trades} title="Equity Curve — Latest Backtest" />
+          )}
+
+          {/* Optimizer parameter heatmaps */}
+          {data.optimizer && (data.optimizer.threshold_grid?.length || data.optimizer.atr_grid?.length) ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <h2 className="text-sm font-bold text-primary">Optimizer Grid</h2>
+                {data.optimizer.objective && (
+                  <span className="text-[11px] text-muted">
+                    objective: <span className="text-bull font-medium">{data.optimizer.objective}</span>
+                  </span>
+                )}
+                {data.optimizer.validation && (
+                  <span className="text-[11px] text-muted">· {data.optimizer.validation}</span>
+                )}
+                {data.optimizer.days && (
+                  <span className="text-[11px] text-muted">· {data.optimizer.days}d window</span>
+                )}
+              </div>
+              <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                {data.optimizer.threshold_grid && data.optimizer.threshold_grid.length > 0 && (
+                  <ParamHeatmap
+                    grid={data.optimizer.threshold_grid}
+                    xKey="SHORT_THRESHOLD" yKey="LONG_THRESHOLD"
+                    xLabel="SHORT" yLabel="LONG"
+                    title="Entry Thresholds"
+                    subtitle="Held-out (OOS) profit per LONG × SHORT threshold combo"
+                  />
+                )}
+                {data.optimizer.atr_grid && data.optimizer.atr_grid.length > 0 && (
+                  <ParamHeatmap
+                    grid={data.optimizer.atr_grid}
+                    xKey="ATR_TARGET_MULTIPLE" yKey="ATR_STOP_MULTIPLE"
+                    xLabel="TARGET ×ATR" yLabel="STOP ×ATR"
+                    title="Stop / Target Multiples"
+                    subtitle="Held-out (OOS) profit per stop × target ATR combo"
+                  />
+                )}
+              </div>
+            </div>
+          ) : null}
 
           {/* No data */}
           {!data.optimal && !data.results && (
