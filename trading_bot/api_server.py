@@ -691,6 +691,10 @@ def _update_strategy_weights() -> None:
     weights["update_count"]   = weights.get("update_count", 0) + 1
     weights["last_updated"]   = datetime.utcnow().isoformat()
 
+    # NOTE: the self-tuner refines ATR/score params but does NOT activate live
+    # tuning on its own — only a deliberate, OOS-validated optimizer Apply flips
+    # live_tuning_active (avoids stepping live sizing from the DEFAULT baseline).
+    # Once Apply has activated tuning, these refinements build on the applied values.
     if win_rate > 0.60:
         weights["min_score"]            = max(30,  weights["min_score"] - 1)
         weights["time_window_minutes"]   = min(60,  weights["time_window_minutes"] + 2)
@@ -827,6 +831,14 @@ _backtest_stats: Dict[str, Any] = {
 _optimizer_stats: Dict[str, Any] = {
     "last_run_at":   None,
     "last_status":   None,   # "ok" | "failed" | "timeout"
+    "error_count":   0,
+    "last_error":    None,
+    "running":       False,
+}
+
+_challenge_stats: Dict[str, Any] = {
+    "last_run_at":   None,
+    "last_status":   None,
     "error_count":   0,
     "last_error":    None,
     "running":       False,
@@ -1559,6 +1571,64 @@ async def _run_optimizer() -> None:
         })
     finally:
         _optimizer_stats["running"] = False
+
+
+_CHALLENGE_SCRIPT = _HERE / "challenge_runner.py"
+
+
+async def _run_challenge(mode: str = "run") -> None:
+    """Run challenge_runner.py as a subprocess. mode: 'run' | 'list' | 'status'.
+
+    Writes challenge_results.json (read by the dashboard). Needs AI4Trade creds;
+    without them the script exits cleanly and records an auth error.
+    """
+    if not _CHALLENGE_SCRIPT.exists():
+        logger.warning("challenge_runner.py not found — skipping")
+        return
+    if _challenge_stats.get("running"):
+        logger.info("Challenge runner already running — ignoring trigger")
+        return
+    _challenge_stats["running"] = True
+    args = [sys.executable, str(_CHALLENGE_SCRIPT)]
+    if mode == "list":
+        args.append("--list")
+    elif mode == "status":
+        args.append("--status")
+    logger.info("Challenge runner starting (mode=%s)…", mode)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(_HERE),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=600)  # 10 min max
+        if proc.returncode == 0:
+            _challenge_stats.update({"last_run_at": datetime.utcnow().isoformat(),
+                                     "last_status": "ok", "last_error": None})
+        else:
+            tail = (stdout or b"").decode()[-500:]
+            logger.error("Challenge runner failed (rc=%d): %s", proc.returncode, tail)
+            _challenge_stats.update({"last_run_at": datetime.utcnow().isoformat(),
+                                     "last_status": "failed",
+                                     "error_count": _challenge_stats["error_count"] + 1,
+                                     "last_error": tail})
+    except asyncio.TimeoutError:
+        logger.error("Challenge runner timed out — killed")
+        if proc is not None:
+            proc.kill()
+        _challenge_stats.update({"last_run_at": datetime.utcnow().isoformat(),
+                                 "last_status": "timeout",
+                                 "error_count": _challenge_stats["error_count"] + 1,
+                                 "last_error": "timed out after 10 min"})
+    except Exception:
+        logger.exception("Challenge runner subprocess error")
+        _challenge_stats.update({"last_run_at": datetime.utcnow().isoformat(),
+                                 "last_status": "failed",
+                                 "error_count": _challenge_stats["error_count"] + 1})
+    finally:
+        _challenge_stats["running"] = False
 
 
 async def _eod_snapshot(session: aiohttp.ClientSession) -> None:
@@ -2560,6 +2630,99 @@ async def run_optimizer_now():
     return {"status": "optimizer_triggered", "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.post("/api/optimize/apply", dependencies=[Depends(_verify_bot_secret)])
+def apply_optimal_params():
+    """Apply the optimizer's best params to LIVE trading — no redeploy.
+
+    Writes the tuned LONG/SHORT thresholds + ATR multiples into
+    strategy_weights.json, which the live RiskAgent and PortfolioManager read at
+    runtime. Guard: refuses to apply params whose out-of-sample (held-out) profit
+    is not positive — those would not be expected to make money live.
+    """
+    try:
+        data = json.loads((_REPO_ROOT / "optimization_results.json").read_text())
+    except Exception:
+        return {"status": "error", "reason": "no optimizer results found — run the optimizer first"}
+
+    best   = data.get("best") or {}
+    params = best.get("params") or {}
+    if not params:
+        return {"status": "error", "reason": "optimizer results have no best params"}
+
+    metrics   = best.get("oos") or best        # OOS metrics when walk-forward validated
+    validated = "oos" in best
+    oos_pnl   = metrics.get("total_pnl")
+    if oos_pnl is None:
+        return {"status": "error", "reason": "optimizer results missing profit metric"}
+    if oos_pnl <= 0:
+        return {
+            "status": "rejected",
+            "reason": f"{'out-of-sample' if validated else 'backtest'} profit is "
+                      f"${oos_pnl:.0f} (not positive) — refusing to apply params that "
+                      f"would not be profitable live. Re-run with a longer --days or wider grid.",
+        }
+
+    mapping = {
+        "LONG_THRESHOLD":      "long_threshold",
+        "SHORT_THRESHOLD":     "short_threshold",
+        "ATR_STOP_MULTIPLE":   "atr_stop_multiple",
+        "ATR_TARGET_MULTIPLE": "atr_target_multiple",
+    }
+    weights = _load_weights()
+    applied: Dict[str, float] = {}
+    for src, dst in mapping.items():
+        if src in params:
+            weights[dst] = float(params[src])
+            applied[dst] = float(params[src])
+    weights["applied_from_optimizer_at"] = datetime.utcnow().isoformat()
+    weights["applied_oos_pnl"]           = round(float(oos_pnl), 2)
+    weights["live_tuning_active"]        = True   # let the live bot honor these params
+    _save_weights(weights)
+
+    logger.info("Applied optimizer params to live config: %s (OOS PnL=$%.0f)", applied, oos_pnl)
+    return {
+        "status":    "applied",
+        "applied":   applied,
+        "oos_pnl":   round(float(oos_pnl), 2),
+        "validated": validated,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/api/optimize/applied", dependencies=[Depends(_verify_bot_secret)])
+def get_applied_params():
+    """Show which tuned params are currently live (from strategy_weights.json)."""
+    w = _load_weights()
+    return {
+        "long_threshold":     w.get("long_threshold"),
+        "short_threshold":    w.get("short_threshold"),
+        "atr_stop_multiple":  w.get("atr_stop_multiple"),
+        "atr_target_multiple": w.get("atr_target_multiple"),
+        "applied_from_optimizer_at": w.get("applied_from_optimizer_at"),
+        "applied_oos_pnl":    w.get("applied_oos_pnl"),
+    }
+
+
+@app.post("/api/challenge/run", dependencies=[Depends(_verify_bot_secret)])
+async def run_challenge_now(mode: str = "run"):
+    """Trigger the AI4Trade challenge runner. mode: run | list | status."""
+    if _challenge_stats.get("running"):
+        return {"status": "already_running", "timestamp": datetime.utcnow().isoformat()}
+    asyncio.create_task(_run_challenge(mode if mode in ("run", "list", "status") else "run"))
+    return {"status": "challenge_triggered", "mode": mode, "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/challenges", dependencies=[Depends(_verify_bot_secret)])
+def get_challenges():
+    """Return the latest challenge results + runner status."""
+    results = None
+    try:
+        results = json.loads((_REPO_ROOT / "challenge_results.json").read_text())
+    except Exception:
+        pass
+    return {"results": results, "status": _challenge_stats}
+
+
 @app.get("/api/scan-stats", dependencies=[Depends(_verify_bot_secret)])
 def get_scan_stats():
     """Return today's scan activity counters and market status."""
@@ -2588,6 +2751,7 @@ def health():
         "timestamp": datetime.utcnow().isoformat(),
         "backtest":  _backtest_stats,
         "optimizer": _optimizer_stats,
+        "challenge": _challenge_stats,
         "circuit_breaker": _circuit_breaker,
         "keys": {
             "gemini":    gemini_set,

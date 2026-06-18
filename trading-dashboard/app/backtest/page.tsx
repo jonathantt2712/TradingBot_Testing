@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EquityCurve, ParamHeatmap, type BacktestTrade } from '@/components/backtest/BacktestCharts'
+import { ChallengePanel } from '@/components/backtest/ChallengePanel'
 
 interface TickerStat {
   ticker:   string
@@ -215,6 +216,8 @@ export default function BacktestPage() {
   const [error,      setError]      = useState<string | null>(null)
   const [running,    setRunning]    = useState(false)
   const [optimizing, setOptimizing] = useState(false)
+  const [applying,   setApplying]   = useState(false)
+  const [applyMsg,   setApplyMsg]   = useState<{ ok: boolean; text: string } | null>(null)
   const [health,     setHealth]     = useState<BacktestHealth | null>(null)
   const [optHealth,  setOptHealth]  = useState<BacktestHealth | null>(null)
   const [rejections, setRejections] = useState<RejectionRecord[]>([])
@@ -302,6 +305,27 @@ export default function BacktestPage() {
     }, 15_000)
   }
 
+  async function applyOptimal() {
+    if (applying) return
+    setApplying(true); setApplyMsg(null)
+    try {
+      const res = await fetch('/api/optimize/apply', { method: 'POST' })
+      const d = await res.json()
+      if (d.status === 'applied') {
+        const parts = Object.entries(d.applied || {}).map(([k, v]) => `${k}=${v}`).join(', ')
+        setApplyMsg({ ok: true, text: `Applied to live trading (OOS $${d.oos_pnl}): ${parts}` })
+      } else if (d.status === 'rejected') {
+        setApplyMsg({ ok: false, text: `Rejected — ${d.reason}` })
+      } else {
+        setApplyMsg({ ok: false, text: d.reason || 'Could not apply params' })
+      }
+    } catch {
+      setApplyMsg({ ok: false, text: 'Failed to reach the bot' })
+    } finally {
+      setApplying(false)
+    }
+  }
+
   useEffect(() => { load() }, [])
   useEffect(() => () => {
     if (pollRef.current) clearInterval(pollRef.current)
@@ -342,6 +366,21 @@ export default function BacktestPage() {
             {optimizing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Target className="h-3.5 w-3.5" />}
             {optimizing ? 'Optimizing...' : 'Run Optimizer'}
           </button>
+          {data?.optimizer?.best && (
+            <button
+              onClick={applyOptimal}
+              disabled={applying}
+              title="Apply the optimizer's best params to LIVE trading (no redeploy). Guarded against unprofitable params."
+              className={cn(
+                'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all',
+                'bg-caution/15 border border-caution/30 text-caution hover:bg-caution/25',
+                'disabled:opacity-50 disabled:cursor-not-allowed',
+              )}
+            >
+              {applying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+              {applying ? 'Applying...' : 'Apply to Live'}
+            </button>
+          )}
           <button onClick={load} disabled={loading} className="btn-ghost text-xs">
             <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
             Refresh
@@ -406,6 +445,19 @@ export default function BacktestPage() {
           <span className="text-bear font-semibold">Failures: {optHealth!.error_count}</span>
         )}
       </div>
+
+      {/* Apply-to-live result */}
+      {applyMsg && (
+        <div className={cn(
+          'rounded-xl border px-4 py-3 flex items-start gap-2.5 text-xs',
+          applyMsg.ok ? 'border-bull/30 bg-bull/5' : 'border-bear/30 bg-bear/5',
+        )}>
+          {applyMsg.ok
+            ? <CheckCircle2 className="h-4 w-4 text-bull shrink-0 mt-0.5" />
+            : <XCircle className="h-4 w-4 text-bear shrink-0 mt-0.5" />}
+          <p className={applyMsg.ok ? 'text-bull' : 'text-bear'}>{applyMsg.text}</p>
+        </div>
+      )}
 
       {rejections.length > 0 && (
         <div className="rounded-xl border border-bg-border bg-bg-card px-4 py-3">
@@ -514,6 +566,9 @@ export default function BacktestPage() {
               </div>
             </div>
           ) : null}
+
+          {/* AI4Trade challenges */}
+          <ChallengePanel />
 
           {/* No data */}
           {!data.optimal && !data.results && (
