@@ -199,6 +199,25 @@ class PortfolioManager:
                     plan.qty = float(int(plan.qty * 0.7))
                     logger.info("%s VIX=%.1f > 30: position scaled 70%%", ctx.ticker, vix)
 
+        # Conviction scaling: boost size up to +20% when composite is far from threshold.
+        # Score ≥85 (LONG) or ≤15 (SHORT) → +20%.  Near-threshold → 0% boost.
+        # Respects max_position_pct cap to avoid over-sizing on any single trade.
+        if plan is not None and plan.qty > 0:
+            if decision is Decision.LONG:
+                conv = min(0.20, max(0.0, (composite - 65.0) / 100.0))
+            else:  # SHORT
+                conv = min(0.20, max(0.0, (35.0 - composite) / 100.0))
+            if conv > 0:
+                equity = float(ctx.account.get("equity", 0.0) or 0.0)
+                max_qty = (equity * self.settings.risk.max_position_pct / plan.entry) if plan.entry > 0 else plan.qty
+                new_qty = float(int(min(plan.qty * (1.0 + conv), max_qty)))
+                if new_qty > plan.qty:
+                    logger.info(
+                        "%s conviction boost: composite=%.1f → +%.0f%% size (%g→%g shares)",
+                        ctx.ticker, composite, conv * 100, plan.qty, new_qty,
+                    )
+                    plan.qty = new_qty
+
         if plan is None or plan.qty <= 0 or plan.risk_reward < self.settings.risk.min_risk_reward:
             logger.info("%s downgraded to PASS: no viable plan", ctx.ticker)
             return TradeDecision(

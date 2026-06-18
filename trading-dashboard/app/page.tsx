@@ -13,7 +13,7 @@ import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/t
 import type { AlpacaAccount } from '@/lib/alpaca'
 
 async function loadDashboard(creds: AlpacaCreds | null) {
-  const [account, positions, history, stats, pnl, regime, sectors] = await Promise.allSettled([
+  const [account, positions, history, stats, pnl, regime, sectors, health] = await Promise.allSettled([
     creds ? getAccount(creds) : Promise.reject(new Error('no creds')),
     creds ? getPositions(creds) : Promise.reject(new Error('no creds')),
     creds ? getPortfolioHistory(creds, '1A', '1D') : Promise.reject(new Error('no creds')),
@@ -21,6 +21,7 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     botGet<PnLPoint[]>('/api/pnl'),
     botGet<RegimeInfo>('/api/regime'),
     botGet<SectorStat[]>('/api/sectors'),
+    botGet<{ trading?: { mode_label?: string; execute_live?: boolean; paper_mode?: boolean } }>('/api/health'),
   ])
 
   if (account.status === 'rejected') {
@@ -51,6 +52,10 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     resolvedStats.open_positions = positions.value.length
   }
 
+  const tradingMode = health.status === 'fulfilled'
+    ? (health.value?.trading?.mode_label ?? 'DRY RUN')
+    : 'DRY RUN'
+
   return {
     stats:        resolvedStats,
     account:      account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
@@ -60,12 +65,13 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     sectors:      sectors.status  === 'fulfilled' ? sectors.value  : demoSectors(),
     positions:    positions.status === 'fulfilled' ? positions.value : [],
     live:         account.status === 'fulfilled',
+    tradingMode,
   }
 }
 
 export default async function DashboardPage() {
   const creds = await getAlpacaCreds()
-  const { stats, account, accountError, pnl, regime, sectors, positions, live } = await loadDashboard(creds)
+  const { stats, account, accountError, pnl, regime, sectors, positions, live, tradingMode } = await loadDashboard(creds)
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">
@@ -85,7 +91,7 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      <AccountBar account={account} error={accountError} />
+      <AccountBar account={account} error={accountError} tradingMode={tradingMode} />
 
       <LiveDashboard
         initialStats={stats}
