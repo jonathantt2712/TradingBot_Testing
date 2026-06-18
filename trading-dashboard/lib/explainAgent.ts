@@ -190,6 +190,24 @@ function humanizeSqueeze(r: string): string {
   return r
 }
 
+function humanizeMacro(r: string): string {
+  if (/fetch error/i.test(r))   return 'Macro data unavailable — Yahoo Finance fetch failed.'
+  const lean = r.match(/macro (bullish|bearish|neutral)/)
+  if (!lean) return r
+  const signals: string[] = []
+  const btc    = r.match(/BTC_7d=([+-][\d.]+)%/)
+  const qqq    = r.match(/QQQ_20d=([+-][\d.]+)%/)
+  const spread = r.match(/spread=([+-][\d.]+)%/)
+  const sh     = r.match(/safe_haven=([+-][\d.]+)%/)
+  if (btc)    signals.push(`BTC ${parseFloat(btc[1]) > 0 ? 'up' : 'down'} ${Math.abs(parseFloat(btc[1])).toFixed(1)}% (7d)`)
+  if (qqq)    signals.push(`QQQ ${parseFloat(qqq[1]) > 0 ? 'up' : 'down'} ${Math.abs(parseFloat(qqq[1])).toFixed(1)}% (20d)`)
+  if (spread) signals.push(`growth ${parseFloat(spread[1]) > 0 ? 'leads' : 'lags'} defensives by ${Math.abs(parseFloat(spread[1])).toFixed(1)}%`)
+  if (sh)     signals.push(`safe havens ${parseFloat(sh[1]) > 0 ? 'rising' : 'falling'} ${Math.abs(parseFloat(sh[1])).toFixed(1)}% (20d)`)
+  const body = signals.length ? signals.join(', ') + '.' : 'No signal data.'
+  const prefix = lean[1] === 'bullish' ? 'Risk-on environment' : lean[1] === 'bearish' ? 'Risk-off environment' : 'Neutral macro backdrop'
+  return `${prefix}: ${body}`
+}
+
 /** Returns a plain-English explanation for an agent's rationale, or null if there's nothing to translate. */
 export function humanizeRationale(role: string, rationale?: string): string | null {
   if (!rationale) return null
@@ -202,6 +220,7 @@ export function humanizeRationale(role: string, rationale?: string): string | nu
     case 'liquid':      return humanizeLiquid(rationale)
     case 'insider':     return humanizeInsider(rationale)
     case 'squeeze':     return humanizeSqueeze(rationale)
+    case 'macro':       return humanizeMacro(rationale)
     default:            return rationale
   }
 }

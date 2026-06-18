@@ -32,6 +32,7 @@ from config.settings import Settings  # noqa: E402
 from core.enums import RunMode  # noqa: E402
 from agents.decision_agent import DecisionAgent  # noqa: E402
 from agents.fundamental_agent import FundamentalAgent  # noqa: E402
+from agents.macro_agent import MacroSignalAgent  # noqa: E402
 from agents.liquid_agent import LiquidAgent  # noqa: E402
 from agents.regime_agent import detect_regime  # noqa: E402
 from agents.risk_agent import RiskAgent  # noqa: E402
@@ -108,6 +109,7 @@ def build_manager(
     news = build_news(settings, ai4)
     live_extras = include_live_only_agents
     squeeze_agent = SqueezeAgent(weight=settings.weights.squeeze) if include_squeeze else None
+    macro_agent   = MacroSignalAgent(weight=settings.weights.macro)
     return PortfolioManager(
         settings=settings,
         broker=broker,
@@ -128,6 +130,7 @@ def build_manager(
         insider=InsiderAgent(weight=settings.weights.insider)
             if live_extras and include_insider and settings.weights.insider > 0 else None,
         squeeze=squeeze_agent,
+        macro=macro_agent,
         publisher=publisher,
         decision_agent=DecisionAgent(
             anthropic_api_key=settings.anthropic_api_key,

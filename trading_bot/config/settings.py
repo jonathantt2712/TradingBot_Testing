@@ -30,6 +30,7 @@ class AgentWeights:
     social:      float = 0.13
     insider:     float = 0.10   # congressional trading intelligence
     squeeze:     float = 0.08   # FINRA short volume squeeze detector
+    macro:       float = 0.10   # AI-Trader market-intel macro signals
 
     def as_map(self) -> Mapping[str, float]:
         raw = {
@@ -40,6 +41,7 @@ class AgentWeights:
             "social":      self.social,
             "insider":     self.insider,
             "squeeze":     self.squeeze,
+            "macro":       self.macro,
         }
         total = sum(raw.values())
         if total <= 0:
