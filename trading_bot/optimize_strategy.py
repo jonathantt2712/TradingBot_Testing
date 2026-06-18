@@ -1,20 +1,26 @@
-"""Strategy parameter optimizer — grid search over key thresholds and ATR multiples.
+"""Strategy parameter optimizer — maximises live trading profit.
 
 Usage (from trading_bot/ directory):
     python optimize_strategy.py
-    python optimize_strategy.py --days 14 --tickers NVDA TSLA AAPL MSFT AMD
-    python optimize_strategy.py --days 14 --phase thresholds
-    python optimize_strategy.py --days 14 --phase atr
+    python optimize_strategy.py --days 60 --tickers NVDA TSLA AAPL MSFT AMD
+    python optimize_strategy.py --objective ev_per_trade
+    python optimize_strategy.py --no-validate        # full-window (overfits)
 
-Two-phase search:
+Two-phase grid search:
   Phase 1 (thresholds): Grid over LONG_THRESHOLD × SHORT_THRESHOLD.
   Phase 2 (atr):        Grid over ATR_STOP_MULTIPLE × ATR_TARGET_MULTIPLE
                         using the best thresholds found in Phase 1.
 
-Bars are fetched ONCE and reused across all parameter combos — ~10× faster
-than re-fetching per combination.
+Walk-forward validation (default ON): each combo is TUNED on the first 70% of the
+window and RANKED by its objective on the held-out last 30%. This is the honest
+estimate of live performance — picking params by in-sample profit alone overfits
+and loses money live. The report flags any set whose OOS profit collapses vs
+in-sample.
 
-Results written to optimization_results.json (ranked by Sharpe).
+Objective (default total_pnl = raw trading profit; also ev_per_trade /
+profit_factor / sharpe). Bars are fetched ONCE and reused across all combos.
+
+Results written to optimization_results.json.
 """
 from __future__ import annotations
 
@@ -55,6 +61,7 @@ from backtest_30day import (
     backtest_ticker,
     calc_summary,
     SLIPPAGE_PCT,
+    LOOKBACK_BARS,
 )
 from bootstrap import build_manager
 
@@ -66,8 +73,22 @@ logging.basicConfig(
 logger = logging.getLogger("opt")
 logging.getLogger("opt").setLevel(logging.INFO)
 
-RESULTS_FILE = _here.parent / "optimization_results.json"
-MIN_TRADES   = 20   # discard combos with fewer trades (not statistically meaningful)
+RESULTS_FILE   = _here.parent / "optimization_results.json"
+MIN_TRADES     = 20   # min in-sample trades (statistical significance)
+MIN_OOS_TRADES = 6    # min out-of-sample trades to trust the validation number
+SPLIT_FRAC     = 0.70 # walk-forward: tune on first 70%, validate on last 30%
+
+# Objectives — all "higher is better". Default: total realized P&L (raw trading profit).
+OBJECTIVES = ("total_pnl", "ev_per_trade", "profit_factor", "sharpe")
+_WORST     = float("-inf")
+
+# Metrics kept per split in the results file / tables (drop the heavy trades list).
+_SLIM_KEYS = ("total_trades", "win_rate", "total_pnl", "ev_per_trade",
+              "sharpe", "profit_factor", "max_drawdown")
+
+
+def _slim(summary: dict) -> dict:
+    return {k: summary.get(k) for k in _SLIM_KEYS}
 
 # ── Parameter grids ────────────────────────────────────────────────────────────
 
@@ -171,71 +192,111 @@ async def _fetch_all(
     return bars_map, spy_bars
 
 
+# ── Walk-forward split ─────────────────────────────────────────────────────────
+
+def _split_caches(bars_cache: dict, frac: float) -> tuple[dict, dict]:
+    """Split each ticker's bars by time: first `frac` = in-sample, rest = OOS.
+
+    The OOS slice keeps LOOKBACK_BARS of history before the split so the first
+    out-of-sample evaluation still has its full agent lookback window (and no
+    in-sample trade is double-counted — trades are only opened from bar
+    LOOKBACK_BARS onward, which for OOS is exactly the split point).
+    """
+    is_cache, oos_cache = {}, {}
+    for tk, bars in bars_cache.items():
+        n = len(bars)
+        split = int(n * frac)
+        if split <= LOOKBACK_BARS or (n - split) <= LOOKBACK_BARS:
+            # Not enough data to form both halves with a full lookback — keep
+            # it whole in the in-sample set so it still contributes there.
+            is_cache[tk] = bars
+            continue
+        is_cache[tk]  = bars.iloc[:split]
+        oos_cache[tk] = bars.iloc[split - LOOKBACK_BARS:]
+    return is_cache, oos_cache
+
+
+# ── Combo evaluation (in-sample + optional OOS) ────────────────────────────────
+
+async def _evaluate(
+    params: dict,
+    tickers: list[str],
+    spy_bars,
+    *,
+    objective: str,
+    use_llm: bool,
+    is_cache: dict,
+    oos_cache: Optional[dict],
+) -> dict:
+    """Evaluate one param set. Returns a record with a `rank_value` for sorting.
+
+    When `oos_cache` is provided (walk-forward mode) the record is ranked by the
+    objective measured on the HELD-OUT data — the honest estimate of live profit.
+    Otherwise it's ranked on the full-window in-sample number.
+    """
+    is_sum = await _eval_combo(params, tickers, is_cache, spy_bars, use_llm)
+
+    if oos_cache is None:
+        rec = dict(is_sum)
+        rec["params"]     = params
+        rec["rank_value"] = is_sum.get(objective, _WORST) or _WORST
+        rec["trades_ok"]  = is_sum.get("total_trades", 0) >= MIN_TRADES
+        return rec
+
+    oos_sum = await _eval_combo(params, tickers, oos_cache, spy_bars, use_llm)
+    rec = {
+        "params":     params,
+        "in_sample":  _slim(is_sum),
+        "oos":        _slim(oos_sum),
+        "rank_value": oos_sum.get(objective, _WORST) or _WORST,
+        "trades_ok": (is_sum.get("total_trades", 0)  >= MIN_TRADES and
+                      oos_sum.get("total_trades", 0) >= MIN_OOS_TRADES),
+    }
+    return rec
+
+
 # ── Grid runners ───────────────────────────────────────────────────────────────
 
-async def _run_threshold_grid(
+async def _run_grid(
+    label: str,
+    combos: list[dict],
     tickers: list[str],
-    bars_cache: dict,
     spy_bars,
-    fixed_atr_stop: float = 2.0,
-    fixed_atr_target: float = 4.0,
-    use_llm: bool = False,
+    *,
+    objective: str,
+    use_llm: bool,
+    is_cache: dict,
+    oos_cache: Optional[dict],
 ) -> list[dict]:
+    logger.info("%s: %d combos (objective=%s, %s)",
+                label, len(combos), objective,
+                "walk-forward OOS" if oos_cache is not None else "full-window")
+    results = []
+    for i, params in enumerate(combos, 1):
+        logger.info("  [%d/%d] %s", i, len(combos), _fmt_params(params))
+        rec = await _evaluate(params, tickers, spy_bars, objective=objective,
+                              use_llm=use_llm, is_cache=is_cache, oos_cache=oos_cache)
+        if rec["trades_ok"]:
+            results.append(rec)
+        else:
+            logger.info("    → skipped (too few trades)")
+    return sorted(results, key=lambda r: r["rank_value"], reverse=True)
+
+
+def _threshold_combos(atr_stop: float, atr_target: float) -> list[dict]:
     keys   = list(THRESHOLD_GRID.keys())
-    values = list(THRESHOLD_GRID.values())
-    combos = [dict(zip(keys, v)) for v in product(*values)]
-    # Only test symmetric or asymmetric combos where gap >= 10 pts
+    combos = [dict(zip(keys, v)) for v in product(*THRESHOLD_GRID.values())]
     combos = [c for c in combos if c["LONG_THRESHOLD"] - c["SHORT_THRESHOLD"] >= 10]
-
-    logger.info("Phase 1 — threshold grid: %d combos", len(combos))
-    results = []
-    for i, combo in enumerate(combos, 1):
-        params = {
-            **combo,
-            "ATR_STOP_MULTIPLE":   fixed_atr_stop,
-            "ATR_TARGET_MULTIPLE": fixed_atr_target,
-        }
-        logger.info("  [%d/%d] %s", i, len(combos), _fmt_params(params))
-        summary = await _eval_combo(params, tickers, bars_cache, spy_bars, use_llm)
-        if summary.get("total_trades", 0) >= MIN_TRADES:
-            results.append(summary)
-        else:
-            logger.info("    → skipped (only %d trades)", summary.get("total_trades", 0))
-
-    return sorted(results, key=lambda r: r.get("sharpe", -99), reverse=True)
+    return [{**c, "ATR_STOP_MULTIPLE": atr_stop, "ATR_TARGET_MULTIPLE": atr_target}
+            for c in combos]
 
 
-async def _run_atr_grid(
-    tickers: list[str],
-    bars_cache: dict,
-    spy_bars,
-    best_long_thresh: float,
-    best_short_thresh: float,
-    use_llm: bool = False,
-) -> list[dict]:
+def _atr_combos(long_thresh: float, short_thresh: float) -> list[dict]:
     keys   = list(ATR_GRID.keys())
-    values = list(ATR_GRID.values())
-    combos = [dict(zip(keys, v)) for v in product(*values)]
-    # Only test combos where target > stop (sensible R/R)
+    combos = [dict(zip(keys, v)) for v in product(*ATR_GRID.values())]
     combos = [c for c in combos if c["ATR_TARGET_MULTIPLE"] > c["ATR_STOP_MULTIPLE"]]
-
-    logger.info("Phase 2 — ATR grid: %d combos (thresholds fixed at L=%.0f S=%.0f)",
-                len(combos), best_long_thresh, best_short_thresh)
-    results = []
-    for i, combo in enumerate(combos, 1):
-        params = {
-            **combo,
-            "LONG_THRESHOLD":  best_long_thresh,
-            "SHORT_THRESHOLD": best_short_thresh,
-        }
-        logger.info("  [%d/%d] %s", i, len(combos), _fmt_params(params))
-        summary = await _eval_combo(params, tickers, bars_cache, spy_bars, use_llm)
-        if summary.get("total_trades", 0) >= MIN_TRADES:
-            results.append(summary)
-        else:
-            logger.info("    → skipped (only %d trades)", summary.get("total_trades", 0))
-
-    return sorted(results, key=lambda r: r.get("sharpe", -99), reverse=True)
+    return [{**c, "LONG_THRESHOLD": long_thresh, "SHORT_THRESHOLD": short_thresh}
+            for c in combos]
 
 
 # ── Output helpers ─────────────────────────────────────────────────────────────
@@ -244,45 +305,65 @@ def _fmt_params(p: dict) -> str:
     return "  ".join(f"{k}={v}" for k, v in p.items())
 
 
-def _print_table(results: list[dict], title: str) -> None:
+def _params_label(p: dict) -> str:
+    return "  ".join(f"{k.replace('_THRESHOLD','_T').replace('_MULTIPLE','_M')}={v}"
+                     for k, v in p.items())
+
+
+def _print_table(results: list[dict], title: str, objective: str) -> None:
     if not results:
         print(f"\n  {title}: no results met the minimum trade threshold.\n")
         return
 
-    print(f"\n{'=' * 76}")
-    print(f"  {title}")
-    print(f"{'=' * 76}")
-    hdr = f"  {'Params':<40} {'Trades':>6} {'WinR%':>6} {'Sharpe':>7} {'EV/T':>8} {'PF':>6} {'MaxDD':>8}"
-    print(hdr)
-    print(f"  {'-' * 74}")
+    validated = "oos" in results[0]
+    print(f"\n{'=' * 92}")
+    print(f"  {title}  (ranked by {'OOS ' if validated else ''}{objective})")
+    print(f"{'=' * 92}")
 
-    for r in results[:15]:          # top 15
-        p     = r.get("params", {})
-        label = "  ".join(f"{k.replace('_THRESHOLD','_T').replace('_MULTIPLE','_M')}={v}"
-                          for k, v in p.items())
-        print(
-            f"  {label:<40} "
-            f"{r.get('total_trades', 0):>6} "
-            f"{r.get('win_rate', 0):>5.1f}% "
-            f"{r.get('sharpe', 0):>7.3f} "
-            f"${r.get('ev_per_trade', 0):>7.2f} "
-            f"{r.get('profit_factor', 0):>6.2f} "
-            f"${r.get('max_drawdown', 0):>7.2f}"
-        )
-    print(f"{'=' * 76}\n")
+    if validated:
+        print(f"  {'Params':<40} {'IS_PnL':>9} {'OOS_PnL':>9} {'OOS_Tr':>6} "
+              f"{'OOS_Win':>7} {'OOS_EV/T':>8} {'OOS_Sh':>7}")
+        print(f"  {'-' * 90}")
+        for r in results[:15]:
+            isd, oos = r.get("in_sample", {}), r.get("oos", {})
+            print(
+                f"  {_params_label(r['params']):<40} "
+                f"${isd.get('total_pnl', 0):>8.0f} "
+                f"${oos.get('total_pnl', 0):>8.0f} "
+                f"{oos.get('total_trades', 0):>6} "
+                f"{oos.get('win_rate', 0):>6.1f}% "
+                f"${oos.get('ev_per_trade', 0):>7.2f} "
+                f"{oos.get('sharpe', 0):>7.3f}"
+            )
+    else:
+        print(f"  {'Params':<40} {'Trades':>6} {'WinR%':>6} {'PnL':>10} "
+              f"{'EV/T':>8} {'PF':>6} {'Sharpe':>7}")
+        print(f"  {'-' * 90}")
+        for r in results[:15]:
+            print(
+                f"  {_params_label(r['params']):<40} "
+                f"{r.get('total_trades', 0):>6} "
+                f"{r.get('win_rate', 0):>5.1f}% "
+                f"${r.get('total_pnl', 0):>9.0f} "
+                f"${r.get('ev_per_trade', 0):>7.2f} "
+                f"{r.get('profit_factor', 0):>6.2f} "
+                f"{r.get('sharpe', 0):>7.3f}"
+            )
+    print(f"{'=' * 92}\n")
 
 
-def _print_recommendation(thresh_results: list[dict], atr_results: list[dict]) -> None:
-    if not thresh_results and not atr_results:
+def _print_recommendation(results: list[dict], objective: str) -> None:
+    if not results:
         return
 
-    print("=" * 76)
-    print("  RECOMMENDATION")
-    print("=" * 76)
+    best      = results[0]
+    p         = best.get("params", {})
+    validated = "oos" in best
 
-    best = (atr_results or thresh_results)[0]
-    p = best.get("params", {})
-    print("\n  Best parameter set (by Sharpe):")
+    print("=" * 92)
+    print("  RECOMMENDATION")
+    print("=" * 92)
+    print(f"\n  Best parameter set (max {'OOS ' if validated else ''}{objective}):")
     for k, v in p.items():
         cur = {
             "LONG_THRESHOLD": 60.0, "SHORT_THRESHOLD": 40.0,
@@ -291,79 +372,130 @@ def _print_recommendation(thresh_results: list[dict], atr_results: list[dict]) -
         arrow = "↑" if float(v) > float(cur) else "↓" if float(v) < float(cur) else "="
         print(f"    {k:<26} {cur} → {v}  {arrow}")
 
-    print(f"\n  Stats:  Sharpe={best.get('sharpe'):.3f}  "
-          f"EV/trade=${best.get('ev_per_trade'):.2f}  "
-          f"WinRate={best.get('win_rate'):.1f}%  "
-          f"PF={best.get('profit_factor'):.2f}  "
-          f"Trades={best.get('total_trades')}")
+    if validated:
+        isd, oos = best.get("in_sample", {}), best.get("oos", {})
+        is_pnl, oos_pnl = isd.get("total_pnl", 0), oos.get("total_pnl", 0)
+        print(f"\n  In-sample (tune) : PnL=${is_pnl:.0f}  WinRate={isd.get('win_rate',0):.1f}%  "
+              f"Trades={isd.get('total_trades',0)}")
+        print(f"  Out-of-sample    : PnL=${oos_pnl:.0f}  WinRate={oos.get('win_rate',0):.1f}%  "
+              f"EV/trade=${oos.get('ev_per_trade',0):.2f}  Sharpe={oos.get('sharpe',0):.2f}  "
+              f"Trades={oos.get('total_trades',0)}")
+        # Overfit check: OOS should stay positive and not collapse vs in-sample.
+        if oos_pnl <= 0:
+            print("\n  ⚠️  OOS profit is non-positive — these params do NOT generalise. "
+                  "Do not deploy; lengthen --days or widen the grid.")
+        elif is_pnl > 0 and oos_pnl < 0.4 * is_pnl:
+            print("\n  ⚠️  OOS profit is far below in-sample — likely overfit. Treat with caution.")
+        else:
+            print("\n  ✅ OOS profit holds up vs in-sample — params generalise.")
+    else:
+        print(f"\n  Stats:  PnL=${best.get('total_pnl',0):.0f}  "
+              f"EV/trade=${best.get('ev_per_trade',0):.2f}  "
+              f"WinRate={best.get('win_rate',0):.1f}%  "
+              f"PF={best.get('profit_factor',0):.2f}  Trades={best.get('total_trades',0)}")
+        print("\n  ⚠️  No walk-forward validation (--no-validate) — risk of overfitting.")
 
     print("\n  To apply, add to Railway env vars (or .env):")
     for k, v in p.items():
         print(f"    {k}={v}")
-    print("=" * 76 + "\n")
+    print("=" * 92 + "\n")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-async def run(tickers: list[str], days: int, phase: str, use_llm: bool = False) -> None:
+async def run(
+    tickers: list[str],
+    days: int,
+    phase: str,
+    *,
+    objective: str = "total_pnl",
+    validate: bool = True,
+    use_llm: bool = False,
+) -> None:
     settings = load_settings()
     if not settings.alpaca_key_id or not settings.alpaca_secret:
         logger.error("ALPACA_API_KEY_ID and ALPACA_API_SECRET must be set in .env or environment")
         return
 
     agent_note = "ALL agents (Vision LLM ON)" if use_llm else "all non-LLM agents (Vision/Decision off)"
+    mode_note  = f"walk-forward {int(SPLIT_FRAC*100)}/{int((1-SPLIT_FRAC)*100)} OOS" if validate else "full-window (NO validation)"
     print(f"\nOptimizer — {days}d window, {len(tickers)} tickers: {tickers}")
-    print(f"Phase: {phase}  |  Agents: {agent_note}  |  Min trades: {MIN_TRADES}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%\n")
+    print(f"Objective: {objective}  |  Validation: {mode_note}  |  Agents: {agent_note}")
+    print(f"Phase: {phase}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%\n")
 
     bars_cache, spy_bars = await _fetch_all(tickers, days, settings.alpaca_key_id, settings.alpaca_secret)
     if not bars_cache:
         logger.error("No bars fetched — check API keys and market hours")
         return
 
+    if validate:
+        is_cache, oos_cache = _split_caches(bars_cache, SPLIT_FRAC)
+        if not oos_cache:
+            logger.warning("Not enough data per ticker to split — falling back to full-window. "
+                           "Use a longer --days for walk-forward validation.")
+            is_cache, oos_cache = bars_cache, None
+    else:
+        is_cache, oos_cache = bars_cache, None
+
     thresh_results: list[dict] = []
     atr_results:    list[dict] = []
 
     if phase in ("thresholds", "both"):
-        thresh_results = await _run_threshold_grid(tickers, bars_cache, spy_bars, use_llm=use_llm)
-        _print_table(thresh_results, "Phase 1 — Threshold Grid (ranked by Sharpe)")
+        combos = _threshold_combos(atr_stop=2.0, atr_target=4.0)
+        thresh_results = await _run_grid("Phase 1 — threshold grid", combos, tickers, spy_bars,
+                                         objective=objective, use_llm=use_llm,
+                                         is_cache=is_cache, oos_cache=oos_cache)
+        _print_table(thresh_results, "Phase 1 — Threshold Grid", objective)
 
     best_long  = thresh_results[0]["params"]["LONG_THRESHOLD"]  if thresh_results else 60.0
     best_short = thresh_results[0]["params"]["SHORT_THRESHOLD"] if thresh_results else 40.0
 
     if phase in ("atr", "both"):
-        atr_results = await _run_atr_grid(tickers, bars_cache, spy_bars, best_long, best_short, use_llm=use_llm)
-        _print_table(atr_results, "Phase 2 — ATR Grid (ranked by Sharpe)")
+        combos = _atr_combos(long_thresh=best_long, short_thresh=best_short)
+        atr_results = await _run_grid("Phase 2 — ATR grid", combos, tickers, spy_bars,
+                                      objective=objective, use_llm=use_llm,
+                                      is_cache=is_cache, oos_cache=oos_cache)
+        _print_table(atr_results, "Phase 2 — ATR Grid", objective)
 
-    _print_recommendation(thresh_results, atr_results)
+    best_overall = (atr_results or thresh_results or [{}])[0]
+    _print_recommendation(atr_results or thresh_results, objective)
 
-    all_results = thresh_results + atr_results
-    for r in all_results:
-        r.pop("trades", None)        # don't bloat the output file
     RESULTS_FILE.write_text(json.dumps({
         "run_at":          datetime.utcnow().isoformat(),
         "tickers":         tickers,
         "days":            days,
+        "objective":       objective,
+        "validation":      mode_note,
         "threshold_grid":  thresh_results[:10],
         "atr_grid":        atr_results[:10],
-        "best":            (atr_results or thresh_results or [{}])[0],
+        "best":            best_overall,
     }, indent=2))
     print(f"Full results saved to {RESULTS_FILE}\n")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Trading strategy optimizer")
-    parser.add_argument("--days",    type=int, default=14,
-                        help="Lookback window in days (default 14)")
+    parser = argparse.ArgumentParser(description="Trading strategy optimizer — maximises live trading profit")
+    parser.add_argument("--days",    type=int, default=60,
+                        help="Lookback window in days (default 60 — needs enough for a 70/30 split)")
     parser.add_argument("--tickers", nargs="+", default=DEFAULT_TICKERS,
                         help="Tickers to backtest")
     parser.add_argument("--phase",   choices=["thresholds", "atr", "both"],
                         default="both",
                         help="Which grid to search (default: both)")
+    parser.add_argument("--objective", choices=OBJECTIVES, default="total_pnl",
+                        help="Metric to maximise (default: total_pnl = raw trading profit)")
+    parser.add_argument("--no-validate", action="store_true",
+                        help="Disable walk-forward OOS validation (NOT recommended — overfits).")
     parser.add_argument("--use-llm", action="store_true",
                         help="Also run VisionAgent (LLM, slower + uses Gemini quota). "
                              "The Decision LLM stays off — it bypasses the thresholds being tuned.")
     args = parser.parse_args()
-    asyncio.run(run(args.tickers, args.days, args.phase, args.use_llm))
+    asyncio.run(run(
+        args.tickers, args.days, args.phase,
+        objective=args.objective,
+        validate=not args.no_validate,
+        use_llm=args.use_llm,
+    ))
 
 
 if __name__ == "__main__":
