@@ -55,6 +55,27 @@ STRATEGY_REFRESH_MIN   = int(os.environ.get("STRATEGY_REFRESH_MIN",   "60"))
 # apply ATR/threshold updates to the live pm without restarting.
 _WEIGHTS_FILE = Path(__file__).parent / "data" / "strategy_weights.json"
 
+# Auto-execute toggle written by the dashboard (/api/trade-mode). Read every
+# evaluation so the switch takes effect within one scan, no redeploy needed.
+_TRADE_MODE_FILE = Path(__file__).parent / "data" / "trade_mode.json"
+
+
+def _auto_execute_enabled() -> bool:
+    """Whether the dashboard has enabled autonomous order execution.
+
+    Default False (manual approval): the bot still scores every ticker and
+    publishes signals, but places NO orders itself — the user authorizes each
+    trade from the dashboard's Trade Recommendations page. Returns True only
+    when the user has flipped the toggle to auto-execute.
+    """
+    try:
+        if _TRADE_MODE_FILE.exists():
+            data = json.loads(_TRADE_MODE_FILE.read_text())
+            return bool(data.get("auto_execute", False))
+    except Exception:
+        pass
+    return False
+
 # Used when the universe scanner is unreachable at startup (network blip):
 # deep-liquidity names so the bot stays alive until the scanner recovers.
 FALLBACK_WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA"]
@@ -99,10 +120,15 @@ async def evaluate_ticker(
                 ticker=ticker, bars=bars, account=account,
                 chart_image_path=chart, hourly_bars=hourly_bars,
             )
-            decision = await pm.run_once(ctx, execute=execute)
+            # Auto-execute only when BOTH the deploy allows live orders
+            # (EXECUTE_LIVE=true) AND the user has enabled auto-execute on the
+            # site. Otherwise score & publish the signal for manual approval.
+            effective_execute = execute and _auto_execute_enabled()
+            decision = await pm.run_once(ctx, execute=effective_execute)
             logger.info(
-                "%s -> %s | composite=%.1f | %s",
+                "%s -> %s | composite=%.1f | mode=%s | %s",
                 ticker, decision.decision.value, decision.composite_score,
+                "AUTO" if effective_execute else "MANUAL",
                 pm.summarise(decision.evaluations),
             )
             if publisher:
@@ -305,6 +331,9 @@ async def breakeven_lock_loop(broker: BaseBroker, pm: PortfolioManager) -> None:
     while True:
         await asyncio.sleep(300)  # check every 5 minutes
         if not _is_market_hours():
+            continue
+        # Stay fully hands-off in manual mode — don't touch user-approved stops.
+        if not _auto_execute_enabled():
             continue
         try:
             positions = await broker.get_positions()
