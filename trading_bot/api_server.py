@@ -824,6 +824,14 @@ _backtest_stats: Dict[str, Any] = {
     "last_error":    None,
 }
 
+_optimizer_stats: Dict[str, Any] = {
+    "last_run_at":   None,
+    "last_status":   None,   # "ok" | "failed" | "timeout"
+    "error_count":   0,
+    "last_error":    None,
+    "running":       False,
+}
+
 _circuit_breaker: Dict[str, Any] = {
     "halted":          False,
     "reason":          None,      # "daily_loss" | "consecutive_losses" | None
@@ -1487,6 +1495,70 @@ async def _run_backtest() -> None:
             "last_status": "failed",
             "error_count": _backtest_stats["error_count"] + 1,
         })
+
+
+_OPTIMIZER_SCRIPT = _HERE / "optimize_strategy.py"
+
+
+async def _run_optimizer() -> None:
+    """Run optimize_strategy.py as a subprocess (non-blocking).
+
+    Writes backtest_optimal.json + OPTIMAL_CONFIG.txt, which the dashboard's
+    /backtest 'Optimizer Run' panel and config box read. Guarded so two runs
+    can't overlap (the job is heavy: grid search × walk-forward × full agents).
+    """
+    if not _OPTIMIZER_SCRIPT.exists():
+        logger.warning("optimize_strategy.py not found — skipping optimizer")
+        return
+    if _optimizer_stats.get("running"):
+        logger.info("Optimizer already running — ignoring trigger")
+        return
+    _optimizer_stats["running"] = True
+    logger.info("Optimizer starting…")
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(_OPTIMIZER_SCRIPT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(_HERE),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3000)  # 50 min max
+        if proc.returncode == 0:
+            logger.info("Optimizer complete — wrote backtest_optimal.json + OPTIMAL_CONFIG.txt")
+            _optimizer_stats.update({
+                "last_run_at": datetime.utcnow().isoformat(),
+                "last_status": "ok",
+                "last_error":  None,
+            })
+        else:
+            decoded_tail = (stdout or b"").decode()[-500:]
+            logger.error("Optimizer failed (rc=%d): %s", proc.returncode, decoded_tail)
+            _optimizer_stats.update({
+                "last_run_at": datetime.utcnow().isoformat(),
+                "last_status": "failed",
+                "error_count": _optimizer_stats["error_count"] + 1,
+                "last_error":  decoded_tail,
+            })
+    except asyncio.TimeoutError:
+        logger.error("Optimizer timed out after 50 min — killed")
+        if proc is not None:
+            proc.kill()
+        _optimizer_stats.update({
+            "last_run_at": datetime.utcnow().isoformat(),
+            "last_status": "timeout",
+            "error_count": _optimizer_stats["error_count"] + 1,
+            "last_error":  "timed out after 50 min",
+        })
+    except Exception:
+        logger.exception("Optimizer subprocess error")
+        _optimizer_stats.update({
+            "last_run_at": datetime.utcnow().isoformat(),
+            "last_status": "failed",
+            "error_count": _optimizer_stats["error_count"] + 1,
+        })
+    finally:
+        _optimizer_stats["running"] = False
 
 
 async def _eod_snapshot(session: aiohttp.ClientSession) -> None:
@@ -2478,6 +2550,15 @@ async def run_backtest_now():
     return {"status": "backtest_triggered", "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.post("/api/optimize/run", dependencies=[Depends(_verify_bot_secret)])
+async def run_optimizer_now():
+    """Trigger the walk-forward profit optimizer (writes backtest_optimal.json)."""
+    if _optimizer_stats.get("running"):
+        return {"status": "already_running", "timestamp": datetime.utcnow().isoformat()}
+    asyncio.create_task(_run_optimizer())
+    return {"status": "optimizer_triggered", "timestamp": datetime.utcnow().isoformat()}
+
+
 @app.get("/api/scan-stats", dependencies=[Depends(_verify_bot_secret)])
 def get_scan_stats():
     """Return today's scan activity counters and market status."""
@@ -2505,6 +2586,7 @@ def health():
         "agents":    _AGENTS_AVAILABLE,
         "timestamp": datetime.utcnow().isoformat(),
         "backtest":  _backtest_stats,
+        "optimizer": _optimizer_stats,
         "circuit_breaker": _circuit_breaker,
         "keys": {
             "gemini":    gemini_set,

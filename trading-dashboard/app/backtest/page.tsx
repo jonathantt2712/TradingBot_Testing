@@ -194,9 +194,12 @@ export default function BacktestPage() {
   const [loading,    setLoading]    = useState(true)
   const [error,      setError]      = useState<string | null>(null)
   const [running,    setRunning]    = useState(false)
+  const [optimizing, setOptimizing] = useState(false)
   const [health,     setHealth]     = useState<BacktestHealth | null>(null)
+  const [optHealth,  setOptHealth]  = useState<BacktestHealth | null>(null)
   const [rejections, setRejections] = useState<RejectionRecord[]>([])
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const optPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   async function loadHealth() {
     try {
@@ -204,6 +207,7 @@ export default function BacktestPage() {
       if (res.ok) {
         const d = await res.json()
         setHealth(d.backtest ?? null)
+        setOptHealth(d.optimizer ?? null)
       }
     } catch { /* bot offline */ }
   }
@@ -254,8 +258,35 @@ export default function BacktestPage() {
     }, 10_000)
   }
 
+  async function runOptimizer() {
+    if (optimizing) return
+    setOptimizing(true)
+    try {
+      await fetch('/api/optimize/run', { method: 'POST' })
+    } catch { /* ignore trigger errors — bot may queue it */ }
+    // The optimizer is heavy (grid × walk-forward). Poll health for completion,
+    // then reload results (it writes backtest_optimal.json which /api/backtest serves).
+    optPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch('/api/bot/health', { cache: 'no-store' })
+        if (res.ok) {
+          const d = await res.json()
+          setOptHealth(d.optimizer ?? null)
+          if (d.optimizer && d.optimizer.running === false) {
+            if (optPollRef.current) clearInterval(optPollRef.current)
+            setOptimizing(false)
+            load()
+          }
+        }
+      } catch { /* keep polling */ }
+    }, 15_000)
+  }
+
   useEffect(() => { load() }, [])
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
+  useEffect(() => () => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    if (optPollRef.current) clearInterval(optPollRef.current)
+  }, [])
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">
@@ -277,6 +308,19 @@ export default function BacktestPage() {
           >
             {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
             {running ? 'Running...' : 'Run Backtest'}
+          </button>
+          <button
+            onClick={runOptimizer}
+            disabled={optimizing}
+            title="Walk-forward profit optimizer — tunes thresholds & ATR on held-out data"
+            className={cn(
+              'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all',
+              'bg-bull/15 border border-bull/30 text-bull hover:bg-bull/25',
+              'disabled:opacity-50 disabled:cursor-not-allowed',
+            )}
+          >
+            {optimizing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Target className="h-3.5 w-3.5" />}
+            {optimizing ? 'Optimizing...' : 'Run Optimizer'}
           </button>
           <button onClick={load} disabled={loading} className="btn-ghost text-xs">
             <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
@@ -311,6 +355,35 @@ export default function BacktestPage() {
         )}
         {(health?.error_count ?? 0) > 0 && (
           <span className="text-bear font-semibold">Failures: {health!.error_count}</span>
+        )}
+      </div>
+
+      {/* Optimizer status */}
+      <div className="rounded-xl border border-bg-border bg-bg-card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+        <span className="flex items-center gap-1.5 font-medium text-primary">
+          <span className={cn(
+            'h-2 w-2 rounded-full',
+            optimizing ? 'bg-bull animate-pulse'
+              : optHealth?.last_status === 'ok' ? 'bg-bull'
+              : optHealth?.last_status ? 'bg-bear' : 'bg-muted',
+          )} />
+          Profit Optimizer
+        </span>
+        <span className="text-muted">Walk-forward tune of thresholds &amp; ATR, ranked on held-out (out-of-sample) profit.</span>
+        {optimizing ? (
+          <span className="text-bull font-medium">Running now… (this takes a few minutes)</span>
+        ) : optHealth?.last_run_at ? (
+          <span className="text-subtle">
+            Last run: {relativeTime(optHealth.last_run_at)}
+            {optHealth.last_status === 'ok'
+              ? <span className="text-bull ml-1">· ok</span>
+              : <span className="text-bear ml-1">· {optHealth.last_status}</span>}
+          </span>
+        ) : (
+          <span className="text-muted">Not run yet — click “Run Optimizer” to tune for maximum profit.</span>
+        )}
+        {(optHealth?.error_count ?? 0) > 0 && (
+          <span className="text-bear font-semibold">Failures: {optHealth!.error_count}</span>
         )}
       </div>
 
@@ -382,7 +455,7 @@ export default function BacktestPage() {
             <div className="card flex flex-col items-center justify-center py-20 gap-3">
               <Clock className="h-8 w-8 text-muted" />
               <p className="text-sm text-muted">No backtest data yet.</p>
-              <p className="text-xs text-muted/60">Run <code className="text-brand-cyan">run_optimizer.bat</code> or <code className="text-brand-cyan">backtest_30day.py</code> to generate results.</p>
+              <p className="text-xs text-muted/60">Click <span className="text-brand-cyan font-medium">Run Backtest</span> or <span className="text-bull font-medium">Run Optimizer</span> above to generate results.</p>
             </div>
           )}
 
