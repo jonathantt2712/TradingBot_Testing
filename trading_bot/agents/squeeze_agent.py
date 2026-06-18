@@ -86,6 +86,13 @@ class SqueezeAgent(BaseAgent):
         super().__init__(weight=weight)
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
+        if ctx.backtest_mode:
+            # FINRA short volume is fetched as CURRENT state; replaying it onto
+            # historical windows would leak future information (look-ahead bias).
+            return AgentEvaluation(
+                role=self.role, score=NEUTRAL_SCORE, confidence=0.0,
+                rationale="squeeze: neutral in backtest (point-in-time data, no look-ahead)",
+            )
         finra_data = await _fetch_finra()
         short_ratio = finra_data.get(ctx.ticker.upper())
 
@@ -123,6 +130,8 @@ class SqueezeAgent(BaseAgent):
                 base  = float(np.interp(short_ratio, [0.50, 0.65, 0.80], [62, 72, 82]))
                 if rel_vol > 2.0:
                     base = min(90.0, base + 8.0)
+                elif rel_vol < 2.0:
+                    base = min(base, 65.0)  # unconfirmed squeeze — cap below action threshold
                 score = base
                 setup = "squeeze_long"
             elif price_dir < 0:

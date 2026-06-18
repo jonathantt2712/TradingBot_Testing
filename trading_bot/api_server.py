@@ -73,6 +73,12 @@ MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 
 TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", "0.05"))  # 5% trailing distance
 PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "2.0"))  # max net |beta| across open positions
 
+# Position exit monitor
+EXIT_MONITOR_INTERVAL_MIN = int(os.getenv("EXIT_MONITOR_INTERVAL_MIN", "5"))    # how often to re-score open positions
+EXIT_SCORE_THRESHOLD      = float(os.getenv("EXIT_SCORE_THRESHOLD", "40.0"))    # exit LONG if score < this; exit SHORT if score > (100 - this)
+ALLOW_OVERNIGHT           = os.getenv("ALLOW_OVERNIGHT", "false").lower() in ("1", "true", "yes")
+EOD_REVIEW_MIN_BEFORE     = int(os.getenv("EOD_REVIEW_MIN_BEFORE", "25"))       # minutes before 16:00 ET to run EOD review
+
 # Daily scan stats (reset at midnight by _background_loop)
 _scan_stats: Dict[str, Any] = {
     "date":             "",
@@ -112,6 +118,9 @@ _AGENTS_AVAILABLE = False
 _pm                = None   # PortfolioManager — the SAME composition live/backtest use
 _ai4trade_client   = None
 _Decision          = None
+_EXIT_DECISIONS: list = []  # rolling log of exit-monitor and EOD review decisions
+_MAX_EXIT_LOG     = 500
+_telegram          = None   # TelegramPublisher — optional push notifications
 
 try:
     import pandas as pd
@@ -121,17 +130,23 @@ try:
     from core.models import AnalysisContext
     from core.enums import Decision
     from data.ai4trade_client import AI4TradeClient as _AI4TC
+    from data.telegram_publisher import TelegramPublisher as _TelegramPublisher
 
     _ai4trade_client = _AI4TC(
         email=os.getenv("AI4TRADE_EMAIL", ""),
         password=os.getenv("AI4TRADE_PASSWORD", ""),
     )
-    _pm = build_manager(load_settings(), broker=None, ai4=_ai4trade_client)
+    _settings = load_settings()
+    _pm = build_manager(_settings, broker=None, ai4=_ai4trade_client)
     # Dashboard scans fetch ~100-bar windows (vs 200 live) — keep the lower
     # bar requirement this endpoint has always used.
     _pm.technical.min_bars = 30
     _Decision = Decision
     _AGENTS_AVAILABLE = True
+    _telegram = _TelegramPublisher(
+        bot_token=_settings.telegram_bot_token,
+        chat_id=_settings.telegram_chat_id,
+    )
     logger.info("Agent pipeline loaded via bootstrap.build_manager — unified with live/backtest")
 
 except Exception as _import_err:
@@ -809,6 +824,14 @@ _backtest_stats: Dict[str, Any] = {
     "last_error":    None,
 }
 
+_optimizer_stats: Dict[str, Any] = {
+    "last_run_at":   None,
+    "last_status":   None,   # "ok" | "failed" | "timeout"
+    "error_count":   0,
+    "last_error":    None,
+    "running":       False,
+}
+
 _circuit_breaker: Dict[str, Any] = {
     "halted":          False,
     "reason":          None,      # "daily_loss" | "consecutive_losses" | None
@@ -899,8 +922,31 @@ def _check_circuit_breaker() -> Optional[str]:
     return None
 
 
+async def _fetch_news_catalyst(session: aiohttp.ClientSession, sym: str) -> str:
+    """Return the most recent Benzinga news headline for sym from last 24h, or ''."""
+    try:
+        since = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        async with session.get(
+            f"{_DATA_BASE}/v1beta1/news?symbols={sym}&limit=1&start={since}",
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=6),
+        ) as r:
+            if r.status != 200:
+                return ""
+            data = await r.json()
+            articles = data.get("news", [])
+            if articles:
+                return articles[0].get("headline", "")
+    except Exception:
+        pass
+    return ""
+
+
 async def _run_premarket_scan() -> None:
-    """Identify pre-market gappers (>2% gap) between 9:00-9:25 ET.
+    """Identify pre-market gappers (≥5% gap, price >$3, pre-market volume >50k) between 9:00-9:25 ET.
+
+    Criteria sourced from Humbled Trader scanner: gap >5%, price >$3,
+    pre-market vol >50k, Benzinga news catalyst preferred.
 
     Tags resulting recs with premarket=True and gap_pct. These appear in the
     dashboard with a PRE-MKT badge and give the trader a head start before the
@@ -908,6 +954,9 @@ async def _run_premarket_scan() -> None:
     """
     if not _ALPACA_KEY or not _ALPACA_SECRET:
         return
+
+    gap_min = float(os.getenv("PREMARKET_GAP_MIN_PCT", "5.0"))
+    vol_min = int(os.getenv("PREMARKET_MIN_VOLUME",    "50000"))
 
     try:
         async with aiohttp.ClientSession(
@@ -945,54 +994,73 @@ async def _run_premarket_scan() -> None:
         win_mins = weights.get("time_window_minutes", 45)
         recs: List[Dict[str, Any]] = []
 
-        for sym, snap in snaps.items():
-            try:
-                prev_bar   = snap.get("prevDailyBar") or {}
-                daily_bar  = snap.get("dailyBar") or {}
-                latest_trd = snap.get("latestTrade") or {}
-                prev_close = float(prev_bar.get("c") or 0)
-                price      = float(latest_trd.get("p") or daily_bar.get("o") or 0)
-                if prev_close <= 0 or price <= 0 or price < 5:
-                    continue
-                gap_pct = (price - prev_close) / prev_close * 100
-                if abs(gap_pct) < 2.0:
-                    continue
-                direction  = "LONG" if gap_pct > 0 else "SHORT"
-                entry      = round(price, 2)
-                d          = 1 if direction == "LONG" else -1
-                stop_pct   = weights.get("stop_pct", 0.02)
-                tp_pct     = weights.get("tp_pct",   0.05)
-                stop_loss  = round(entry * (1 - d * stop_pct), 2)
-                take_profit = round(entry * (1 + d * tp_pct),  2)
-                qty        = _kelly_qty(equity, entry, stop_loss, take_profit, 65.0)
-                rr         = round(tp_pct / stop_pct, 2)
-                dollar_rsk = round(abs(entry - stop_loss) * qty, 2)
-                expires_at = (_next_market_open() + timedelta(minutes=win_mins)).isoformat()
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+        ) as news_session:
+            for sym, snap in snaps.items():
+                try:
+                    prev_bar   = snap.get("prevDailyBar") or {}
+                    daily_bar  = snap.get("dailyBar") or {}
+                    latest_trd = snap.get("latestTrade") or {}
+                    prev_close = float(prev_bar.get("c") or 0)
+                    price      = float(latest_trd.get("p") or daily_bar.get("o") or 0)
 
-                recs.append({
-                    "id":              f"{sym}-pm-{int(datetime.utcnow().timestamp())}",
-                    "ticker":          sym,
-                    "direction":       direction,
-                    "composite_score": round(min(max(50.0 + abs(gap_pct) * 3, 55.0), 90.0), 1),
-                    "agent_used":      False,
-                    "rationale":       f"Pre-market gap {gap_pct:+.2f}% (prev close ${prev_close:.2f})",
-                    "risk":            {"entry": entry, "stop_loss": stop_loss,
-                                       "take_profit": take_profit, "qty": qty,
-                                       "risk_reward": rr, "dollar_risk": dollar_rsk},
-                    "regime":          "neutral",
-                    "sector":          _SECTOR_MAP.get(sym, "Other"),
-                    "scanned_at":      datetime.utcnow().isoformat(),
-                    "expires_at":      expires_at,
-                    "reeval_count":    0,
-                    "hot_sector":      False,
-                    "evaluations":     [],
-                    "timestamp":       datetime.utcnow().isoformat(),
-                    "chg_pct":         round(gap_pct, 2),
-                    "premarket":       True,
-                    "gap_pct":         round(gap_pct, 2),
-                })
-            except Exception:
-                continue
+                    # Price filter: must be > $3
+                    if prev_close <= 0 or price <= 0 or price < 3:
+                        continue
+
+                    gap_pct = (price - prev_close) / prev_close * 100
+                    if abs(gap_pct) < gap_min:
+                        continue
+
+                    # Pre-market volume filter
+                    pm_vol = float(daily_bar.get("v") or 0)
+                    if pm_vol < vol_min:
+                        continue
+
+                    # News catalyst (non-blocking — empty string = no catalyst found)
+                    catalyst = await _fetch_news_catalyst(news_session, sym)
+
+                    direction   = "LONG" if gap_pct > 0 else "SHORT"
+                    entry       = round(price, 2)
+                    d           = 1 if direction == "LONG" else -1
+                    stop_pct    = weights.get("stop_pct", 0.02)
+                    tp_pct      = weights.get("tp_pct",   0.05)
+                    stop_loss   = round(entry * (1 - d * stop_pct), 2)
+                    take_profit = round(entry * (1 + d * tp_pct),  2)
+                    qty         = _kelly_qty(equity, entry, stop_loss, take_profit, 65.0)
+                    rr          = round(tp_pct / stop_pct, 2)
+                    dollar_rsk  = round(abs(entry - stop_loss) * qty, 2)
+                    expires_at  = (_next_market_open() + timedelta(minutes=win_mins)).isoformat()
+                    rationale   = f"Pre-market gap {gap_pct:+.2f}% (prev close ${prev_close:.2f})"
+                    if catalyst:
+                        rationale += f" | {catalyst[:80]}"
+
+                    recs.append({
+                        "id":              f"{sym}-pm-{int(datetime.utcnow().timestamp())}",
+                        "ticker":          sym,
+                        "direction":       direction,
+                        "composite_score": round(min(max(50.0 + abs(gap_pct) * 3, 55.0), 90.0), 1),
+                        "agent_used":      False,
+                        "rationale":       rationale,
+                        "risk":            {"entry": entry, "stop_loss": stop_loss,
+                                           "take_profit": take_profit, "qty": qty,
+                                           "risk_reward": rr, "dollar_risk": dollar_rsk},
+                        "regime":          "neutral",
+                        "sector":          _SECTOR_MAP.get(sym, "Other"),
+                        "scanned_at":      datetime.utcnow().isoformat(),
+                        "expires_at":      expires_at,
+                        "reeval_count":    0,
+                        "hot_sector":      False,
+                        "evaluations":     [],
+                        "timestamp":       datetime.utcnow().isoformat(),
+                        "chg_pct":         round(gap_pct, 2),
+                        "premarket":       True,
+                        "gap_pct":         round(gap_pct, 2),
+                        "catalyst":        catalyst,
+                    })
+                except Exception:
+                    continue
 
         if recs:
             recs.sort(key=lambda x: abs(x["gap_pct"]), reverse=True)
@@ -1001,7 +1069,12 @@ async def _run_premarket_scan() -> None:
                 existing = []
             non_pm = [r for r in existing if not r.get("premarket")]
             _save(RECS_FILE, recs + non_pm)
-            logger.info("Pre-market scan: %d gappers identified (>2%% gap)", len(recs))
+            logger.info(
+                "Pre-market scan: %d gappers identified (>%.0f%% gap, vol>%d)",
+                len(recs), gap_min, vol_min,
+            )
+            if _telegram is not None:
+                asyncio.create_task(_telegram.send_gapper_alert(recs))
 
     except Exception as exc:
         logger.warning("Pre-market scan failed: %s", exc)
@@ -1340,6 +1413,12 @@ async def _run_market_scan() -> None:
         # else: market closed and this scan found nothing — keep whatever
         # recommendations are already on disk available until Monday.
 
+        # Push high-conviction signals to Telegram
+        if _telegram is not None and recs:
+            strong_hits = [r for r in recs if r["composite_score"] > 60]
+            if strong_hits:
+                asyncio.create_task(_telegram.send_strategy_alert(strong_hits))
+
         scanned_n = len(symbols_raw)
         skipped_n = scanned_n - len(recs)
         _scan_stats["scans_today"]     += 1
@@ -1416,6 +1495,70 @@ async def _run_backtest() -> None:
             "last_status": "failed",
             "error_count": _backtest_stats["error_count"] + 1,
         })
+
+
+_OPTIMIZER_SCRIPT = _HERE / "optimize_strategy.py"
+
+
+async def _run_optimizer() -> None:
+    """Run optimize_strategy.py as a subprocess (non-blocking).
+
+    Writes backtest_optimal.json + OPTIMAL_CONFIG.txt, which the dashboard's
+    /backtest 'Optimizer Run' panel and config box read. Guarded so two runs
+    can't overlap (the job is heavy: grid search × walk-forward × full agents).
+    """
+    if not _OPTIMIZER_SCRIPT.exists():
+        logger.warning("optimize_strategy.py not found — skipping optimizer")
+        return
+    if _optimizer_stats.get("running"):
+        logger.info("Optimizer already running — ignoring trigger")
+        return
+    _optimizer_stats["running"] = True
+    logger.info("Optimizer starting…")
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(_OPTIMIZER_SCRIPT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(_HERE),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3000)  # 50 min max
+        if proc.returncode == 0:
+            logger.info("Optimizer complete — wrote backtest_optimal.json + OPTIMAL_CONFIG.txt")
+            _optimizer_stats.update({
+                "last_run_at": datetime.utcnow().isoformat(),
+                "last_status": "ok",
+                "last_error":  None,
+            })
+        else:
+            decoded_tail = (stdout or b"").decode()[-500:]
+            logger.error("Optimizer failed (rc=%d): %s", proc.returncode, decoded_tail)
+            _optimizer_stats.update({
+                "last_run_at": datetime.utcnow().isoformat(),
+                "last_status": "failed",
+                "error_count": _optimizer_stats["error_count"] + 1,
+                "last_error":  decoded_tail,
+            })
+    except asyncio.TimeoutError:
+        logger.error("Optimizer timed out after 50 min — killed")
+        if proc is not None:
+            proc.kill()
+        _optimizer_stats.update({
+            "last_run_at": datetime.utcnow().isoformat(),
+            "last_status": "timeout",
+            "error_count": _optimizer_stats["error_count"] + 1,
+            "last_error":  "timed out after 50 min",
+        })
+    except Exception:
+        logger.exception("Optimizer subprocess error")
+        _optimizer_stats.update({
+            "last_run_at": datetime.utcnow().isoformat(),
+            "last_status": "failed",
+            "error_count": _optimizer_stats["error_count"] + 1,
+        })
+    finally:
+        _optimizer_stats["running"] = False
 
 
 async def _eod_snapshot(session: aiohttp.ClientSession) -> None:
@@ -1579,6 +1722,319 @@ async def _trailing_stop_loop() -> None:
             logger.warning("Trailing stop loop error: %s", exc)
 
 
+# ---------------------------------------------------------------------------
+# Position exit monitor helpers
+# ---------------------------------------------------------------------------
+
+async def _close_position_via_alpaca(session: aiohttp.ClientSession, ticker: str) -> bool:
+    """Close a single position via Alpaca DELETE /v2/positions/{symbol}."""
+    try:
+        async with session.delete(
+            f"{_BROKER_BASE}/v2/positions/{ticker}",
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status not in (200, 204):
+                logger.warning("Alpaca close %s -> HTTP %s: %s", ticker, r.status, await r.text())
+                return False
+            return True
+    except Exception as exc:
+        logger.warning("Alpaca close %s exception: %s", ticker, exc)
+        return False
+
+
+async def _fetch_bars_for_exit(session: aiohttp.ClientSession, ticker: str):
+    """Fetch recent 5-min bars for a ticker. Returns DataFrame or None."""
+    try:
+        async with session.get(
+            f"{_DATA_BASE}/v2/stocks/{ticker}/bars?timeframe=5Min&limit=100&feed=iex",
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status != 200:
+                return None
+            raw = await r.json()
+    except Exception:
+        return None
+
+    bars_data = raw.get("bars", [])
+    if len(bars_data) < 20:
+        return None
+    bars = pd.DataFrame(bars_data)
+    bars.rename(columns={"o": "open", "h": "high", "l": "low",
+                         "c": "close", "v": "volume", "t": "timestamp"}, inplace=True)
+    bars["timestamp"] = pd.to_datetime(bars["timestamp"])
+    bars.set_index("timestamp", inplace=True)
+    return bars
+
+
+def _log_exit_decision(ticker: str, direction: str, action: str,
+                       reason: str, score: Optional[float] = None,
+                       price: Optional[float] = None) -> None:
+    entry: Dict[str, Any] = {
+        "ts":        datetime.utcnow().isoformat(),
+        "ticker":    ticker,
+        "direction": direction,
+        "action":    action,   # "exit" | "hold" | "hold_overnight"
+        "reason":    reason,
+    }
+    if score  is not None: entry["score"] = round(score, 1)
+    if price  is not None: entry["price"] = round(price, 2)
+    _EXIT_DECISIONS.append(entry)
+    if len(_EXIT_DECISIONS) > _MAX_EXIT_LOG:
+        _EXIT_DECISIONS[:] = _EXIT_DECISIONS[-_MAX_EXIT_LOG:]
+
+
+async def _do_exit_position(trade: dict, price: float, reason: str,
+                            session: aiohttp.ClientSession,
+                            score: Optional[float] = None) -> bool:
+    """Close a position (simulated PAPER or real Alpaca) and record decision."""
+    ticker    = trade.get("ticker", "")
+    direction = trade.get("direction", "LONG")
+    order_id  = trade.get("order_id", "")
+
+    if order_id.startswith("PAPER-") or not order_id:
+        _close_simulated_trade(trade, price, reason)
+    else:
+        ok = await _close_position_via_alpaca(session, ticker)
+        if not ok:
+            logger.warning("Exit monitor: could not close %s via Alpaca", ticker)
+            return False
+        _close_simulated_trade(trade, price, reason)
+
+    _log_exit_decision(ticker, direction, "exit", reason, score=score, price=price)
+    logger.info("Position EXIT: %s %s @ %.2f — %s", direction, ticker, price, reason)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Continuous position exit monitor (every EXIT_MONITOR_INTERVAL_MIN minutes)
+# ---------------------------------------------------------------------------
+
+async def _position_exit_monitor_loop() -> None:
+    """Re-score open positions on a cadence. Exit any whose signal has flipped.
+
+    Uses TechnicalAgent only for speed (no LLM cost per position per cycle).
+    Confidence gate (≥0.50) prevents noise-driven exits on thin signals.
+    """
+    while True:
+        await asyncio.sleep(EXIT_MONITOR_INTERVAL_MIN * 60)
+
+        if not _is_market_open() or not _AGENTS_AVAILABLE or _pm is None:
+            continue
+
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+            ) as session:
+                trades = _load(TRADES_FILE, [])
+                open_trades = [t for t in trades if t.get("status") == "open"]
+                if not open_trades:
+                    continue
+
+                # Batch-fetch current prices
+                tickers = list({t["ticker"] for t in open_trades})
+                try:
+                    async with session.get(
+                        f"{_DATA_BASE}/v2/stocks/snapshots?symbols={','.join(tickers)}",
+                        headers=_ALPACA_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as r:
+                        snaps: Dict[str, Any] = await r.json() if r.status == 200 else {}
+                except Exception:
+                    snaps = {}
+
+                modified = False
+                for trade in open_trades:
+                    ticker    = trade.get("ticker", "")
+                    direction = trade.get("direction", "LONG")
+                    snap      = snaps.get(ticker, {})
+                    price     = float(
+                        (snap.get("latestTrade") or {}).get("p") or
+                        (snap.get("dailyBar")    or {}).get("c") or 0
+                    )
+
+                    bars = await _fetch_bars_for_exit(session, ticker)
+                    if bars is None:
+                        continue
+
+                    try:
+                        ctx = AnalysisContext(ticker=ticker, bars=bars)
+                        ev  = await asyncio.wait_for(_pm.technical.evaluate(ctx), timeout=10.0)
+                    except Exception:
+                        continue
+
+                    score      = ev.score
+                    confidence = ev.confidence
+                    exit_threshold_long  = EXIT_SCORE_THRESHOLD
+                    exit_threshold_short = 100.0 - EXIT_SCORE_THRESHOLD
+
+                    should_exit = (
+                        (direction == "LONG"  and score < exit_threshold_long  and confidence >= 0.50) or
+                        (direction == "SHORT" and score > exit_threshold_short and confidence >= 0.50)
+                    )
+
+                    if should_exit:
+                        reason = (
+                            f"exit_monitor: technical score {score:.0f} "
+                            f"({'< ' + str(exit_threshold_long) if direction == 'LONG' else '> ' + str(exit_threshold_short)}) "
+                            f"flipped against {direction} (conf {confidence:.0%}) — {ev.rationale}"
+                        )
+                        p = price if price > 0 else float(trade.get("entry", 0))
+                        ok = await _do_exit_position(trade, p, reason, session, score=score)
+                        if ok:
+                            modified = True
+                    else:
+                        _log_exit_decision(
+                            ticker, direction, "hold",
+                            f"exit_monitor: score {score:.0f} still supports {direction} (conf {confidence:.0%})",
+                            score=score, price=price,
+                        )
+
+                if modified:
+                    async with _trades_lock:
+                        _save(TRADES_FILE, trades)
+
+        except Exception as exc:
+            logger.warning("Position exit monitor error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# EOD position review (fires EOD_REVIEW_MIN_BEFORE minutes before 16:00 ET)
+# ---------------------------------------------------------------------------
+
+async def _eod_position_review_loop() -> None:
+    """Intelligent end-of-day position review.
+
+    Fires once per trading day EOD_REVIEW_MIN_BEFORE minutes before the
+    16:00 ET close. Runs the full agent evaluation on every open position
+    and decides to hold overnight (if ALLOW_OVERNIGHT=true and agents still
+    support the trade) or close.
+
+    The existing EOD_FLATTEN in bootstrap (15:55 by default) acts as a hard
+    safety net after this review has already made intelligent decisions.
+    """
+    last_review_day = ""
+
+    while True:
+        await asyncio.sleep(60)
+        if _ET is None:
+            continue
+
+        now_et = datetime.now(_ET)
+        today  = str(date.today())
+
+        # Target: EOD_REVIEW_MIN_BEFORE minutes before 16:00 ET
+        review_minutes_from_midnight = 16 * 60 - EOD_REVIEW_MIN_BEFORE
+        target_hour   = review_minutes_from_midnight // 60
+        target_minute = review_minutes_from_midnight % 60
+
+        if (today == last_review_day
+                or now_et.weekday() >= 5
+                or now_et.hour != target_hour
+                or now_et.minute < target_minute):
+            continue
+
+        last_review_day = today
+        logger.info("EOD position review: %d min before close", EOD_REVIEW_MIN_BEFORE)
+
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+            ) as session:
+                trades = _load(TRADES_FILE, [])
+                open_trades = [t for t in trades if t.get("status") == "open"]
+                if not open_trades:
+                    logger.info("EOD review: no open positions")
+                    continue
+
+                tickers = list({t["ticker"] for t in open_trades})
+                try:
+                    async with session.get(
+                        f"{_DATA_BASE}/v2/stocks/snapshots?symbols={','.join(tickers)}",
+                        headers=_ALPACA_HEADERS,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as r:
+                        snaps: Dict[str, Any] = await r.json() if r.status == 200 else {}
+                except Exception:
+                    snaps = {}
+
+                modified = False
+                kept: list = []
+                closed: list = []
+
+                for trade in open_trades:
+                    ticker    = trade.get("ticker", "")
+                    direction = trade.get("direction", "LONG")
+                    snap      = snaps.get(ticker, {})
+                    price     = float(
+                        (snap.get("latestTrade") or {}).get("p") or
+                        (snap.get("dailyBar")    or {}).get("c") or 0
+                    )
+                    p = price if price > 0 else float(trade.get("entry", 0))
+
+                    # Full agent re-evaluation (same pipeline as entry scan)
+                    score:  Optional[float] = None
+                    decision = None
+                    bars = await _fetch_bars_for_exit(session, ticker)
+                    if bars is not None and _AGENTS_AVAILABLE and _pm is not None:
+                        try:
+                            ctx      = AnalysisContext(ticker=ticker, bars=bars)
+                            decision = await _evaluate(ctx)
+                            if decision is not None:
+                                score = getattr(decision, "composite_score", None)
+                        except Exception as exc:
+                            logger.warning("EOD review eval failed for %s: %s", ticker, exc)
+
+                    # Decide: close vs keep overnight
+                    should_exit = True
+                    reason: str
+
+                    if ALLOW_OVERNIGHT and score is not None:
+                        still_bullish = direction == "LONG"  and score >= 55
+                        still_bearish = direction == "SHORT" and score <= 45
+                        if still_bullish or still_bearish:
+                            should_exit = False
+                            reason = (
+                                f"eod_review: HELD overnight — "
+                                f"agents still support {direction} (score {score:.0f})"
+                            )
+                        else:
+                            reason = (
+                                f"eod_review: CLOSED — score {score:.0f} no longer supports "
+                                f"{direction} (overnight allowed but signal faded)"
+                            )
+                    elif score is not None:
+                        reason = (
+                            f"eod_review: CLOSED — day-trade mode "
+                            f"(score {score:.0f}, ALLOW_OVERNIGHT=false)"
+                        )
+                    else:
+                        reason = "eod_review: CLOSED — could not re-evaluate, closing for safety"
+
+                    if should_exit:
+                        ok = await _do_exit_position(trade, p, reason, session, score=score)
+                        if ok:
+                            closed.append(ticker)
+                            modified = True
+                    else:
+                        _log_exit_decision(ticker, direction, "hold_overnight", reason, score=score, price=p)
+                        kept.append(ticker)
+                        logger.info("EOD review: KEPT %s %s overnight (score %.0f)", direction, ticker, score or 0)
+
+                if modified:
+                    async with _trades_lock:
+                        _save(TRADES_FILE, trades)
+
+                logger.info(
+                    "EOD review done — closed: %s | kept overnight: %s",
+                    closed or "none", kept or "none",
+                )
+
+        except Exception as exc:
+            logger.warning("EOD position review error: %s", exc)
+
+
 async def _background_loop() -> None:
     await asyncio.sleep(5)
     await _run_market_scan()
@@ -1681,12 +2137,16 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             logger.warning("AI4Trade session failed to open: %s", _e)
 
-    task  = asyncio.create_task(_background_loop())
-    trail = asyncio.create_task(_trailing_stop_loop())
+    task     = asyncio.create_task(_background_loop())
+    trail    = asyncio.create_task(_trailing_stop_loop())
+    exit_mon = asyncio.create_task(_position_exit_monitor_loop())
+    eod_rev  = asyncio.create_task(_eod_position_review_loop())
     yield
     task.cancel()
     trail.cancel()
-    for t in [task, trail]:
+    exit_mon.cancel()
+    eod_rev.cancel()
+    for t in [task, trail, exit_mon, eod_rev]:
         try:
             await t
         except asyncio.CancelledError:
@@ -2080,6 +2540,7 @@ def get_backtest():
     return {
         "results":    read_json("backtest_results.json"),
         "optimal":    read_json("backtest_optimal.json"),
+        "optimizer":  read_json("optimization_results.json"),  # full grid for heatmaps
         "configText": read_text("OPTIMAL_CONFIG.txt"),
     }
 
@@ -2088,6 +2549,15 @@ def get_backtest():
 async def run_backtest_now():
     asyncio.create_task(_run_backtest())
     return {"status": "backtest_triggered", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/api/optimize/run", dependencies=[Depends(_verify_bot_secret)])
+async def run_optimizer_now():
+    """Trigger the walk-forward profit optimizer (writes backtest_optimal.json)."""
+    if _optimizer_stats.get("running"):
+        return {"status": "already_running", "timestamp": datetime.utcnow().isoformat()}
+    asyncio.create_task(_run_optimizer())
+    return {"status": "optimizer_triggered", "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.get("/api/scan-stats", dependencies=[Depends(_verify_bot_secret)])
@@ -2117,6 +2587,7 @@ def health():
         "agents":    _AGENTS_AVAILABLE,
         "timestamp": datetime.utcnow().isoformat(),
         "backtest":  _backtest_stats,
+        "optimizer": _optimizer_stats,
         "circuit_breaker": _circuit_breaker,
         "keys": {
             "gemini":    gemini_set,
@@ -2211,6 +2682,12 @@ def get_regime_performance():
             "avg_pnl":   round(sum(pnls) / len(pnls), 2) if pnls else 0.0,
         }
     return result
+
+
+@app.get("/api/exit-decisions", dependencies=[Depends(_verify_bot_secret)])
+def get_exit_decisions():
+    """Rolling log of exit-monitor and EOD review decisions (newest first)."""
+    return list(reversed(_EXIT_DECISIONS))
 
 
 if __name__ == "__main__":

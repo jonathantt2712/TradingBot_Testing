@@ -162,6 +162,52 @@ function humanizeLiquid(r: string): string {
   return `Order-flow read: ${out.join(', ')}.`
 }
 
+function humanizeInsider(r: string): string {
+  if (/no congressional trades/i.test(r))        return 'No congressional trading disclosures found in the last 30 days.'
+  if (/no valid congress trades/i.test(r))        return 'No valid disclosures found for this ticker in the last 30 days.'
+  if (/fetch failed/i.test(r))                    return 'House Stock Watcher data fetch failed — check network.'
+  if (/mixed.*buyers.*sellers/i.test(r))          return r
+  const m = r.match(/^(bullish|bearish) past (\d+)d \((\d+) disclosures?\)/)
+  if (m) {
+    const [, dir, days, n] = m
+    return `${n} congressional disclosure${parseInt(n) > 1 ? 's' : ''} are ${dir} over the past ${days} days.`
+  }
+  return r
+}
+
+function humanizeSqueeze(r: string): string {
+  if (/no FINRA short volume data/i.test(r))      return 'No FINRA RegSHO short volume data found for today.'
+  if (/ticker not found/i.test(r))                return 'Ticker not in FINRA short volume report today (OTC/non-exchange).'
+  const ratio = r.match(/short_ratio=([\d.]+)/)
+  if (ratio) {
+    const v = parseFloat(ratio[1])
+    const pct = (v * 100).toFixed(1)
+    if (/squeeze/i.test(r))          return `Short ratio is ${pct}% with price moving up — squeeze setup detected.`
+    if (/short pressure/i.test(r))   return `Short ratio is ${pct}% with price falling — heavy short selling pressure.`
+    if (/heavy shorted/i.test(r))    return `Short ratio is ${pct}% — heavily shorted but no clear directional catalyst.`
+    return `Short ratio is ${pct}%.`
+  }
+  return r
+}
+
+function humanizeMacro(r: string): string {
+  if (/fetch error/i.test(r))   return 'Macro data unavailable — Yahoo Finance fetch failed.'
+  const lean = r.match(/macro (bullish|bearish|neutral)/)
+  if (!lean) return r
+  const signals: string[] = []
+  const btc    = r.match(/BTC_7d=([+-][\d.]+)%/)
+  const qqq    = r.match(/QQQ_20d=([+-][\d.]+)%/)
+  const spread = r.match(/spread=([+-][\d.]+)%/)
+  const sh     = r.match(/safe_haven=([+-][\d.]+)%/)
+  if (btc)    signals.push(`BTC ${parseFloat(btc[1]) > 0 ? 'up' : 'down'} ${Math.abs(parseFloat(btc[1])).toFixed(1)}% (7d)`)
+  if (qqq)    signals.push(`QQQ ${parseFloat(qqq[1]) > 0 ? 'up' : 'down'} ${Math.abs(parseFloat(qqq[1])).toFixed(1)}% (20d)`)
+  if (spread) signals.push(`growth ${parseFloat(spread[1]) > 0 ? 'leads' : 'lags'} defensives by ${Math.abs(parseFloat(spread[1])).toFixed(1)}%`)
+  if (sh)     signals.push(`safe havens ${parseFloat(sh[1]) > 0 ? 'rising' : 'falling'} ${Math.abs(parseFloat(sh[1])).toFixed(1)}% (20d)`)
+  const body = signals.length ? signals.join(', ') + '.' : 'No signal data.'
+  const prefix = lean[1] === 'bullish' ? 'Risk-on environment' : lean[1] === 'bearish' ? 'Risk-off environment' : 'Neutral macro backdrop'
+  return `${prefix}: ${body}`
+}
+
 /** Returns a plain-English explanation for an agent's rationale, or null if there's nothing to translate. */
 export function humanizeRationale(role: string, rationale?: string): string | null {
   if (!rationale) return null
@@ -172,6 +218,9 @@ export function humanizeRationale(role: string, rationale?: string): string | nu
     case 'risk':        return humanizeRisk(rationale)
     case 'social':      return humanizeSocial(rationale)
     case 'liquid':      return humanizeLiquid(rationale)
+    case 'insider':     return humanizeInsider(rationale)
+    case 'squeeze':     return humanizeSqueeze(rationale)
+    case 'macro':       return humanizeMacro(rationale)
     default:            return rationale
   }
 }

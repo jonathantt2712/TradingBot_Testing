@@ -68,6 +68,13 @@ class SocialSentimentAgent(BaseAgent):
         self.max_signals = max_signals
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
+        if ctx.backtest_mode:
+            # The AI4Trade feed reports the CURRENT community state; replaying it onto
+            # historical windows would leak future information (look-ahead bias).
+            return AgentEvaluation(
+                role=self.role, score=NEUTRAL_SCORE, confidence=0.0,
+                rationale="social: neutral in backtest (point-in-time data, no look-ahead)",
+            )
         signals = await self.client.get_signal_feed(
             symbol=ctx.ticker,
             limit=self.max_signals,

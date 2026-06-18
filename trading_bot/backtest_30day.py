@@ -325,6 +325,8 @@ async def backtest_ticker(
             ticker=ticker,
             bars=window,
             account={"equity": 100_000.0, "buying_power": 50_000.0},
+            as_of=entry_ts,
+            backtest_mode=True,
         )
 
         try:
@@ -422,7 +424,11 @@ def calc_summary(all_trades: list[TradeResult]) -> dict:
     cum = df_sorted["pnl_usd"].cumsum()
     max_dd = float((cum - cum.cummax()).min())
 
-    ev_per_trade = (win_rate / 100 * avg_win) + ((1 - win_rate / 100) * avg_loss)
+    # True expected value per trade: mean realized P&L across ALL outcomes,
+    # including EOD_CLOSE (forced 15:55 exits), which are usually the majority
+    # of day trades. The old TP/SL-only formula silently ignored them, so the
+    # optimizer was maximizing a number that excluded most actual trade results.
+    ev_per_trade = total_pnl / total if total else 0.0
 
     by_tk = df.groupby("ticker").agg(
         trades=("pnl_usd", "count"),
@@ -613,11 +619,17 @@ async def run(tickers: list[str], days: int) -> None:
 
     settings = load_settings()
 
+    # Full honest agent set: Technical, Fundamental, Risk, Liquid (all bars/math
+    # based, no look-ahead) plus Insider/Squeeze/Macro wired in but self-neutralised
+    # via ctx.backtest_mode (their data is point-in-time current → look-ahead if
+    # replayed on history). Vision/Decision are LLM-gated and skipped here for the
+    # daily auto-run (set USE_LLM_BACKTEST=true to include them).
+    use_llm = os.getenv("USE_LLM_BACKTEST", "false").lower() in ("1", "true", "yes")
     pm = build_manager(
         settings, broker=None, ai4=None,
-        include_live_only_agents=False,
-        include_vision=False,
-        include_decision_agent=False,
+        include_live_only_agents=True,
+        include_vision=use_llm,
+        include_decision_agent=use_llm,
     )
     if "SPY" in all_bars:
         pm.technical.spy_bars = all_bars["SPY"]

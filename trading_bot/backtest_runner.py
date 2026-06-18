@@ -200,6 +200,7 @@ async def backtest_ticker(
             account={"equity": 100_000.0},  # paper account
             chart_image_path=chart,
             as_of=entry_ts,
+            backtest_mode=True,
         )
 
         decision = await pm.decide(ctx)
@@ -601,12 +602,12 @@ renderCharts();
 async def run(tickers: list[str], days: int, recommend_only: bool) -> None:
     settings = load_settings()
     # Same composition as live (bootstrap) so backtest results reflect the
-    # strategy that actually trades. Social/liquid agents are excluded — their
-    # feeds report current platform state (look-ahead on historical bars).
-    # Vision is also excluded — each LLM chart call costs money and a 60-day
-    # backtest would make hundreds of calls; use technical+fundamental only.
-    pm = build_manager(settings, broker=None, include_live_only_agents=False,
-                       include_vision=False)
+    # strategy that actually trades. Liquid (bars-based) contributes; the
+    # point-in-time agents (Social/Insider/Squeeze/Macro) self-neutralise via
+    # ctx.backtest_mode so they add no look-ahead bias. Vision/Decision LLM stay
+    # off — each chart call costs money and a 60-day backtest makes hundreds.
+    pm = build_manager(settings, broker=None, include_live_only_agents=True,
+                       include_vision=False, include_decision_agent=False)
 
     trades: list[TradeRecord] = []
 

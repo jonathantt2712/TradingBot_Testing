@@ -2,12 +2,22 @@
 import { useState, useEffect } from 'react'
 import {
   CheckCircle2, XCircle, Loader2, ExternalLink,
-  Key, Server, Zap, Shield, RefreshCw, Activity, Brain,
+  Key, Server, Zap, Shield, RefreshCw, Activity, Brain, LogOut,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 
 interface StatusRow { label: string; ok: boolean | null; detail?: string }
+
+interface ExitDecision {
+  at:        string
+  ticker:    string
+  direction: string
+  action:    string
+  reason:    string
+  score?:    number
+  price?:    number
+}
 
 function StatusBadge({ ok }: { ok: boolean | null }) {
   if (ok === null) return <Loader2 className="h-4 w-4 text-muted animate-spin" />
@@ -93,7 +103,8 @@ export default function SettingsPage() {
   const [envVars,   setEnvVars]   = useState<{ keySet: boolean | null; secretSet: boolean | null; paper: boolean | null }>({
     keySet: null, secretSet: null, paper: null,
   })
-  const [scanStats, setScanStats] = useState<ScanStats | null>(null)
+  const [scanStats,     setScanStats]     = useState<ScanStats | null>(null)
+  const [exitDecisions, setExitDecisions] = useState<ExitDecision[]>([])
 
   useEffect(() => {
     async function check() {
@@ -130,6 +141,12 @@ export default function SettingsPage() {
       try {
         const r = await fetch('/api/bot/scan-stats', { cache: 'no-store' })
         if (r.ok) setScanStats(await r.json())
+      } catch { /* bot offline */ }
+
+      // Exit decisions
+      try {
+        const r = await fetch('/api/bot/exit-decisions', { cache: 'no-store' })
+        if (r.ok) setExitDecisions(await r.json())
       } catch { /* bot offline */ }
 
       // Env var check
@@ -288,6 +305,61 @@ AI4TRADE_PASSWORD=...`}
             </>
           )}
         </SettingsCard>
+      </div>
+
+      {/* Exit Monitor Log */}
+      <div className="card p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-bg-hover">
+              <LogOut className="h-4 w-4 text-caution" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-primary">Exit Monitor Log</h2>
+              <p className="text-[10px] text-muted">Re-scores open positions every 5 min · EOD review at 15:35 ET</p>
+            </div>
+          </div>
+          {exitDecisions.length > 0 && (
+            <span className="text-[10px] text-muted">{exitDecisions.length} decisions logged</span>
+          )}
+        </div>
+
+        {exitDecisions.length === 0 ? (
+          <p className="text-xs text-muted py-1">
+            {botStatus === false
+              ? 'Bot server offline — no exit decisions available'
+              : 'No decisions yet — the exit monitor fires every 5 min during market hours'}
+          </p>
+        ) : (
+          <div className="space-y-1 max-h-72 overflow-y-auto">
+            {exitDecisions.slice(0, 30).map((d, i) => {
+              const shortReason = d.reason.replace(/^(exit_monitor|eod_review):\s*/i, '')
+              const isExit      = d.action === 'exit'
+              return (
+                <div key={i} className="flex items-center gap-2 rounded-lg bg-bg-base px-3 py-2 text-xs">
+                  <span className="text-[10px] text-muted font-mono whitespace-nowrap w-10 shrink-0">
+                    {new Date(d.at.endsWith('Z') ? d.at : d.at + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                  <span className="font-mono font-bold text-primary shrink-0 w-12">{d.ticker}</span>
+                  <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-semibold shrink-0',
+                    d.direction === 'LONG' ? 'bg-bull/10 text-bull' : 'bg-bear/10 text-bear')}>
+                    {d.direction}
+                  </span>
+                  <span className={cn('rounded-full border px-2 py-0.5 text-[10px] font-bold shrink-0',
+                    isExit
+                      ? 'bg-bear/10 text-bear border-bear/30'
+                      : 'bg-bg-hover text-subtle border-bg-border')}>
+                    {isExit ? 'EXIT' : 'HOLD'}
+                  </span>
+                  {d.score != null && (
+                    <span className="text-[10px] text-muted font-mono shrink-0">score {d.score}</span>
+                  )}
+                  <span className="text-[10px] text-muted truncate min-w-0">{shortReason}</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       {/* Security notice */}

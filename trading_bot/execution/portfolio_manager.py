@@ -27,6 +27,7 @@ from agents.regime_agent import MarketRegime, RegimeSnapshot
 from agents.risk_agent import RiskAgent
 from agents.insider_agent import InsiderAgent
 from agents.social_agent import SocialSentimentAgent
+from agents.macro_agent import MacroSignalAgent
 from agents.squeeze_agent import SqueezeAgent
 from agents.technical_agent import TechnicalAgent
 from agents.decision_agent import DecisionAgent
@@ -55,6 +56,7 @@ class PortfolioManager:
         social: Optional[SocialSentimentAgent] = None,
         insider: Optional["InsiderAgent"] = None,
         squeeze: Optional["SqueezeAgent"] = None,
+        macro: Optional["MacroSignalAgent"] = None,
         publisher=None,
         decision_agent: Optional[DecisionAgent] = None,
     ) -> None:
@@ -68,6 +70,7 @@ class PortfolioManager:
         self.social = social
         self.insider = insider
         self.squeeze = squeeze
+        self.macro   = macro
         self.publisher = publisher
         self._decision_agent = decision_agent
         self._weights = settings.weights.as_map()
@@ -111,6 +114,10 @@ class PortfolioManager:
         if self.squeeze is not None:
             squeeze_idx = len(coros)
             coros.append(self.squeeze.safe_evaluate(ctx))
+        macro_idx = None
+        if self.macro is not None:
+            macro_idx = len(coros)
+            coros.append(self.macro.safe_evaluate(ctx))
 
         results = await asyncio.gather(*coros)
         fundamental = results[0]
@@ -121,6 +128,7 @@ class PortfolioManager:
         social_eval:  Optional[AgentEvaluation] = results[social_idx]  if social_idx  is not None else None
         insider_eval: Optional[AgentEvaluation] = results[insider_idx] if insider_idx is not None else None
         squeeze_eval: Optional[AgentEvaluation] = results[squeeze_idx] if squeeze_idx is not None else None
+        macro_eval:   Optional[AgentEvaluation] = results[macro_idx]   if macro_idx   is not None else None
 
         evaluations = tuple(r for r in results)
 
@@ -128,12 +136,15 @@ class PortfolioManager:
         if self._decision_agent is not None and self._decision_agent.available:
             regime_value = self._regime.regime.value if self._regime else "neutral"
             regime_rationale = getattr(self._regime, "rationale", "") if self._regime else ""
+            vix_level = getattr(self._regime, "vix_level", None) if self._regime else None
+            if vix_level is not None:
+                regime_rationale = f"{regime_rationale} | VIX={vix_level:.1f}"
             all_evals = [ev for ev in evaluations if ev is not None]
             decision, composite, decision_meta = await self._decision_agent.decide(
                 ctx, all_evals, regime_value, regime_rationale,
             )
         else:
-            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval, insider_eval, squeeze_eval)
+            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval, insider_eval, squeeze_eval, macro_eval)
             retail_surcharge = 0.0
             if technical is not None and technical.data:
                 retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
@@ -171,6 +182,18 @@ class PortfolioManager:
             )
 
         plan = self.risk.build_plan(ctx, intended=decision)
+
+        # VIX-aware position scaling: high volatility → smaller size
+        if plan is not None and self._regime is not None:
+            vix = self._regime.vix_level
+            if vix is not None:
+                if vix > 40:
+                    plan.qty = float(int(plan.qty * 0.5))
+                    logger.info("%s VIX=%.1f > 40: position scaled 50%%", ctx.ticker, vix)
+                elif vix > 30:
+                    plan.qty = float(int(plan.qty * 0.7))
+                    logger.info("%s VIX=%.1f > 30: position scaled 70%%", ctx.ticker, vix)
+
         if plan is None or plan.qty <= 0 or plan.risk_reward < self.settings.risk.min_risk_reward:
             logger.info("%s downgraded to PASS: no viable plan", ctx.ticker)
             return TradeDecision(
@@ -412,6 +435,7 @@ class PortfolioManager:
         social: Optional[AgentEvaluation],
         insider: Optional[AgentEvaluation] = None,
         squeeze: Optional[AgentEvaluation] = None,
+        macro: Optional[AgentEvaluation] = None,
     ) -> float:
         agents = [
             ("fundamental", f),
@@ -426,6 +450,8 @@ class PortfolioManager:
             agents.append(("insider", insider))
         if squeeze is not None:
             agents.append(("squeeze", squeeze))
+        if macro is not None:
+            agents.append(("macro", macro))
 
         # Look up regime multipliers (default = no adjustment)
         regime_val = self._regime.regime.value if self._regime is not None else "neutral"
@@ -442,6 +468,14 @@ class PortfolioManager:
             den += w
 
         result = round(num / den, 2) if den else 50.0
+
+        # Social + Squeeze convergence bonus: both agree → ±3 point boost
+        if social is not None and squeeze is not None:
+            if social.score >= 60 and squeeze.score >= 60:
+                result = min(99.0, result + 3.0)
+            elif social.score <= 40 and squeeze.score <= 40:
+                result = max(1.0, result - 3.0)
+
         return result
 
     def _direction(

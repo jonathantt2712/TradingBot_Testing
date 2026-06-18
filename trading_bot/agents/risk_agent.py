@@ -7,7 +7,9 @@ Portfolio Manager treats a veto as an absolute block.
 """
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -17,6 +19,8 @@ from config.settings import RiskConfig
 from core.base_agent import BaseAgent, clamp_score
 from core.enums import AgentRole, Decision
 from core.models import AgentEvaluation, AnalysisContext, RiskParameters
+
+_STRATEGY_WEIGHTS_FILE = Path(__file__).parent.parent / "data" / "strategy_weights.json"
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +135,8 @@ class RiskAgent(BaseAgent):
             return None
 
         vol_mult = self._volatility_multiplier(atr, price)
-        risk_usd = equity * self.cfg.max_risk_per_trade_pct * vol_mult
+        kelly_mult = self._kelly_multiplier(self.cfg.atr_target_multiple / max(self.cfg.atr_stop_multiple, 0.1))
+        risk_usd = equity * self.cfg.max_risk_per_trade_pct * vol_mult * kelly_mult
         stop_dist = atr * self.cfg.atr_stop_multiple
         target_dist = self._target_dist(ctx.bars, intended, price, atr)
         if target_dist <= 0:
@@ -161,6 +166,33 @@ class RiskAgent(BaseAgent):
             risk_reward=round(rr, 3),
             risk_per_trade_usd=round(risk_usd, 2),
         )
+
+    @staticmethod
+    def _kelly_multiplier(rr: float) -> float:
+        """Fractional Kelly position sizing multiplier.
+
+        Reads win_rate_30d and update_count from strategy_weights.json.
+        Half Kelly when N >= 30 trades, Quarter Kelly (cap at 1.0x) when N < 30.
+        Normalised so that W=50%, R=2.0 yields 1.0x (baseline unchanged).
+        """
+        try:
+            with open(_STRATEGY_WEIGHTS_FILE, encoding="utf-8") as f:
+                w = json.load(f)
+            win_rate_pct = w.get("win_rate_30d")
+            update_count = int(w.get("update_count", 0))
+            if win_rate_pct is None or rr <= 0:
+                return 1.0
+            W = win_rate_pct / 100.0
+            K = W - (1.0 - W) / rr
+            if K <= 0:
+                return 0.25  # negative Kelly → quarter size
+            K_neutral = 0.5 - 0.5 / 2.0  # = 0.25 at W=50%, R=2.0
+            kelly_mult = K / K_neutral
+            if update_count < 30:
+                kelly_mult = min(kelly_mult, 1.0)  # no size-up without track record
+            return float(np.clip(kelly_mult, 0.25, 2.0))
+        except Exception:
+            return 1.0
 
     @staticmethod
     def _volatility_multiplier(atr: float, price: float) -> float:
