@@ -2745,6 +2745,8 @@ def health():
     gemini_set    = bool(os.getenv("GEMINI_API_KEY"))
     anthropic_set = bool(os.getenv("ANTHROPIC_API_KEY"))
     ai4_set       = bool(os.getenv("AI4TRADE_EMAIL") and os.getenv("AI4TRADE_PASSWORD"))
+    execute_live  = os.getenv("EXECUTE_LIVE", "false").lower() in ("1", "true", "yes")
+    alpaca_paper  = os.getenv("ALPACA_PAPER", "true").lower() not in ("0", "false", "no")
     return {
         "status":    "ok",
         "agents":    _AGENTS_AVAILABLE,
@@ -2753,6 +2755,16 @@ def health():
         "optimizer": _optimizer_stats,
         "challenge": _challenge_stats,
         "circuit_breaker": _circuit_breaker,
+        "trading": {
+            "execute_live": execute_live,
+            "paper_mode":   alpaca_paper,
+            "broker":       os.getenv("BROKER", "alpaca"),
+            "mode_label":   (
+                "LIVE PAPER" if execute_live and alpaca_paper else
+                "LIVE REAL"  if execute_live and not alpaca_paper else
+                "DRY RUN"
+            ),
+        },
         "keys": {
             "gemini":    gemini_set,
             "anthropic": anthropic_set,

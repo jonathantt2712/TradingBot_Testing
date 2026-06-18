@@ -5,11 +5,12 @@ import { cn, formatCurrency } from '@/lib/utils'
 import type { AlpacaAccount } from '@/lib/alpaca'
 
 interface Props {
-  account: AlpacaAccount | null
-  error?:  string | null
+  account:      AlpacaAccount | null
+  error?:       string | null
+  tradingMode?: string
 }
 
-export function AccountBar({ account, error }: Props) {
+export function AccountBar({ account, error, tradingMode = 'DRY RUN' }: Props) {
   const [copied, setCopied] = useState(false)
 
   if (!account) {
@@ -82,9 +83,16 @@ export function AccountBar({ account, error }: Props) {
 
   return (
     <div className="card px-4 py-3 flex flex-wrap items-center gap-3 md:gap-6">
-      {/* Paper badge */}
-      <span className="rounded-full border border-caution/30 bg-caution/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-caution">
-        Paper
+      {/* Trading mode badge */}
+      <span className={cn(
+        'rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider',
+        tradingMode === 'LIVE PAPER'
+          ? 'border-bull/30 bg-bull/10 text-bull'
+          : tradingMode === 'LIVE REAL'
+          ? 'border-bear/30 bg-bear/10 text-bear'
+          : 'border-caution/30 bg-caution/10 text-caution',
+      )}>
+        {tradingMode}
       </span>
 
       {/* Show all on desktop; only first 2 on mobile */}

@@ -191,6 +191,46 @@ class AlpacaBroker(BaseBroker):
             logger.error("close_all_positions failed: %s", exc)
             return False
 
+    async def get_position_detail(self, symbol: str) -> Optional[dict]:
+        """Return Alpaca position dict for symbol, or None if not held."""
+        try:
+            data = await self._get(f"{self._base}/v2/positions/{symbol.upper()}")
+            return data
+        except Exception:
+            return None
+
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel a single order by ID. Returns True on success."""
+        try:
+            await self._delete(f"{self._base}/v2/orders/{order_id}")
+            return True
+        except Exception as exc:
+            logger.warning("cancel_order(%s) failed: %s", order_id, exc)
+            return False
+
+    async def submit_stop(self, symbol: str, qty: int, side: str, stop_price: float) -> Optional[str]:
+        """Submit a standalone stop order (replaces the bracket stop leg after breakeven lock).
+
+        side: 'sell' for LONG positions, 'buy' for SHORT positions.
+        Returns the new order_id or None on failure.
+        """
+        body = {
+            "symbol":        symbol,
+            "qty":           str(qty),
+            "side":          side,
+            "type":          "stop",
+            "time_in_force": "day",
+            "stop_price":    str(round(stop_price, 2)),
+        }
+        try:
+            resp = await self._post(f"{self._base}/v2/orders", body)
+            order_id = resp.get("id")
+            logger.info("stop order submitted %s %s @ %.2f → id=%s", side, symbol, stop_price, order_id)
+            return order_id
+        except Exception as exc:
+            logger.error("submit_stop(%s) failed: %s", symbol, exc)
+            return None
+
     # ── Order management ──────────────────────────────────────────────────────
 
     async def submit_bracket(self, decision: TradeDecision) -> Optional[OrderReceipt]:

@@ -85,10 +85,20 @@ async def evaluate_ticker(
 ) -> None:
     async with _EVAL_SEMAPHORE:
         try:
-            bars = await broker.get_bars(ticker, timeframe="5Min", limit=200)
+            # Fetch 5-min and 1-hour bars concurrently; hourly enables MTF gate
+            raw = await asyncio.gather(
+                broker.get_bars(ticker, timeframe="5Min", limit=200),
+                broker.get_bars(ticker, timeframe="1Hour", limit=60),
+                return_exceptions=True,
+            )
+            bars        = raw[0] if not isinstance(raw[0], Exception) else None
+            hourly_bars = raw[1] if not isinstance(raw[1], Exception) else None
             account = await broker.get_account()
             chart = render_chart(ticker, bars)
-            ctx = AnalysisContext(ticker=ticker, bars=bars, account=account, chart_image_path=chart)
+            ctx = AnalysisContext(
+                ticker=ticker, bars=bars, account=account,
+                chart_image_path=chart, hourly_bars=hourly_bars,
+            )
             decision = await pm.run_once(ctx, execute=execute)
             logger.info(
                 "%s -> %s | composite=%.1f | %s",
@@ -280,6 +290,93 @@ async def strategy_refresh_loop(pm: PortfolioManager, *, interval_min: int) -> N
             logger.exception("strategy refresh failed")
 
 
+async def breakeven_lock_loop(broker: BaseBroker, pm: PortfolioManager) -> None:
+    """Move stop to entry (breakeven) once a position profits by 1×stop-distance.
+
+    Fetches Alpaca positions every 5 minutes. For each position whose
+    unrealized P&L >= 1×ATR_stop_distance, cancels the bracket's stop leg
+    and submits a new standalone stop order at the entry price.
+    Protects winning trades from turning into losers without interfering
+    with positions that haven't triggered the 1R profit threshold yet.
+    """
+    # Track which positions have already been locked to avoid repeated patches
+    _locked: dict[str, float] = {}  # symbol → lock_price
+
+    while True:
+        await asyncio.sleep(300)  # check every 5 minutes
+        if not _is_market_hours():
+            continue
+        try:
+            positions = await broker.get_positions()
+            if not positions:
+                continue
+
+            open_orders = await broker.get_open_orders()
+            stop_orders: dict[str, list[dict]] = {}
+            for o in open_orders:
+                sym = o.get("symbol", "").upper()
+                if stop_orders.get(sym) is None:
+                    stop_orders[sym] = []
+                stop_orders[sym].append(o)
+
+            for pos in positions:
+                sym  = pos.get("symbol", "").upper()
+                side = pos.get("side", "long").lower()
+                qty  = int(abs(float(pos.get("qty", 0))))
+                if qty <= 0:
+                    continue
+
+                # Skip if we've already locked this position at this price
+                already_locked = _locked.get(sym)
+
+                # Compute stop distance for the CURRENT ATR setting
+                bars = await broker.get_bars(sym, timeframe="5Min", limit=20)
+                if bars is None or bars.empty:
+                    continue
+                from agents.risk_agent import RiskAgent as _RA
+                atr = _RA._atr(bars)
+                stop_dist = atr * pm.risk.cfg.atr_stop_multiple
+                if stop_dist <= 0:
+                    continue
+
+                unreal = float(pos.get("unrealized_pl", 0))
+                cost   = float(pos.get("market_value", 0)) - unreal  # approximate cost basis
+                entry  = cost / qty if qty > 0 else 0
+                if entry <= 0:
+                    continue
+
+                # Lock condition: unrealized P&L ≥ 1× stop-distance per share
+                pl_per_share = unreal / qty
+                if (side == "long"  and pl_per_share < stop_dist):
+                    continue
+                if (side == "short" and pl_per_share < stop_dist):
+                    continue
+
+                lock_price = round(entry, 2)
+                if already_locked and abs(already_locked - lock_price) < 0.01:
+                    continue  # already locked at this price
+
+                # Cancel the bracket's stop child order
+                for o in stop_orders.get(sym, []):
+                    otype = o.get("type", "")
+                    if otype in ("stop", "stop_limit") and o.get("id"):
+                        await broker.cancel_order(o["id"])
+                        logger.info("breakeven lock: cancelled stop order %s for %s", o["id"], sym)
+
+                # Submit a new stop at the entry price (breakeven)
+                exit_side = "sell" if side == "long" else "buy"
+                new_id = await broker.submit_stop(sym, qty, exit_side, lock_price)
+                if new_id:
+                    _locked[sym] = lock_price
+                    logger.info(
+                        "BREAKEVEN LOCK %s: %.2f PnL/share ≥ ATR_stop %.2f → stop@entry %.2f",
+                        sym, pl_per_share, stop_dist, lock_price,
+                    )
+
+        except Exception:
+            logger.exception("breakeven_lock_loop error")
+
+
 async def main(tickers: Sequence[str]) -> None:
     global _ticker_lock, _EVAL_SEMAPHORE
     _ticker_lock = asyncio.Lock()
@@ -384,6 +481,7 @@ async def main(tickers: Sequence[str]) -> None:
             )
         if execute:
             loops.append(eod_flatten_loop(broker, settings))
+            loops.append(breakeven_lock_loop(broker, pm))
         await asyncio.gather(*loops)
 
     await ai4.__aexit__(None, None, None)
