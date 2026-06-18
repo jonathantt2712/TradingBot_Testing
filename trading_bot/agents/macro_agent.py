@@ -166,6 +166,13 @@ class MacroSignalAgent(BaseAgent):
             return self._snapshot
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
+        if ctx.backtest_mode:
+            # Macro signals are point-in-time current data (today's BTC/QQQ/etc).
+            # Applying them to historical windows would inject look-ahead bias.
+            return AgentEvaluation(
+                role=self.role, score=NEUTRAL_SCORE, confidence=0.0,
+                rationale="macro: neutral in backtest (point-in-time data, no look-ahead)",
+            )
         score, confidence, rationale = await self._get_snapshot()
         return AgentEvaluation(
             role=self.role,

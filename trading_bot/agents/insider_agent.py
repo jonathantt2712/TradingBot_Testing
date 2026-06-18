@@ -49,6 +49,13 @@ class InsiderAgent(BaseAgent):
         self._cache_ts: float = 0.0
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
+        if ctx.backtest_mode:
+            # Congressional disclosures are fetched as CURRENT state; replaying them
+            # onto historical windows would leak future information (look-ahead bias).
+            return AgentEvaluation(
+                role=self.role, score=NEUTRAL_SCORE, confidence=0.0,
+                rationale="insider: neutral in backtest (point-in-time data, no look-ahead)",
+            )
         transactions = await self._get_transactions(ctx.ticker)
         if not transactions:
             return AgentEvaluation(

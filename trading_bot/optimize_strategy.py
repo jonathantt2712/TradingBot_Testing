@@ -104,17 +104,25 @@ async def _eval_combo(
     tickers: list[str],
     bars_cache: dict[str, pd.DataFrame],
     spy_bars: Optional[pd.DataFrame],
+    use_llm: bool = False,
 ) -> dict:
-    """Run the full backtest for one parameter combination; return summary dict."""
+    """Run the full backtest for one parameter combination; return summary dict.
+
+    Wires the full agent set (Technical, Fundamental, Risk, Liquid + Insider/
+    Squeeze/Macro). The point-in-time agents self-neutralise via ctx.backtest_mode
+    (set inside backtest_ticker) so they add no look-ahead bias. The LLM Decision
+    agent is deliberately OFF: it picks direction itself and bypasses the
+    LONG/SHORT thresholds — the very parameters this optimizer is tuning.
+    """
     settings = _make_settings(params)
     pm = build_manager(
         settings,
         broker=None,
-        include_live_only_agents=False,
-        include_vision=False,
+        include_live_only_agents=True,
+        include_vision=use_llm,
         include_decision_agent=False,
-        include_insider=False,
-        include_squeeze=False,
+        include_insider=True,
+        include_squeeze=True,
     )
 
     all_trades = []
@@ -171,6 +179,7 @@ async def _run_threshold_grid(
     spy_bars,
     fixed_atr_stop: float = 2.0,
     fixed_atr_target: float = 4.0,
+    use_llm: bool = False,
 ) -> list[dict]:
     keys   = list(THRESHOLD_GRID.keys())
     values = list(THRESHOLD_GRID.values())
@@ -187,7 +196,7 @@ async def _run_threshold_grid(
             "ATR_TARGET_MULTIPLE": fixed_atr_target,
         }
         logger.info("  [%d/%d] %s", i, len(combos), _fmt_params(params))
-        summary = await _eval_combo(params, tickers, bars_cache, spy_bars)
+        summary = await _eval_combo(params, tickers, bars_cache, spy_bars, use_llm)
         if summary.get("total_trades", 0) >= MIN_TRADES:
             results.append(summary)
         else:
@@ -202,6 +211,7 @@ async def _run_atr_grid(
     spy_bars,
     best_long_thresh: float,
     best_short_thresh: float,
+    use_llm: bool = False,
 ) -> list[dict]:
     keys   = list(ATR_GRID.keys())
     values = list(ATR_GRID.values())
@@ -219,7 +229,7 @@ async def _run_atr_grid(
             "SHORT_THRESHOLD": best_short_thresh,
         }
         logger.info("  [%d/%d] %s", i, len(combos), _fmt_params(params))
-        summary = await _eval_combo(params, tickers, bars_cache, spy_bars)
+        summary = await _eval_combo(params, tickers, bars_cache, spy_bars, use_llm)
         if summary.get("total_trades", 0) >= MIN_TRADES:
             results.append(summary)
         else:
@@ -295,14 +305,15 @@ def _print_recommendation(thresh_results: list[dict], atr_results: list[dict]) -
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-async def run(tickers: list[str], days: int, phase: str) -> None:
+async def run(tickers: list[str], days: int, phase: str, use_llm: bool = False) -> None:
     settings = load_settings()
     if not settings.alpaca_key_id or not settings.alpaca_secret:
         logger.error("ALPACA_API_KEY_ID and ALPACA_API_SECRET must be set in .env or environment")
         return
 
+    agent_note = "ALL agents (Vision LLM ON)" if use_llm else "all non-LLM agents (Vision/Decision off)"
     print(f"\nOptimizer — {days}d window, {len(tickers)} tickers: {tickers}")
-    print(f"Phase: {phase}  |  Min trades: {MIN_TRADES}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%\n")
+    print(f"Phase: {phase}  |  Agents: {agent_note}  |  Min trades: {MIN_TRADES}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%\n")
 
     bars_cache, spy_bars = await _fetch_all(tickers, days, settings.alpaca_key_id, settings.alpaca_secret)
     if not bars_cache:
@@ -313,14 +324,14 @@ async def run(tickers: list[str], days: int, phase: str) -> None:
     atr_results:    list[dict] = []
 
     if phase in ("thresholds", "both"):
-        thresh_results = await _run_threshold_grid(tickers, bars_cache, spy_bars)
+        thresh_results = await _run_threshold_grid(tickers, bars_cache, spy_bars, use_llm=use_llm)
         _print_table(thresh_results, "Phase 1 — Threshold Grid (ranked by Sharpe)")
 
     best_long  = thresh_results[0]["params"]["LONG_THRESHOLD"]  if thresh_results else 60.0
     best_short = thresh_results[0]["params"]["SHORT_THRESHOLD"] if thresh_results else 40.0
 
     if phase in ("atr", "both"):
-        atr_results = await _run_atr_grid(tickers, bars_cache, spy_bars, best_long, best_short)
+        atr_results = await _run_atr_grid(tickers, bars_cache, spy_bars, best_long, best_short, use_llm=use_llm)
         _print_table(atr_results, "Phase 2 — ATR Grid (ranked by Sharpe)")
 
     _print_recommendation(thresh_results, atr_results)
@@ -348,8 +359,11 @@ def main() -> None:
     parser.add_argument("--phase",   choices=["thresholds", "atr", "both"],
                         default="both",
                         help="Which grid to search (default: both)")
+    parser.add_argument("--use-llm", action="store_true",
+                        help="Also run VisionAgent (LLM, slower + uses Gemini quota). "
+                             "The Decision LLM stays off — it bypasses the thresholds being tuned.")
     args = parser.parse_args()
-    asyncio.run(run(args.tickers, args.days, args.phase))
+    asyncio.run(run(args.tickers, args.days, args.phase, args.use_llm))
 
 
 if __name__ == "__main__":
