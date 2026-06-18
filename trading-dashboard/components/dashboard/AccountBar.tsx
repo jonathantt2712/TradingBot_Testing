@@ -83,12 +83,12 @@ export function AccountBar({ account, error, tradingMode = 'DRY RUN' }: Props) {
 
   return (
     <div className="card px-4 py-3 flex flex-wrap items-center gap-3 md:gap-6">
-      {/* Trading mode badge */}
+      {/* Trading mode badge: AUTO · PAPER (green) / AUTO · LIVE (red) / MANUAL / DRY RUN (amber) */}
       <span className={cn(
         'rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider',
-        tradingMode === 'LIVE PAPER'
+        tradingMode === 'AUTO · PAPER'
           ? 'border-bull/30 bg-bull/10 text-bull'
-          : tradingMode === 'LIVE REAL'
+          : tradingMode === 'AUTO · LIVE'
           ? 'border-bear/30 bg-bear/10 text-bear'
           : 'border-caution/30 bg-caution/10 text-caution',
       )}>

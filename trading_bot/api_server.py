@@ -236,6 +236,7 @@ PNL_FILE     = DATA_DIR / "pnl.json"
 CONTEXT_FILE = DATA_DIR / "context.json"
 WEIGHTS_FILE = DATA_DIR / "strategy_weights.json"
 REGIME_FILE  = DATA_DIR / "regime.json"
+TRADE_MODE_FILE = DATA_DIR / "trade_mode.json"   # auto-execute toggle (shared with live_runner)
 REJECT_LOG      = DATA_DIR / "risk_rejections.jsonl"
 SNAPSHOT_LOG    = DATA_DIR / "daily_snapshots.jsonl"
 AGENT_PERF_FILE = DATA_DIR / "agent_attribution.json"
@@ -253,6 +254,20 @@ def _save(path: Path, obj: Any) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
     tmp.replace(path)
+
+
+def _load_trade_mode() -> Dict[str, Any]:
+    """Read the runtime auto-execute toggle.
+
+    Default ``auto_execute=False`` (manual): the bot generates signals but
+    never places orders itself — the user approves each trade on the site.
+    When ``True``, live_runner auto-executes entries (still requires
+    EXECUTE_LIVE=true on the bot server for any order to leave the building).
+    """
+    data = _load(TRADE_MODE_FILE, {})
+    if not isinstance(data, dict):
+        return {"auto_execute": False}
+    return {"auto_execute": bool(data.get("auto_execute", False))}
 
 
 def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
@@ -2740,6 +2755,31 @@ def get_scan_stats():
     }
 
 
+class TradeModeBody(BaseModel):
+    auto_execute: bool
+
+
+@app.get("/api/trade-mode", dependencies=[Depends(_verify_bot_secret)])
+def get_trade_mode():
+    """Return the current execution mode (auto-execute vs manual approval)."""
+    return _load_trade_mode()
+
+
+@app.post("/api/trade-mode", dependencies=[Depends(_verify_bot_secret)])
+def set_trade_mode(body: TradeModeBody):
+    """Toggle whether the bot auto-executes entries or waits for manual approval.
+
+    Written to data/trade_mode.json; live_runner reads it each evaluation
+    cycle, so the switch takes effect within one scan without a redeploy.
+    """
+    _save(TRADE_MODE_FILE, {
+        "auto_execute": body.auto_execute,
+        "updated_at":   datetime.utcnow().isoformat(),
+    })
+    logger.info("Trade mode set: auto_execute=%s", body.auto_execute)
+    return {"status": "ok", "auto_execute": body.auto_execute}
+
+
 @app.get("/api/health")
 def health():
     gemini_set    = bool(os.getenv("GEMINI_API_KEY"))
@@ -2747,6 +2787,7 @@ def health():
     ai4_set       = bool(os.getenv("AI4TRADE_EMAIL") and os.getenv("AI4TRADE_PASSWORD"))
     execute_live  = os.getenv("EXECUTE_LIVE", "false").lower() in ("1", "true", "yes")
     alpaca_paper  = os.getenv("ALPACA_PAPER", "true").lower() not in ("0", "false", "no")
+    auto_execute  = _load_trade_mode()["auto_execute"]
     return {
         "status":    "ok",
         "agents":    _AGENTS_AVAILABLE,
@@ -2757,12 +2798,13 @@ def health():
         "circuit_breaker": _circuit_breaker,
         "trading": {
             "execute_live": execute_live,
+            "auto_execute": auto_execute,
             "paper_mode":   alpaca_paper,
             "broker":       os.getenv("BROKER", "alpaca"),
             "mode_label":   (
-                "LIVE PAPER" if execute_live and alpaca_paper else
-                "LIVE REAL"  if execute_live and not alpaca_paper else
-                "DRY RUN"
+                "DRY RUN"                                    if not execute_live else
+                ("AUTO · PAPER" if alpaca_paper else "AUTO · LIVE") if auto_execute else
+                "MANUAL"
             ),
         },
         "keys": {

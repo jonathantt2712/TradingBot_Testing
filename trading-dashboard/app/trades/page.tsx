@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { TradeCard }       from '@/components/trades/TradeCard'
 import { ConfirmModal }    from '@/components/trades/ConfirmModal'
 import { RationaleModal }  from '@/components/trades/RationaleModal'
+import { ExecutionModeToggle } from '@/components/trades/ExecutionModeToggle'
 import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
 import { demoRegime, api } from '@/lib/api'
 import type { TradeRecommendation, RegimeInfo } from '@/types/trading'
@@ -246,6 +247,8 @@ export default function TradesPage() {
             ? <span className="flex items-center gap-1.5 text-xs text-bull"><Wifi className="h-3 w-3" /> Live</span>
             : <span className="flex items-center gap-1.5 text-xs text-caution"><WifiOff className="h-3 w-3" /> Demo</span>
           }
+          {/* Execution mode: manual approval vs auto-execute */}
+          <ExecutionModeToggle />
           {/* Filter pills */}
           <div className="flex items-center gap-1 rounded-lg border border-bg-border p-0.5">
             {(['all', 'LONG', 'SHORT'] as const).map(f => (
