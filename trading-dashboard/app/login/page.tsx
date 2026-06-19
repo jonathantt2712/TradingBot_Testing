@@ -6,25 +6,11 @@ import Link from 'next/link'
 import { signIn } from 'next-auth/react'
 import { Zap, Eye, EyeOff } from 'lucide-react'
 
-const COUNTRY_CODES = [
-  { name: 'Israel',         code: '+972' },
-  { name: 'United States',  code: '+1' },
-  { name: 'United Kingdom', code: '+44' },
-  { name: 'Canada',         code: '+1' },
-  { name: 'Australia',      code: '+61' },
-  { name: 'Germany',        code: '+49' },
-  { name: 'France',         code: '+33' },
-  { name: 'India',          code: '+91' },
-]
-
-const PHONE_REGEX = /^\d{6,14}$/
 
 export default function LoginPage() {
   const router = useRouter()
   const [mode, setMode]         = useState<'signin' | 'signup'>('signin')
   const [email, setEmail]       = useState('')
-  const [countryCode, setCountryCode] = useState(COUNTRY_CODES[0].code)
-  const [phone, setPhone]       = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm]   = useState('')
   const [alpacaKeyId, setAlpacaKeyId]   = useState('')
@@ -60,16 +46,12 @@ export default function LoginPage() {
       setError('Passwords do not match')
       return
     }
-    if (!PHONE_REGEX.test(phone)) {
-      setError('Enter a valid phone number (digits only, 6-14 digits)')
-      return
-    }
     setLoading(true)
     try {
       const res = await fetch('/api/auth/signup', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ email, phone: `${countryCode}${phone}`, password, alpacaKeyId, alpacaSecret, alpacaPaper }),
+        body:    JSON.stringify({ email, password, alpacaKeyId, alpacaSecret, alpacaPaper }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -158,21 +140,6 @@ export default function LoginPage() {
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
-              </div>
-              <div className="flex gap-2">
-                <select
-                  value={countryCode} onChange={e => setCountryCode(e.target.value)}
-                  className="rounded-lg border border-bg-border bg-bg-base px-2 py-1.5 text-sm text-primary"
-                >
-                  {COUNTRY_CODES.map(({ name, code }) => (
-                    <option key={name} value={code}>{name} ({code})</option>
-                  ))}
-                </select>
-                <input
-                  type="tel" required placeholder="Phone number" value={phone} onChange={e => setPhone(e.target.value)}
-                  pattern="\d{6,14}" title="Digits only, 6-14 digits"
-                  className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-1.5 text-sm text-primary placeholder:text-muted"
-                />
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <input
