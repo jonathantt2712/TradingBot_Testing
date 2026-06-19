@@ -33,6 +33,14 @@ try:
 except Exception:
     _HAS_PANDAS_TA = False
 
+# cdl_pattern(name="all") prints "[i] Requires TA-Lib" for every pattern (~60
+# lines) unless the native C library is installed. Gate on actual talib presence.
+try:
+    import talib as _talib  # type: ignore  # noqa: F401
+    _HAS_TALIB_C = True
+except Exception:
+    _HAS_TALIB_C = False
+
 
 # Signal weights (must sum to 1.0)
 _WEIGHTS = {
@@ -1067,7 +1075,9 @@ class TechnicalAgent(BaseAgent):
             return None
 
     def _pattern_score(self, df: pd.DataFrame) -> Optional[float]:
-        """Candlestick pattern score via pandas-ta."""
+        """Candlestick pattern score via pandas-ta (requires TA-Lib C library)."""
+        if not _HAS_TALIB_C or not _HAS_PANDAS_TA:
+            return None
         if len(df) < 10:
             return None
         try:

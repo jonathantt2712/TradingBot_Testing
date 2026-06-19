@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config.settings import load_settings
 from core.enums import Decision
 from core.models import AnalysisContext, RiskParameters
+from core.trade_stats import load_closed_trades, summarize, format_block
 from bootstrap import build_manager, build_news
 
 logging.basicConfig(
@@ -588,6 +589,10 @@ async def run(tickers: list[str], days: int) -> None:
     if not settings.alpaca_key_id or not settings.alpaca_secret:
         logger.error("Set ALPACA_API_KEY_ID and ALPACA_API_SECRET in .env")
         return
+
+    # Log real trade history so the run learns from the history tab.
+    _hist_stats = summarize(load_closed_trades())
+    logger.info(format_block(_hist_stats))
 
     end_dt   = datetime.now(tz=timezone.utc).replace(hour=23, minute=59, second=59)
     start_dt = end_dt - timedelta(days=days + 5)   # buffer for weekends

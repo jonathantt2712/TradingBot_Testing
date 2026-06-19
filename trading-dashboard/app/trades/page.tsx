@@ -6,8 +6,8 @@ import { RationaleModal }  from '@/components/trades/RationaleModal'
 import { ExecutionModeToggle } from '@/components/trades/ExecutionModeToggle'
 import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
 import { demoRegime, api } from '@/lib/api'
-import type { TradeRecommendation, RegimeInfo } from '@/types/trading'
-import { RefreshCw, Filter, Wifi, WifiOff, ChevronDown, ChevronUp, CheckCircle2, ShoppingCart, Loader2 } from 'lucide-react'
+import type { TradeRecommendation, RegimeInfo, ScanResults } from '@/types/trading'
+import { RefreshCw, Filter, Wifi, WifiOff, ChevronDown, ChevronUp, CheckCircle2, ShoppingCart, Loader2, ScanSearch, TrendingUp, TrendingDown } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
@@ -78,6 +78,8 @@ export default function TradesPage() {
   const [filter,       setFilter]       = useState<'all' | 'LONG' | 'SHORT'>('all')
   const [trades,       setTrades]       = useState<TradeRecommendation[]>([])
   const [regime,       setRegime]       = useState<RegimeInfo>(demoRegime())
+  const [scanLog,      setScanLog]      = useState<ScanResults | null>(null)
+  const [showScanLog,  setShowScanLog]  = useState(false)
   const [prices,       setPrices]       = useState<Record<string, number>>({})
   const [loading,      setLoading]      = useState(false)
   const [live,         setLive]         = useState(false)
@@ -113,13 +115,18 @@ export default function TradesPage() {
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
-      const [recs, reg] = await Promise.allSettled([api.recommendations(), api.regime()])
+      const [recs, reg, scan] = await Promise.allSettled([
+        api.recommendations(),
+        api.regime(),
+        api.scanResults(),
+      ])
       const newRecs = recs.status === 'fulfilled'
         ? [...recs.value].sort(byScore)
         : []
       setTrades(newRecs)
       setLive(recs.status === 'fulfilled')
       if (reg.status === 'fulfilled') setRegime(reg.value)
+      if (scan.status === 'fulfilled') setScanLog(scan.value)
       fetchPrices(newRecs)
     } catch {
       setLive(false)
@@ -355,6 +362,100 @@ export default function TradesPage() {
                   />
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Scan Log — all scanned tickers with why each was picked or skipped */}
+      {scanLog && (scanLog.picked.length + scanLog.rejected.length) > 0 && (
+        <div className="space-y-3 border-t border-bg-border pt-4">
+          <button
+            onClick={() => setShowScanLog(v => !v)}
+            className="flex items-center gap-2 text-sm font-semibold text-subtle hover:text-primary transition-colors"
+          >
+            <ScanSearch className="h-4 w-4 text-brand-cyan" />
+            Scan Log
+            <span className="rounded-full bg-brand-cyan/10 px-2 py-0.5 text-[10px] font-bold text-brand-cyan">
+              {scanLog.picked.length + scanLog.rejected.length} scanned
+            </span>
+            <span className="rounded-full bg-bull/10 px-2 py-0.5 text-[10px] font-bold text-bull">
+              {scanLog.picked.length} picked
+            </span>
+            <span className="rounded-full bg-muted/10 px-2 py-0.5 text-[10px] font-bold text-muted">
+              {scanLog.rejected.length} skipped
+            </span>
+            {showScanLog
+              ? <ChevronUp className="h-3.5 w-3.5 text-muted" />
+              : <ChevronDown className="h-3.5 w-3.5 text-muted" />
+            }
+          </button>
+
+          {showScanLog && (
+            <div className="rounded-xl border border-bg-border overflow-hidden text-xs">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-bg-border bg-bg-hover">
+                    <th className="px-3 py-2 text-left font-semibold text-muted">Ticker</th>
+                    <th className="px-3 py-2 text-right font-semibold text-muted">Price</th>
+                    <th className="px-3 py-2 text-right font-semibold text-muted">Chg%</th>
+                    <th className="px-3 py-2 text-right font-semibold text-muted">Score</th>
+                    <th className="px-3 py-2 text-left font-semibold text-muted">Decision / Reason</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-bg-border">
+                  {scanLog.picked.map(r => (
+                    <tr key={r.ticker} className="hover:bg-bg-hover/50">
+                      <td className="px-3 py-2 font-bold text-primary">{r.ticker}</td>
+                      <td className="px-3 py-2 text-right text-subtle">${(r.risk?.entry ?? 0).toFixed(2)}</td>
+                      <td className={cn('px-3 py-2 text-right font-medium',
+                        (r.chg_pct ?? 0) >= 0 ? 'text-bull' : 'text-bear')}>
+                        {((r.chg_pct ?? 0) >= 0 ? '+' : '')}{(r.chg_pct ?? 0).toFixed(1)}%
+                      </td>
+                      <td className="px-3 py-2 text-right font-semibold text-brand-cyan">
+                        {r.composite_score?.toFixed(1) ?? '—'}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={cn(
+                          'inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-semibold',
+                          r.direction === 'LONG'
+                            ? 'bg-bull/15 text-bull'
+                            : 'bg-bear/15 text-bear',
+                        )}>
+                          {r.direction === 'LONG'
+                            ? <TrendingUp className="h-3 w-3" />
+                            : <TrendingDown className="h-3 w-3" />}
+                          {r.direction}
+                        </span>
+                        {r.rationale && (
+                          <span className="ml-2 text-muted">{r.rationale}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {scanLog.rejected.map(r => (
+                    <tr key={r.ticker} className="opacity-60 hover:opacity-80 hover:bg-bg-hover/30">
+                      <td className="px-3 py-2 font-medium text-subtle">{r.ticker}</td>
+                      <td className="px-3 py-2 text-right text-muted">
+                        {r.price ? `$${r.price.toFixed(2)}` : '—'}
+                      </td>
+                      <td className={cn('px-3 py-2 text-right',
+                        r.chg_pct >= 0 ? 'text-bull/70' : 'text-bear/70')}>
+                        {r.chg_pct ? `${r.chg_pct >= 0 ? '+' : ''}${r.chg_pct.toFixed(1)}%` : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-right text-muted">
+                        {r.score != null ? r.score.toFixed(1) : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-muted italic">{r.skip_reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {scanLog.scanned_at && (
+                <div className="px-3 py-2 text-[10px] text-muted border-t border-bg-border bg-bg-hover">
+                  Last scan: {new Date(scanLog.scanned_at).toLocaleTimeString()}
+                </div>
+              )}
             </div>
           )}
         </div>
