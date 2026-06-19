@@ -243,51 +243,59 @@ export async function getFills(creds: AlpacaCreds, pageSize = 200): Promise<Alpa
 }
 
 /**
- * Compute per-trade win rate from raw fill activities.
- * Uses FIFO matching: every time a position in a symbol closes back to 0,
- * that counts as one completed trade (win if P&L > 0).
+ * Compute per-trade win rate from Alpaca fill activities using FIFO matching.
+ * A "trade" completes when a position in a symbol returns to flat (qty ≈ 0).
+ * Accumulates P&L across multiple partial fills so multi-fill closes are counted.
  */
 export function winRateFromFills(fills: AlpacaFill[]): number | null {
-  // position state per symbol: { qty (signed: + long, - short), basis (cost) }
-  const positions: Record<string, { qty: number; basis: number }> = {}
+  const pos: Record<string, { qty: number; avgCost: number; runningPnl: number }> = {}
   let wins = 0, total = 0
+  const EPS = 0.0001
 
-  for (const fill of fills) {
-    const qty   = parseFloat(fill.qty)
-    const price = parseFloat(fill.price)
-    const sym   = fill.symbol
-    if (!positions[sym]) positions[sym] = { qty: 0, basis: 0 }
-    const pos = positions[sym]
+  for (const f of fills) {
+    const qty   = parseFloat(f.qty)
+    const price = parseFloat(f.price)
+    const sym   = f.symbol
+    if (!pos[sym]) pos[sym] = { qty: 0, avgCost: 0, runningPnl: 0 }
+    const p = pos[sym]
 
-    if (fill.side === 'buy') {
-      if (pos.qty < 0) {
-        // Closing a short
-        const closeQty = Math.min(qty, -pos.qty)
-        const pnl = (pos.basis / -pos.qty - price) * closeQty
-        if (closeQty === -pos.qty) { total++; if (pnl > 0) wins++ }
-        pos.qty  += closeQty
-        pos.basis = pos.qty < 0 ? pos.basis * (1 + closeQty / -pos.qty) : 0
-        // Open remaining as new long
-        const remaining = qty - closeQty
-        if (remaining > 0) { pos.qty += remaining; pos.basis += remaining * price }
+    if (f.side === 'buy') {
+      if (p.qty < 0) {
+        // Covering a short — accumulate P&L for this partial close
+        const cover   = Math.min(qty, -p.qty)
+        p.runningPnl += (p.avgCost - price) * cover
+        p.qty        += cover
+        if (Math.abs(p.qty) < EPS) {
+          // Position fully closed — record the trade
+          total++; if (p.runningPnl > 0) wins++
+          p.runningPnl = 0; p.avgCost = 0; p.qty = 0
+        }
+        // Any remaining qty opens a new long
+        const rem = qty - cover
+        if (rem > EPS) { p.qty = rem; p.avgCost = price; p.runningPnl = 0 }
       } else {
-        pos.qty   += qty
-        pos.basis += qty * price
+        // Adding to / opening a long (weighted avg cost)
+        p.avgCost = (p.avgCost * p.qty + price * qty) / (p.qty + qty)
+        p.qty    += qty
       }
     } else {
-      if (pos.qty > 0) {
-        // Closing a long
-        const closeQty = Math.min(qty, pos.qty)
-        const pnl = (price - pos.basis / pos.qty) * closeQty
-        if (closeQty === pos.qty) { total++; if (pnl > 0) wins++ }
-        pos.qty  -= closeQty
-        pos.basis = pos.qty > 0 ? pos.basis * (1 - closeQty / (pos.qty + closeQty)) : 0
-        // Open remaining as new short
-        const remaining = qty - closeQty
-        if (remaining > 0) { pos.qty -= remaining; pos.basis += remaining * price }
+      if (p.qty > 0) {
+        // Selling a long — accumulate P&L for this partial close
+        const sell    = Math.min(qty, p.qty)
+        p.runningPnl += (price - p.avgCost) * sell
+        p.qty        -= sell
+        if (Math.abs(p.qty) < EPS) {
+          // Position fully closed — record the trade
+          total++; if (p.runningPnl > 0) wins++
+          p.runningPnl = 0; p.avgCost = 0; p.qty = 0
+        }
+        // Any remaining qty opens a new short
+        const rem = qty - sell
+        if (rem > EPS) { p.qty = -rem; p.avgCost = price; p.runningPnl = 0 }
       } else {
-        pos.qty   -= qty
-        pos.basis += qty * price
+        // Adding to / opening a short (weighted avg cost)
+        p.avgCost = (p.avgCost * (-p.qty) + price * qty) / (-p.qty + qty)
+        p.qty    -= qty
       }
     }
   }

@@ -27,20 +27,16 @@ export async function GET() {
       if (!isNaN(todayPnl)) stats.today_pnl = +todayPnl.toFixed(2)
 
       if (history.status === 'fulfilled') {
-        const pl = history.value.profit_loss
-
-        // Total P&L = current equity minus base value at start of history period.
-        const base = history.value.base_value
+        const base     = history.value.base_value
         const totalPnl = parseFloat(acc.equity) - base
         if (base > 0 && !isNaN(totalPnl)) stats.total_pnl = +totalPnl.toFixed(2)
+      }
 
-        // Win rate from bot history is 0 when the bot has no closed trade records
-        // (e.g. ephemeral filesystem on Railway). Fall back to per-trade win rate
-        // computed from Alpaca fill activities via FIFO matching.
-        if (stats.win_rate === 0 && fills.status === 'fulfilled') {
-          const computed = winRateFromFills(fills.value)
-          if (computed !== null) stats.win_rate = computed
-        }
+      // Always prefer real Alpaca fill-based win rate over bot's local history
+      // (bot history may be empty on ephemeral filesystems like Railway).
+      if (fills.status === 'fulfilled' && Array.isArray(fills.value)) {
+        const computed = winRateFromFills(fills.value)
+        if (computed !== null) stats.win_rate = computed
       }
 
       // open_positions is set by the frontend from the live positions fetch
