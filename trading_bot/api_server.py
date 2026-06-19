@@ -2245,7 +2245,11 @@ def get_recommendations():
 def get_scan_results():
     data = _load(SCAN_LOG_FILE, {})
     if isinstance(data, dict):
-        return data
+        return {
+            "picked":     data.get("picked", []),
+            "rejected":   data.get("rejected", []),
+            "scanned_at": data.get("scanned_at"),
+        }
     return {"picked": [], "rejected": [], "scanned_at": None}
 
 

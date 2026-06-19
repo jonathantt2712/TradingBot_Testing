@@ -126,7 +126,14 @@ export default function TradesPage() {
       setTrades(newRecs)
       setLive(recs.status === 'fulfilled')
       if (reg.status === 'fulfilled') setRegime(reg.value)
-      if (scan.status === 'fulfilled') setScanLog(scan.value)
+      if (scan.status === 'fulfilled') {
+        const s = scan.value
+        setScanLog({
+          picked:     Array.isArray(s?.picked)   ? s.picked   : [],
+          rejected:   Array.isArray(s?.rejected) ? s.rejected : [],
+          scanned_at: s?.scanned_at ?? null,
+        })
+      }
       fetchPrices(newRecs)
     } catch {
       setLive(false)
@@ -368,7 +375,7 @@ export default function TradesPage() {
       )}
 
       {/* Scan Log — all scanned tickers with why each was picked or skipped */}
-      {scanLog && (scanLog.picked.length + scanLog.rejected.length) > 0 && (
+      {scanLog && ((scanLog.picked?.length ?? 0) + (scanLog.rejected?.length ?? 0)) > 0 && (
         <div className="space-y-3 border-t border-bg-border pt-4">
           <button
             onClick={() => setShowScanLog(v => !v)}
