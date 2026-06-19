@@ -472,7 +472,11 @@ async def run(
             n = int(os.getenv("BACKTEST_TOP_N", "20"))
             logger.info("Universe scanner: fetching top %d candidates for optimizer…", n)
             tickers = await scanner.get_candidates(top_n=n)
-            logger.info("Universe: %s", " ".join(tickers))
+            if not tickers:
+                logger.warning("Universe scanner returned 0 candidates — using fallback list")
+                tickers = _FALLBACK_TICKERS
+            else:
+                logger.info("Universe: %s", " ".join(tickers))
         except Exception as exc:
             logger.warning("Universe scanner failed (%s) — using fallback list", exc)
             tickers = _FALLBACK_TICKERS

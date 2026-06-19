@@ -106,16 +106,39 @@ class TechnicalAgent(BaseAgent):
         df = bars.copy()
         signals: dict[str, float] = {}
         h_bias = h_desc = h_agree = h_disagree = None
+        _stale_note = ""  # set below if data is stale; carried into rationale
 
         # ── Stale-data guard ─────────────────────────────────────────────
-        # If the most recent bar is more than 30 minutes old during RTH,
-        # data is stale (broker connectivity issue) — return neutral.
-        # Skip in backtest mode: historical bars are always "old" vs. now().
+        # Skip entirely in backtest mode: historical bars are always "old" vs now().
+        # In live mode: if bars are >30 min old during regular trading hours AND
+        # the market was actually open today (not a holiday), reduce confidence
+        # rather than aborting — so the composite still reflects a real signal,
+        # just with less weight.
         if not getattr(ctx, "backtest_mode", False):
           try:
-            from datetime import datetime
+            from datetime import datetime, date as _date
             from zoneinfo import ZoneInfo
             _ET = ZoneInfo("America/New_York")
+
+            # NYSE observed holidays 2025-2027 (add new years as needed)
+            _NYSE_HOLIDAYS = {
+                # 2025
+                _date(2025, 1, 1), _date(2025, 1, 20), _date(2025, 2, 17),
+                _date(2025, 4, 18), _date(2025, 5, 26), _date(2025, 6, 19),
+                _date(2025, 7, 4), _date(2025, 9, 1), _date(2025, 11, 27),
+                _date(2025, 12, 25),
+                # 2026
+                _date(2026, 1, 1), _date(2026, 1, 19), _date(2026, 2, 16),
+                _date(2026, 4, 3), _date(2026, 5, 25), _date(2026, 6, 19),
+                _date(2026, 7, 3), _date(2026, 9, 7), _date(2026, 11, 26),
+                _date(2026, 12, 25),
+                # 2027
+                _date(2027, 1, 1), _date(2027, 1, 18), _date(2027, 2, 15),
+                _date(2027, 3, 26), _date(2027, 5, 31), _date(2027, 6, 18),
+                _date(2027, 7, 5), _date(2027, 9, 6), _date(2027, 11, 25),
+                _date(2027, 12, 24),
+            }
+
             last_ts = df.index[-1]
             if last_ts.tzinfo is None:
                 last_ts = last_ts.tz_localize("UTC")
@@ -124,18 +147,20 @@ class TechnicalAgent(BaseAgent):
             age_min = (now_et - last_ts_et).total_seconds() / 60
             mkt_open  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
             mkt_close = now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
-            is_rth = now_et.weekday() < 5 and mkt_open <= now_et <= mkt_close
+            today_et  = now_et.date()
+            is_rth = (
+                now_et.weekday() < 5
+                and today_et not in _NYSE_HOLIDAYS
+                and mkt_open <= now_et <= mkt_close
+            )
             if is_rth and age_min > 30:
                 logger.warning(
                     "TechnicalAgent: stale data for %s — last bar %.0fmin old",
                     ctx.ticker, age_min,
                 )
-                return AgentEvaluation(
-                    role=self.role,
-                    score=NEUTRAL_SCORE,
-                    confidence=0.05,
-                    rationale=f"stale data: last bar {age_min:.0f}min old",
-                )
+                # Don't abort — continue computing the score but flag as stale.
+                # The reduced confidence means the composite is barely affected.
+                _stale_note = f"stale data: last bar {age_min:.0f}min old — "
           except Exception:
             pass  # tz parse error — skip guard
 
@@ -517,6 +542,10 @@ class TechnicalAgent(BaseAgent):
                 "agreement": "confirm" if h_agree else ("conflict" if h_disagree else "neutral"),
             } if hourly is not None else None,
         }
+
+        if _stale_note:
+            confidence = min(confidence, 0.15)  # reduce weight in composite
+            rationale = _stale_note + rationale
 
         return AgentEvaluation(
             role=self.role,

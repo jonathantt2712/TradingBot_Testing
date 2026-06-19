@@ -597,7 +597,11 @@ async def run(tickers: list[str], days: int) -> None:
             n = int(os.getenv("BACKTEST_TOP_N", "30"))
             logger.info("Universe scanner: fetching top %d candidates…", n)
             tickers = await scanner.get_candidates(top_n=n)
-            logger.info("Universe: %s", " ".join(tickers))
+            if tickers:
+                logger.info("Universe: %s", " ".join(tickers))
+            else:
+                logger.warning("Universe scanner returned 0 candidates (holiday/off-hours?) — using fallback list")
+                tickers = _FALLBACK_TICKERS
         except Exception as exc:
             logger.warning("Universe scanner failed (%s) — using fallback list", exc)
             tickers = _FALLBACK_TICKERS
@@ -678,9 +682,16 @@ async def run(tickers: list[str], days: int) -> None:
 
     summary = print_summary(all_trades)
 
-    if summary:
-        RESULTS_FILE.write_text(json.dumps(summary, indent=2, default=str))
-        logger.info("Results saved to %s", RESULTS_FILE)
+    # Always write results so the dashboard shows something (even "0 trades").
+    out = summary if summary else {
+        "total_trades": 0, "wins": 0, "losses": 0, "eods": 0,
+        "win_rate": 0.0, "total_pnl": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
+        "profit_factor": 0.0, "sharpe": 0.0, "max_drawdown": 0.0,
+        "ev_per_trade": 0.0, "by_ticker": [], "trades": [],
+        "message": "No trades generated — signals may be insufficient or tickers had no setups",
+    }
+    RESULTS_FILE.write_text(json.dumps(out, indent=2, default=str))
+    logger.info("Results saved to %s", RESULTS_FILE)
 
     _update_weights_from_backtest(all_trades)
 
