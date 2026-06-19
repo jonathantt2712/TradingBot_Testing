@@ -160,6 +160,7 @@ async def breakout_monitor_loop(
             )
             if not breakouts:
                 continue
+            await pm.refresh_protections()
             async with _ticker_lock:
                 for sym in breakouts:
                     if sym not in active_tickers:
@@ -216,6 +217,8 @@ async def rescan_loop(
 
         # Regime + SPY bars go stale over a session — refresh before re-scoring.
         await refresh_market_context(pm, broker)
+        # Detect exits → update re-entry cooldowns, loss-streak guard, memory.
+        await pm.refresh_protections()
 
         if not _is_market_hours():
             logger.debug("rescan: market closed — skipping LLM evaluation")
@@ -425,6 +428,7 @@ async def main(tickers: Sequence[str]) -> None:
 
     async with broker:
         await refresh_market_context(pm, broker)
+        await pm.refresh_protections()
 
         logger.info("Initial scan of %s", active_tickers)
         await asyncio.gather(

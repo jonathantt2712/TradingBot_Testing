@@ -57,6 +57,26 @@ class RiskConfig:
     max_open_positions:     int   = field(default_factory=lambda: int(_env_float("MAX_OPEN_POSITIONS", 5)))
     max_daily_loss_pct:     float = field(default_factory=lambda: _env_float("MAX_DAILY_LOSS_PCT", 0.03))
 
+    # ── Trade protections (freqtrade-style circuit breakers) ──────────────────
+    # All of these only ever BLOCK new entries; they never create or enlarge a
+    # trade, so they are strictly risk-reducing. Set any value to 0 to disable it.
+    #
+    # CooldownPeriod: minutes a symbol is blocked from re-entry after it closes,
+    # to avoid whipsaw churn (stop out → immediately re-enter the same setup).
+    reentry_cooldown_min:       int   = field(default_factory=lambda: int(_env_float("REENTRY_COOLDOWN_MIN", 15)))
+    # StoplossGuard: if this many losing exits occur within the rolling window,
+    # pause ALL new entries for the halt duration (catches choppy "death by a
+    # thousand cuts" days before the daily kill switch is reached).
+    loss_streak_limit:          int   = field(default_factory=lambda: int(_env_float("LOSS_STREAK_LIMIT", 3)))
+    loss_streak_window_min:     int   = field(default_factory=lambda: int(_env_float("LOSS_STREAK_WINDOW_MIN", 60)))
+    loss_streak_halt_min:       int   = field(default_factory=lambda: int(_env_float("LOSS_STREAK_HALT_MIN", 60)))
+    # MaxDrawdown (equity mode): halt for the day once equity falls this far below
+    # its intraday PEAK — protects gains the from-open daily stop would miss.
+    intraday_drawdown_halt_pct: float = field(default_factory=lambda: _env_float("INTRADAY_DRAWDOWN_HALT_PCT", 0.03))
+    # Concentration cap: max simultaneous open positions in one correlation group
+    # (e.g. mega-cap tech) so the bot can't stack one undiversified bet.
+    max_correlated_positions:   int   = field(default_factory=lambda: int(_env_float("MAX_CORRELATED_POSITIONS", 3)))
+
 
 @dataclass(slots=True)
 class DecisionThresholds:

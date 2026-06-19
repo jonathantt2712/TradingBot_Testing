@@ -1,6 +1,6 @@
 """PortfolioManager: composite blending, direction thresholds, kill switch, entry guard."""
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -9,7 +9,10 @@ from agents.regime_agent import MarketRegime, RegimeSnapshot
 from config.settings import Settings
 from core.enums import AgentRole, Decision
 from core.models import AgentEvaluation
+from core.trade_memory import TradeMemory
 from execution.portfolio_manager import PortfolioManager
+
+_ET = ZoneInfo("America/New_York")
 
 
 def _ev(role: AgentRole, score: float, confidence: float = 1.0) -> AgentEvaluation:
@@ -165,3 +168,94 @@ def test_entry_blocked_when_state_unavailable():
     pm = make_pm()
     pm.broker = FakeBroker(fail=True)
     assert _allowed(pm, "NVDA") is False
+
+
+# ── trade protections: intraday peak-drawdown halt ───────────────────────────
+
+def test_intraday_drawdown_halt_catches_giveback():
+    pm = make_pm(max_daily_loss_pct=0.03, intraday_drawdown_halt_pct=0.03)
+    assert pm._check_daily_loss({"equity": 100_000.0}) is False  # baseline + peak
+    assert pm._check_daily_loss({"equity": 104_000.0}) is False  # up 4%, peak=104k
+    # back to +0.5%: still fine vs the from-open 3% stop, but >3% below the peak
+    assert pm._check_daily_loss({"equity": 100_500.0}) is True
+    assert pm._halted
+
+
+def test_intraday_drawdown_does_not_trip_on_the_way_up():
+    pm = make_pm(intraday_drawdown_halt_pct=0.03)
+    pm._check_daily_loss({"equity": 100_000.0})
+    assert pm._check_daily_loss({"equity": 101_000.0}) is False
+    assert pm._check_daily_loss({"equity": 103_000.0}) is False
+    assert not pm._halted
+
+
+# ── trade protections: exit detection (cooldown + loss streak + memory) ──────
+
+def test_observe_positions_sets_reentry_cooldown(tmp_path):
+    pm = make_pm(reentry_cooldown_min=15)
+    pm._memory = TradeMemory(path=tmp_path / "m.json")
+    pm._observe_positions([{"symbol": "NVDA", "unrealized_pl": 20.0}])
+    pm._observe_positions([])  # NVDA gone → exited
+    assert "NVDA" in pm._cooldown_until
+    pm.broker = FakeBroker()
+    assert _allowed(pm, "NVDA") is False           # within cooldown
+    pm._cooldown_until["NVDA"] = datetime.now(_ET) - timedelta(minutes=1)
+    assert _allowed(pm, "NVDA") is True             # cooldown expired
+
+
+def test_losing_exit_counts_toward_streak_winner_does_not(tmp_path):
+    pm = make_pm()
+    pm._memory = TradeMemory(path=tmp_path / "m.json")
+    pm._observe_positions([{"symbol": "AAPL", "unrealized_pl": 50.0}])
+    pm._observe_positions([])                        # AAPL exits a WINNER
+    assert pm._recent_stops == []
+    pm._observe_positions([{"symbol": "TSLA", "unrealized_pl": -50.0}])
+    pm._observe_positions([])                        # TSLA exits a LOSER
+    assert len(pm._recent_stops) == 1
+
+
+def test_stoploss_guard_halts_after_streak(tmp_path):
+    pm = make_pm(loss_streak_limit=3, loss_streak_halt_min=60)
+    pm._memory = TradeMemory(path=tmp_path / "m.json")
+    for sym in ("A", "B", "C"):
+        pm._observe_positions([{"symbol": sym, "unrealized_pl": -10.0}])
+        pm._observe_positions([])
+    assert pm._streak_halt_until is not None
+    pm.broker = FakeBroker()
+    assert _allowed(pm, "MSFT") is False             # all entries paused
+
+
+def test_observe_positions_records_outcome_to_memory(tmp_path):
+    pm = make_pm()
+    pm._memory = TradeMemory(path=tmp_path / "m.json")
+    pm._memory.record_decision("NVDA", "LONG", 70.0)
+    pm._observe_positions([{"symbol": "NVDA", "unrealized_pl": 120.0}])
+    pm._observe_positions([])                        # exit → outcome attached
+    entries = pm._memory._load()
+    assert entries[0]["outcome_pnl"] == 120.0
+
+
+# ── trade protections: concentration cap ─────────────────────────────────────
+
+def test_concentration_cap_blocks_correlated_stack():
+    pm = make_pm(max_correlated_positions=3)
+    pm.broker = FakeBroker(positions=[
+        {"symbol": "NVDA"}, {"symbol": "AAPL"}, {"symbol": "MSFT"},  # all mega_tech
+    ])
+    assert _allowed(pm, "META") is False             # 4th mega-cap tech blocked
+
+
+def test_concentration_cap_allows_uncorrelated_name():
+    pm = make_pm(max_correlated_positions=3)
+    pm.broker = FakeBroker(positions=[
+        {"symbol": "NVDA"}, {"symbol": "AAPL"}, {"symbol": "MSFT"},
+    ])
+    assert _allowed(pm, "XOM") is True               # energy name — different group
+
+
+def test_concentration_cap_disabled_when_zero():
+    pm = make_pm(max_correlated_positions=0)
+    pm.broker = FakeBroker(positions=[
+        {"symbol": "NVDA"}, {"symbol": "AAPL"}, {"symbol": "MSFT"}, {"symbol": "AMD"},
+    ])
+    assert _allowed(pm, "META") is True              # cap off → not blocked

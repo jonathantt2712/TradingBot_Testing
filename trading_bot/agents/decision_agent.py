@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Tuple
 
 from core.enums import AgentRole, Decision
 from core.llm_adapter import LLMAdapter, parse_llm_json
 from core.models import AgentEvaluation, AnalysisContext
+from core.trade_memory import TradeMemory
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,14 @@ _DIRECTIONAL_ROLES = {
 _SYSTEM_PROMPT = (
     "You are the Chief Decision Officer for an algorithmic day-trading bot. "
     "You receive reports from specialist agents and output a single trading decision. "
+    "Respond ONLY with valid JSON — no explanation, no markdown, just JSON."
+)
+
+_DEBATE_SYSTEM_PROMPT = (
+    "You chair the trading committee for an algorithmic day-trading bot. "
+    "You hear a bull case and a bear case, then rule impartially as judge. "
+    "Favour the side with more independent agent support and fewer unresolved "
+    "concerns; do not anchor on either advocate. "
     "Respond ONLY with valid JSON — no explanation, no markdown, just JSON."
 )
 
@@ -75,13 +85,6 @@ def _format_agent_block(ev: AgentEvaluation) -> str:
 
     elif ev.role is AgentRole.LIQUID and "relative_volume" in r:
         lines.append(f"  Relative volume: {r['relative_volume']}")
-
-    elif ev.role is AgentRole.SOCIAL:
-        if "bull_weight" in r or "bear_weight" in r:
-            lines.append(
-                f"  Bull weight: {r.get('bull_weight', 'n/a')}  "
-                f"Bear weight: {r.get('bear_weight', 'n/a')}"
-            )
 
     elif ev.role is AgentRole.INSIDER:
         if "trade_count" in r:
@@ -158,6 +161,13 @@ class DecisionAgent:
             anthropic_key=anthropic_api_key,
             anthropic_model=model,
         )
+        # Bull/bear deliberation prompt (TradingAgents-style). One LLM call: the
+        # model argues both sides before ruling, which improves calibration
+        # without the cost of multiple round-trips. Toggle with DECISION_DEBATE.
+        self._debate = os.environ.get("DECISION_DEBATE", "true").lower() in ("1", "true", "yes")
+        # Reflection memory: read-only here (the PortfolioManager records the
+        # actual opened trades and their outcomes); we inject recent lessons.
+        self._memory = TradeMemory()
 
     @property
     def available(self) -> bool:
@@ -193,39 +203,68 @@ class DecisionAgent:
 
             risk_block = _format_risk_block(risk_eval)
             perf_block = _load_perf_block()
+            lessons_block = self._memory.recent_lessons()
 
-            # Check for social+squeeze convergence
-            social_ev = next((ev for ev in evaluations if ev.role is AgentRole.SOCIAL), None)
+            # Two independent positioning signals (congressional flow + short
+            # squeeze setup) agreeing → elevated conviction.
+            insider_ev = next((ev for ev in evaluations if ev.role is AgentRole.INSIDER), None)
             squeeze_ev = next((ev for ev in evaluations if ev.role is AgentRole.SQUEEZE), None)
             convergence_note = ""
-            if social_ev is not None and squeeze_ev is not None:
-                if social_ev.score >= 60 and squeeze_ev.score >= 60:
-                    convergence_note = "\n- SIGNAL CONVERGENCE: Social AND Squeeze both bullish — elevated conviction."
-                elif social_ev.score <= 40 and squeeze_ev.score <= 40:
-                    convergence_note = "\n- SIGNAL CONVERGENCE: Social AND Squeeze both bearish — elevated conviction."
+            if insider_ev is not None and squeeze_ev is not None:
+                if insider_ev.score >= 60 and squeeze_ev.score >= 60:
+                    convergence_note = "\n- SIGNAL CONVERGENCE: Insider AND Squeeze both bullish — elevated conviction."
+                elif insider_ev.score <= 40 and squeeze_ev.score <= 40:
+                    convergence_note = "\n- SIGNAL CONVERGENCE: Insider AND Squeeze both bearish — elevated conviction."
 
-            user_prompt = (
+            context_block = (
                 f"Stock: {ticker}  Price: ${price:.2f}\n"
                 f"Regime: {regime_value.upper()} — {regime_rationale}\n"
                 "\nAGENT REPORTS:\n\n"
                 f"{agent_block}\n\n"
                 f"{risk_block}\n"
                 + (f"\n{perf_block}\n" if perf_block else "")
-                + "\nINSTRUCTIONS:\n"
-                "- If Risk veto is active, you MUST output decision=PASS.\n"
-                "- Consider where agents agree and where they conflict.\n"
-                "- In RISK_OFF regime, only enter LONG with very high conviction "
-                "(multiple agents bullish).\n"
-                "- INSIDER and SQUEEZE are directional signals — include them in your analysis.\n"
-                "- Gap fade signals (small gaps <0.5%) have 88% intraday fill rate — weight accordingly.\n"
-                f"- composite_score: 1-100 (>60=bullish, <40=bearish, 40-60=neutral){convergence_note}\n"
-                "\nOutput JSON only:\n"
-                '{"decision":"LONG|SHORT|PASS","composite_score":<int>,'
-                '"rationale":"<max 30 words>","key_factors":["...","..."],'
-                '"concerns":["..."]}'
+                + (f"\n{lessons_block}\n" if lessons_block else "")
             )
 
-            raw = await self._llm.chat(user_prompt, system=_SYSTEM_PROMPT)
+            if self._debate:
+                user_prompt = (
+                    context_block
+                    + "\nDELIBERATE AS A PANEL, THEN RULE AS JUDGE:\n"
+                    "1. BULL CASE: the strongest argument to go LONG, citing specific agents above.\n"
+                    "2. BEAR CASE: the strongest argument to go SHORT or stay out, citing specific agents.\n"
+                    "3. JUDGE: weigh both impartially; side with broader independent agent support.\n"
+                    "RULES:\n"
+                    "- If Risk veto is active, decision MUST be PASS.\n"
+                    "- In RISK_OFF regime, only go LONG on very high conviction (multiple agents bullish).\n"
+                    "- INSIDER and SQUEEZE are directional signals — include them.\n"
+                    "- Gap fade signals (small gaps <0.5%) have 88% intraday fill rate — weight accordingly.\n"
+                    f"- composite_score: 1-100 (>60=bullish, <40=bearish, 40-60=neutral){convergence_note}\n"
+                    "\nOutput JSON only:\n"
+                    '{"bull_case":"<max 30 words>","bear_case":"<max 30 words>",'
+                    '"decision":"LONG|SHORT|PASS","composite_score":<int>,'
+                    '"rationale":"<max 30 words>","key_factors":["...","..."],'
+                    '"concerns":["..."]}'
+                )
+                system_prompt = _DEBATE_SYSTEM_PROMPT
+            else:
+                user_prompt = (
+                    context_block
+                    + "\nINSTRUCTIONS:\n"
+                    "- If Risk veto is active, you MUST output decision=PASS.\n"
+                    "- Consider where agents agree and where they conflict.\n"
+                    "- In RISK_OFF regime, only enter LONG with very high conviction "
+                    "(multiple agents bullish).\n"
+                    "- INSIDER and SQUEEZE are directional signals — include them in your analysis.\n"
+                    "- Gap fade signals (small gaps <0.5%) have 88% intraday fill rate — weight accordingly.\n"
+                    f"- composite_score: 1-100 (>60=bullish, <40=bearish, 40-60=neutral){convergence_note}\n"
+                    "\nOutput JSON only:\n"
+                    '{"decision":"LONG|SHORT|PASS","composite_score":<int>,'
+                    '"rationale":"<max 30 words>","key_factors":["...","..."],'
+                    '"concerns":["..."]}'
+                )
+                system_prompt = _SYSTEM_PROMPT
+
+            raw = await self._llm.chat(user_prompt, system=system_prompt)
             if not raw:
                 raise ValueError("LLM returned empty response")
 
