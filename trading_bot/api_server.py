@@ -71,7 +71,7 @@ MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
 DAILY_LOSS_LIMIT_PCT    = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))   # 2% daily drawdown halt
 MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 3 consecutive losses halt
 TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", "0.05"))  # 5% trailing distance
-PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "2.0"))  # max net |beta| across open positions
+PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "5.0"))  # max net |beta| across open positions
 
 # Position exit monitor
 EXIT_MONITOR_INTERVAL_MIN = int(os.getenv("EXIT_MONITOR_INTERVAL_MIN", "5"))    # how often to re-score open positions

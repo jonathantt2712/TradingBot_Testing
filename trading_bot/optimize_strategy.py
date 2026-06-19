@@ -56,6 +56,7 @@ sys.path.insert(0, str(_here))
 
 from config.settings import load_settings, Settings, AgentWeights, RiskConfig, DecisionThresholds
 from core.enums import Decision
+from core.trade_stats import load_closed_trades, summarize, format_block
 from backtest_30day import (
     fetch_bars_range,
     backtest_ticker,
@@ -461,11 +462,20 @@ async def run(
         logger.error("ALPACA_API_KEY_ID and ALPACA_API_SECRET must be set in .env or environment")
         return
 
+    # Log and surface real trade history so the optimizer learns from live results.
+    _hist_trades = load_closed_trades()
+    _hist_stats  = summarize(_hist_trades)
+    print(format_block(_hist_stats))
+
+    # Use live bias to pre-filter the threshold grid: if live history shows a
+    # strong directional bias (≥20% win-rate gap), skip combos that contradict it.
+    _live_bias = _hist_stats.get("bias", "neutral")
+
     agent_note = "ALL agents (Vision LLM ON)" if use_llm else "all non-LLM agents (Vision/Decision off)"
     mode_note  = f"walk-forward {int(SPLIT_FRAC*100)}/{int((1-SPLIT_FRAC)*100)} OOS" if validate else "full-window (NO validation)"
     print(f"\nOptimizer — {days}d window, {len(tickers)} tickers: {tickers}")
     print(f"Objective: {objective}  |  Validation: {mode_note}  |  Agents: {agent_note}")
-    print(f"Phase: {phase}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%\n")
+    print(f"Phase: {phase}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%  |  Live bias: {_live_bias}\n")
 
     bars_cache, spy_bars = await _fetch_all(tickers, days, settings.alpaca_key_id, settings.alpaca_secret)
     if not bars_cache:
@@ -486,6 +496,19 @@ async def run(
 
     if phase in ("thresholds", "both"):
         combos = _threshold_combos(atr_stop=2.0, atr_target=4.0)
+        # Prune combos that contradict a confirmed live directional bias:
+        # - bias=long  → skip combos where LONG_THRESHOLD > 68 (too restrictive on LONGs)
+        # - bias=short → skip combos where SHORT_THRESHOLD < 32 (too restrictive on SHORTs)
+        if _live_bias == "long" and len(combos) > 1:
+            pruned = [c for c in combos if c["LONG_THRESHOLD"] <= 68]
+            if pruned:
+                print(f"  [bias=long] Pruned threshold grid: {len(combos)} → {len(pruned)} combos (capped LONG_T at 68)")
+                combos = pruned
+        elif _live_bias == "short" and len(combos) > 1:
+            pruned = [c for c in combos if c["SHORT_THRESHOLD"] >= 32]
+            if pruned:
+                print(f"  [bias=short] Pruned threshold grid: {len(combos)} → {len(pruned)} combos (floored SHORT_T at 32)")
+                combos = pruned
         thresh_results = await _run_grid("Phase 1 — threshold grid", combos, tickers, spy_bars,
                                          objective=objective, use_llm=use_llm,
                                          is_cache=is_cache, oos_cache=oos_cache)
