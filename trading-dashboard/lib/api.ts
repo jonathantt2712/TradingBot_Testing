@@ -105,7 +105,6 @@ export function demoRecommendations(): TradeRecommendation[] {
           reasoning: {
             signals_analyzed: 14, trade_signals: 9, strategy_signals: 5,
             bull_weight: 8.4, bear_weight: 2.1, sentiment_ratio: 0.8,
-            note: 'Signals sourced from AI4Trade community feed. Trade signals (position/trade) are full-weight; strategy/discussion signals are half-weight. All signals decay exponentially with a 24h half-life.',
           },
         },
       ],
@@ -164,7 +163,6 @@ export function demoRecommendations(): TradeRecommendation[] {
           reasoning: {
             signals_analyzed: 10, trade_signals: 6, strategy_signals: 4,
             bull_weight: 1.8, bear_weight: 6.2, sentiment_ratio: 0.225,
-            note: 'Signals sourced from AI4Trade community feed. Trade signals (position/trade) are full-weight; strategy/discussion signals are half-weight. All signals decay exponentially with a 24h half-life.',
           },
         },
       ],
@@ -223,7 +221,6 @@ export function demoRecommendations(): TradeRecommendation[] {
           reasoning: {
             signals_analyzed: 8, trade_signals: 5, strategy_signals: 3,
             bull_weight: 4.8, bear_weight: 3.2, sentiment_ratio: 0.6,
-            note: 'Signals sourced from AI4Trade community feed. Trade signals (position/trade) are full-weight; strategy/discussion signals are half-weight. All signals decay exponentially with a 24h half-life.',
           },
         },
       ],

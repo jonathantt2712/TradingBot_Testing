@@ -1,4 +1,4 @@
-"""Heartbeat-driven live runner.
+"""Live runner.
 
 Replaces the one-shot polling loop in main.py for LIVE mode.
 Instead of evaluating tickers on a fixed interval, the bot:
@@ -7,11 +7,9 @@ Instead of evaluating tickers on a fixed interval, the bot:
      OR accepts an explicit ticker list from the CLI.
   2. Detects the macro regime + injects SPY bars (refreshed every rescan).
   3. Runs an initial evaluation of all candidates on startup.
-  4. Subscribes to the AI4Trade heartbeat loop.
-  5. Re-evaluates any ticker mentioned in incoming platform tasks/messages.
-  6. Re-scans the market universe every RESCAN_INTERVAL_MIN minutes and
-     refreshes the active ticker list (shared with the heartbeat handler).
-  7. Flattens all positions shortly before the 16:00 ET close (EOD_FLATTEN).
+  4. Re-scans the market universe every RESCAN_INTERVAL_MIN minutes and
+     refreshes the active ticker list.
+  5. Flattens all positions shortly before the 16:00 ET close (EOD_FLATTEN).
 
 Usage:
     python live_runner.py              # auto-scan (no args needed)
@@ -35,11 +33,9 @@ from bootstrap import build_broker, build_manager, eod_flatten_loop, refresh_mar
 from config.settings import load_settings
 from core.models import AnalysisContext
 from data.chart_renderer import render_chart
-from data.ai4trade_client import AI4TradeClient
 from data.universe_scanner import UniverseScanner
 from execution.base_broker import BaseBroker
 from execution.portfolio_manager import PortfolioManager
-from execution.signal_publisher import SignalPublisher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 logger = logging.getLogger("live")
@@ -80,6 +76,10 @@ def _auto_execute_enabled() -> bool:
 # deep-liquidity names so the bot stays alive until the scanner recovers.
 FALLBACK_WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA"]
 
+# Core names always included — highest liquidity + consistent intraday range.
+# The universe scanner adds momentum movers on top of these.
+CORE_WATCHLIST = os.environ.get("CORE_WATCHLIST", "NVDA,TSLA,AAPL,MSFT,AMD,META,AMZN,GOOGL").split(",")
+
 # Protects concurrent reads/writes to the active_tickers list across async tasks.
 _ticker_lock: asyncio.Lock | None = None
 
@@ -102,7 +102,6 @@ async def evaluate_ticker(
     ticker: str,
     *,
     execute: bool,
-    publisher: SignalPublisher | None,
 ) -> None:
     async with _EVAL_SEMAPHORE:
         try:
@@ -131,53 +130,8 @@ async def evaluate_ticker(
                 "AUTO" if effective_execute else "MANUAL",
                 pm.summarise(decision.evaluations),
             )
-            if publisher:
-                await publisher.publish(decision)
         except Exception:
             logger.exception("evaluation failed for %s", ticker)
-
-
-async def handle_heartbeat(
-    messages: list,
-    tasks: list,
-    pm: PortfolioManager,
-    broker: BaseBroker,
-    active_tickers: list[str],
-    *,
-    execute: bool,
-    publisher: SignalPublisher | None,
-) -> None:
-    """React to heartbeat events -- re-evaluate tickers mentioned in messages.
-
-    ``active_tickers`` is the live, shared list mutated in place by
-    rescan_loop, so newly scanned symbols are heartbeat-eligible too.
-    """
-    triggered: set[str] = set()
-
-    for msg in messages:
-        logger.info(
-            "AI4Trade [%s]: %s",
-            msg.get("type", "?"),
-            msg.get("content", "")[:100],
-        )
-        data = msg.get("data") or {}
-        symbol = data.get("symbol") or data.get("ticker")
-        if symbol and symbol.upper() in {t.upper() for t in active_tickers}:
-            triggered.add(symbol.upper())
-
-    for task in tasks:
-        logger.info("AI4Trade task: %s", task.get("type"))
-        inp = task.get("input_data") or {}
-        symbol = inp.get("symbol") or inp.get("ticker")
-        if symbol:
-            triggered.add(symbol.upper())
-
-    if triggered:
-        logger.info("Heartbeat triggered re-eval for: %s", triggered)
-        await asyncio.gather(
-            *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher) for t in triggered],
-            return_exceptions=True,
-        )
 
 
 async def breakout_monitor_loop(
@@ -186,7 +140,6 @@ async def breakout_monitor_loop(
     active_tickers: list[str],
     *,
     execute: bool,
-    publisher: SignalPublisher | None,
     interval_min: int,
     universe: UniverseScanner,
     min_change_pct: float,
@@ -207,13 +160,14 @@ async def breakout_monitor_loop(
             )
             if not breakouts:
                 continue
+            await pm.refresh_protections()
             async with _ticker_lock:
                 for sym in breakouts:
                     if sym not in active_tickers:
                         active_tickers.append(sym)
             logger.info("BREAKOUT ALERT: %s — evaluating immediately", breakouts)
             await asyncio.gather(
-                *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
+                *[evaluate_ticker(pm, broker, t, execute=execute)
                   for t in breakouts],
                 return_exceptions=True,
             )
@@ -227,7 +181,6 @@ async def rescan_loop(
     active_tickers: list[str],
     *,
     execute: bool,
-    publisher: SignalPublisher | None,
     interval_min: int,
     universe: UniverseScanner | None = None,
     scanner_cfg=None,
@@ -264,6 +217,8 @@ async def rescan_loop(
 
         # Regime + SPY bars go stale over a session — refresh before re-scoring.
         await refresh_market_context(pm, broker)
+        # Detect exits → update re-entry cooldowns, loss-streak guard, memory.
+        await pm.refresh_protections()
 
         if not _is_market_hours():
             logger.debug("rescan: market closed — skipping LLM evaluation")
@@ -273,7 +228,7 @@ async def rescan_loop(
             snapshot = list(active_tickers)
         logger.info("Scheduled rescan of %s", snapshot)
         await asyncio.gather(
-            *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
+            *[evaluate_ticker(pm, broker, t, execute=execute)
               for t in snapshot],
             return_exceptions=True,
         )
@@ -460,37 +415,32 @@ async def main(tickers: Sequence[str]) -> None:
                 active_tickers, RESCAN_INTERVAL_MIN,
             )
         else:
-            logger.info("Auto-selected %d tickers: %s", len(active_tickers), active_tickers)
+            # Merge core watchlist into scanner results (deduplicate, core first)
+            core = [t.upper() for t in CORE_WATCHLIST if t.strip()]
+            merged = core + [t for t in active_tickers if t.upper() not in {c.upper() for c in core}]
+            active_tickers = merged[:30]  # cap at 30 total
+            logger.info("Auto-selected %d tickers (core+scanner): %s", len(active_tickers), active_tickers)
     elif not active_tickers:
         logger.error("No tickers provided and SCANNER_ENABLED=false -- nothing to do")
         return
 
-    ai4 = AI4TradeClient()
-    await ai4.__aenter__()
-
-    pm = build_manager(settings, broker, ai4)
-    publisher = SignalPublisher(ai4, publish_pass=True) if ai4.token else None
+    pm = build_manager(settings, broker)
 
     async with broker:
         await refresh_market_context(pm, broker)
+        await pm.refresh_protections()
 
         logger.info("Initial scan of %s", active_tickers)
         await asyncio.gather(
-            *[evaluate_ticker(pm, broker, t, execute=execute, publisher=publisher)
+            *[evaluate_ticker(pm, broker, t, execute=execute)
               for t in list(active_tickers)],
             return_exceptions=True,
         )
 
-        async def hb_callback(messages, tasks):
-            await handle_heartbeat(messages, tasks, pm, broker, active_tickers,
-                                   execute=execute, publisher=publisher)
-
         loops = [
-            ai4.heartbeat_loop(hb_callback),
             rescan_loop(
                 pm, broker, active_tickers,
                 execute=execute,
-                publisher=publisher,
                 interval_min=RESCAN_INTERVAL_MIN,
                 universe=universe,
                 scanner_cfg=settings.scanner if universe else None,
@@ -502,7 +452,6 @@ async def main(tickers: Sequence[str]) -> None:
                 breakout_monitor_loop(
                     pm, broker, active_tickers,
                     execute=execute,
-                    publisher=publisher,
                     interval_min=BREAKOUT_INTERVAL_MIN,
                     universe=universe,
                     min_change_pct=BREAKOUT_MIN_CHANGE,
@@ -512,8 +461,6 @@ async def main(tickers: Sequence[str]) -> None:
             loops.append(eod_flatten_loop(broker, settings))
             loops.append(breakeven_lock_loop(broker, pm))
         await asyncio.gather(*loops)
-
-    await ai4.__aexit__(None, None, None)
 
 
 if __name__ == "__main__":

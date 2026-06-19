@@ -116,7 +116,6 @@ if str(_HERE) not in sys.path:
 
 _AGENTS_AVAILABLE = False
 _pm                = None   # PortfolioManager — the SAME composition live/backtest use
-_ai4trade_client   = None
 _Decision          = None
 _EXIT_DECISIONS: list = []  # rolling log of exit-monitor and EOD review decisions
 _MAX_EXIT_LOG     = 500
@@ -129,15 +128,10 @@ try:
     from config.settings import load_settings
     from core.models import AnalysisContext
     from core.enums import Decision
-    from data.ai4trade_client import AI4TradeClient as _AI4TC
     from data.telegram_publisher import TelegramPublisher as _TelegramPublisher
 
-    _ai4trade_client = _AI4TC(
-        email=os.getenv("AI4TRADE_EMAIL", ""),
-        password=os.getenv("AI4TRADE_PASSWORD", ""),
-    )
     _settings = load_settings()
-    _pm = build_manager(_settings, broker=None, ai4=_ai4trade_client)
+    _pm = build_manager(_settings, broker=None)
     # Dashboard scans fetch ~100-bar windows (vs 200 live) — keep the lower
     # bar requirement this endpoint has always used.
     _pm.technical.min_bars = 30
@@ -158,8 +152,7 @@ async def _evaluate(ctx: "AnalysisContext"):
 
     Same agents, weights, and composite as live trading and backtests
     (bootstrap.build_manager). Renders the chart for the vision agent,
-    ensures the AI4Trade session is open for the social agent, and bounds
-    total evaluation time so a slow LLM can't stall the scan.
+    and bounds total evaluation time so a slow LLM can't stall the scan.
 
     Returns a TradeDecision, or None on failure/timeout.
     """
@@ -177,15 +170,6 @@ async def _evaluate(ctx: "AnalysisContext"):
                 bars=ctx.bars,
                 account=ctx.account,
                 chart_image_path=chart_path,
-            )
-        except Exception:
-            pass
-
-    # Ensure AI4Trade client session is open (social agent)
-    if _ai4trade_client is not None and _ai4trade_client._session is None:
-        try:
-            _ai4trade_client._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15.0)
             )
         except Exception:
             pass
@@ -212,8 +196,9 @@ _ALPACA_HEADERS = {
     "APCA-API-SECRET-KEY": _ALPACA_SECRET,
 }
 
-_BROKER_BASE = "https://paper-api.alpaca.markets"
-_DATA_BASE   = "https://data.alpaca.markets"
+_ALPACA_PAPER = os.getenv("ALPACA_PAPER", "true").lower() not in ("false", "0", "no")
+_BROKER_BASE  = "https://paper-api.alpaca.markets" if _ALPACA_PAPER else "https://api.alpaca.markets"
+_DATA_BASE    = "https://data.alpaca.markets"
 
 _SECTOR_MAP: Dict[str, str] = {
     "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
@@ -841,6 +826,8 @@ _backtest_stats: Dict[str, Any] = {
     "last_status":   None,   # "ok" | "failed" | "timeout"
     "error_count":   0,
     "last_error":    None,
+    "last_log":      None,   # full stdout from last run
+    "log_lines":     [],     # live lines while running
 }
 
 _optimizer_stats: Dict[str, Any] = {
@@ -849,14 +836,8 @@ _optimizer_stats: Dict[str, Any] = {
     "error_count":   0,
     "last_error":    None,
     "running":       False,
-}
-
-_challenge_stats: Dict[str, Any] = {
-    "last_run_at":   None,
-    "last_status":   None,
-    "error_count":   0,
-    "last_error":    None,
-    "running":       False,
+    "last_log":      None,   # full stdout from last run
+    "log_lines":     [],     # live lines while running
 }
 
 _circuit_breaker: Dict[str, Any] = {
@@ -1488,22 +1469,38 @@ async def _run_backtest() -> None:
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(_HERE),
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1800)  # 30 min max
+        log_lines: list[str] = []
+        _backtest_stats["log_lines"] = log_lines
+        deadline = asyncio.get_event_loop().time() + 1800  # 30 min
+
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            log_lines.append(line)
+            if len(log_lines) > 2000:
+                log_lines.pop(0)
+            if asyncio.get_event_loop().time() > deadline:
+                proc.kill()
+                raise asyncio.TimeoutError
+
+        await proc.wait()
+        decoded = "\n".join(log_lines)
         if proc.returncode == 0:
             logger.info("Auto-backtest complete — results written to %s", _RESULTS_FILE)
             _backtest_stats.update({
                 "last_run_at": datetime.utcnow().isoformat(),
                 "last_status": "ok",
                 "last_error":  None,
+                "last_log":    decoded,
             })
         else:
-            decoded_tail = (stdout or b"").decode()[-500:]
-            logger.error("Auto-backtest failed (rc=%d): %s", proc.returncode, decoded_tail)
+            logger.error("Auto-backtest failed (rc=%d): %s", proc.returncode, decoded[-500:])
             _backtest_stats.update({
                 "last_run_at": datetime.utcnow().isoformat(),
                 "last_status": "failed",
                 "error_count": _backtest_stats["error_count"] + 1,
-                "last_error":  decoded_tail,
+                "last_error":  decoded[-500:],
+                "last_log":    decoded,
             })
     except asyncio.TimeoutError:
         logger.error("Auto-backtest timed out after 30 min — killed")
@@ -1514,6 +1511,7 @@ async def _run_backtest() -> None:
             "last_status": "timeout",
             "error_count": _backtest_stats["error_count"] + 1,
             "last_error":  "timed out after 30 min",
+            "last_log":    _backtest_stats.get("last_log", "") or "",
         })
     except Exception:
         logger.exception("Auto-backtest subprocess error")
@@ -1541,6 +1539,7 @@ async def _run_optimizer() -> None:
         logger.info("Optimizer already running — ignoring trigger")
         return
     _optimizer_stats["running"] = True
+    _optimizer_stats["log_lines"] = []
     logger.info("Optimizer starting…")
     proc = None
     try:
@@ -1550,22 +1549,40 @@ async def _run_optimizer() -> None:
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(_HERE),
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3000)  # 50 min max
+
+        # Stream stdout line-by-line so the dashboard can show live progress
+        log_lines: list[str] = _optimizer_stats["log_lines"]
+        deadline = asyncio.get_event_loop().time() + 3000  # 50 min
+
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            log_lines.append(line)
+            if len(log_lines) > 1000:
+                log_lines.pop(0)
+            if asyncio.get_event_loop().time() > deadline:
+                proc.kill()
+                raise asyncio.TimeoutError
+
+        await proc.wait()
+        full_log = "\n".join(log_lines)
+
         if proc.returncode == 0:
             logger.info("Optimizer complete — wrote backtest_optimal.json + OPTIMAL_CONFIG.txt")
             _optimizer_stats.update({
                 "last_run_at": datetime.utcnow().isoformat(),
                 "last_status": "ok",
                 "last_error":  None,
+                "last_log":    full_log,
             })
         else:
-            decoded_tail = (stdout or b"").decode()[-500:]
-            logger.error("Optimizer failed (rc=%d): %s", proc.returncode, decoded_tail)
+            logger.error("Optimizer failed (rc=%d): %s", proc.returncode, full_log[-500:])
             _optimizer_stats.update({
                 "last_run_at": datetime.utcnow().isoformat(),
                 "last_status": "failed",
                 "error_count": _optimizer_stats["error_count"] + 1,
-                "last_error":  decoded_tail,
+                "last_error":  full_log[-500:],
+                "last_log":    full_log,
             })
     except asyncio.TimeoutError:
         logger.error("Optimizer timed out after 50 min — killed")
@@ -1586,64 +1603,6 @@ async def _run_optimizer() -> None:
         })
     finally:
         _optimizer_stats["running"] = False
-
-
-_CHALLENGE_SCRIPT = _HERE / "challenge_runner.py"
-
-
-async def _run_challenge(mode: str = "run") -> None:
-    """Run challenge_runner.py as a subprocess. mode: 'run' | 'list' | 'status'.
-
-    Writes challenge_results.json (read by the dashboard). Needs AI4Trade creds;
-    without them the script exits cleanly and records an auth error.
-    """
-    if not _CHALLENGE_SCRIPT.exists():
-        logger.warning("challenge_runner.py not found — skipping")
-        return
-    if _challenge_stats.get("running"):
-        logger.info("Challenge runner already running — ignoring trigger")
-        return
-    _challenge_stats["running"] = True
-    args = [sys.executable, str(_CHALLENGE_SCRIPT)]
-    if mode == "list":
-        args.append("--list")
-    elif mode == "status":
-        args.append("--status")
-    logger.info("Challenge runner starting (mode=%s)…", mode)
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(_HERE),
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=600)  # 10 min max
-        if proc.returncode == 0:
-            _challenge_stats.update({"last_run_at": datetime.utcnow().isoformat(),
-                                     "last_status": "ok", "last_error": None})
-        else:
-            tail = (stdout or b"").decode()[-500:]
-            logger.error("Challenge runner failed (rc=%d): %s", proc.returncode, tail)
-            _challenge_stats.update({"last_run_at": datetime.utcnow().isoformat(),
-                                     "last_status": "failed",
-                                     "error_count": _challenge_stats["error_count"] + 1,
-                                     "last_error": tail})
-    except asyncio.TimeoutError:
-        logger.error("Challenge runner timed out — killed")
-        if proc is not None:
-            proc.kill()
-        _challenge_stats.update({"last_run_at": datetime.utcnow().isoformat(),
-                                 "last_status": "timeout",
-                                 "error_count": _challenge_stats["error_count"] + 1,
-                                 "last_error": "timed out after 10 min"})
-    except Exception:
-        logger.exception("Challenge runner subprocess error")
-        _challenge_stats.update({"last_run_at": datetime.utcnow().isoformat(),
-                                 "last_status": "failed",
-                                 "error_count": _challenge_stats["error_count"] + 1})
-    finally:
-        _challenge_stats["running"] = False
 
 
 async def _eod_snapshot(session: aiohttp.ClientSession) -> None:
@@ -2209,19 +2168,6 @@ async def lifespan(app: FastAPI):
     global _trades_lock
     _trades_lock = asyncio.Lock()
 
-    # Open AI4Trade session if client was created
-    if _ai4trade_client is not None and _ai4trade_client._session is None:
-        try:
-            import aiohttp as _aio
-            _ai4trade_client._session = _aio.ClientSession(
-                timeout=_aio.ClientTimeout(total=15.0)
-            )
-            if _ai4trade_client.email and _ai4trade_client.password:
-                await _ai4trade_client._authenticate()
-            logger.info("AI4Trade session opened")
-        except Exception as _e:
-            logger.warning("AI4Trade session failed to open: %s", _e)
-
     task     = asyncio.create_task(_background_loop())
     trail    = asyncio.create_task(_trailing_stop_loop())
     exit_mon = asyncio.create_task(_position_exit_monitor_loop())
@@ -2236,14 +2182,6 @@ async def lifespan(app: FastAPI):
             await t
         except asyncio.CancelledError:
             pass
-
-    # Close AI4Trade session on shutdown
-    if _ai4trade_client is not None and _ai4trade_client._session is not None:
-        try:
-            await _ai4trade_client._session.close()
-        except Exception:
-            pass
-
 
 app = FastAPI(title="Trading Bot API", lifespan=lifespan)
 # Locked to the local dashboard by default; set CORS_ALLOW_ORIGINS (comma-separated)
@@ -2308,6 +2246,76 @@ def get_pnl():
     return out
 
 
+def _fetch_alpaca_fills_sync(page_size: int = 500) -> list:
+    """Fetch FILL activities from Alpaca using the bot's own credentials (stdlib only)."""
+    import urllib.request as _urlreq
+    url = (
+        f"{_BROKER_BASE}/v2/account/activities"
+        f"?activity_type=FILL&page_size={page_size}&direction=asc"
+    )
+    req = _urlreq.Request(url, headers={
+        "APCA-API-KEY-ID":     _ALPACA_KEY,
+        "APCA-API-SECRET-KEY": _ALPACA_SECRET,
+    })
+    with _urlreq.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+    return data if isinstance(data, list) else []
+
+
+def _win_rate_from_fills(fills: list) -> "tuple[float, int] | None":
+    """FIFO win-rate from Alpaca fill activities.
+    Returns (win_rate_pct, total_completed_trades) or None when no completed trades.
+    """
+    pos: dict = {}
+    wins = total = 0
+    EPS = 0.0001
+    for f in fills:
+        qty   = float(f.get("qty", 0) or 0)
+        price = float(f.get("price", 0) or 0)
+        sym   = f.get("symbol", "")
+        side  = f.get("side", "")
+        if not sym or not side or qty <= 0 or price <= 0:
+            continue
+        if sym not in pos:
+            pos[sym] = {"qty": 0.0, "avg_cost": 0.0, "pnl": 0.0}
+        p = pos[sym]
+        if side == "buy":
+            if p["qty"] < 0:
+                cover = min(qty, -p["qty"])
+                p["pnl"] += (p["avg_cost"] - price) * cover
+                p["qty"] += cover
+                if abs(p["qty"]) < EPS:
+                    total += 1
+                    if p["pnl"] > 0:
+                        wins += 1
+                    p.update({"qty": 0.0, "avg_cost": 0.0, "pnl": 0.0})
+                rem = qty - cover
+                if rem > EPS:
+                    p.update({"qty": rem, "avg_cost": price, "pnl": 0.0})
+            else:
+                new_qty = p["qty"] + qty
+                p["avg_cost"] = (p["avg_cost"] * p["qty"] + price * qty) / new_qty
+                p["qty"] = new_qty
+        else:
+            if p["qty"] > 0:
+                sell = min(qty, p["qty"])
+                p["pnl"] += (price - p["avg_cost"]) * sell
+                p["qty"] -= sell
+                if abs(p["qty"]) < EPS:
+                    total += 1
+                    if p["pnl"] > 0:
+                        wins += 1
+                    p.update({"qty": 0.0, "avg_cost": 0.0, "pnl": 0.0})
+                rem = qty - sell
+                if rem > EPS:
+                    p.update({"qty": -rem, "avg_cost": price, "pnl": 0.0})
+            else:
+                new_qty = -p["qty"] + qty
+                p["avg_cost"] = (p["avg_cost"] * (-p["qty"]) + price * qty) / new_qty
+                p["qty"] -= qty
+    return (round(wins / total * 100, 1), total) if total > 0 else None
+
+
 @app.get("/api/stats", dependencies=[Depends(_verify_bot_secret)])
 def get_stats():
     all_trades = _load(HISTORY_FILE, [])
@@ -2331,11 +2339,19 @@ def get_stats():
         if str(t.get("closed_at", ""))[:10] == today_s
     )
 
-    # Sharpe, max drawdown, avg R/R
+    # Sharpe: bucket per-trade PnL into daily totals, then annualise.
+    # sqrt(252) is the daily→annual factor; applying it to raw per-trade
+    # amounts (as before) gave a meaningless number because trades aren't days.
     import numpy as _np
+    from collections import defaultdict as _dd
+    _daily_pnl: dict = _dd(float)
+    for t in closed:
+        day = str(t.get("closed_at", ""))[:10]
+        if day:
+            _daily_pnl[day] += float(t.get("pnl") or t.get("realized_pnl") or 0)
     sharpe = 0.0
-    if len(pnls) >= 2:
-        arr = _np.array(pnls)
+    if len(_daily_pnl) >= 2:
+        arr = _np.array(list(_daily_pnl.values()))
         std = float(_np.std(arr))
         if std > 0:
             sharpe = round(float(_np.mean(arr)) / std * _np.sqrt(252), 2)
@@ -2366,6 +2382,21 @@ def get_stats():
         except Exception:
             pass
     avg_hold_hours = round(sum(hold_times) / len(hold_times), 1) if hold_times else 0.0
+
+    # Override win_rate with Alpaca-sourced FIFO computation when available.
+    # The local HISTORY_FILE is empty on Railway's ephemeral filesystem, so the
+    # local win_rate is always 0 there. The fills-based computation uses the
+    # bot's own credentials — guaranteed to match the account it actually trades on.
+    if _ALPACA_KEY and _ALPACA_SECRET:
+        try:
+            fills   = _fetch_alpaca_fills_sync()
+            result  = _win_rate_from_fills(fills)
+            if result is not None:
+                win_rate, fills_total = result
+                if not total_trades:
+                    total_trades = fills_total
+        except Exception as _exc:
+            logger.warning("fill-based win rate unavailable: %s", _exc)
 
     weights = _load_weights()
     return {
@@ -2645,6 +2676,34 @@ async def run_optimizer_now():
     return {"status": "optimizer_triggered", "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.get("/api/backtest/log", dependencies=[Depends(_verify_bot_secret)])
+def get_backtest_log():
+    """Return live or completed backtest log lines as JSON."""
+    from fastapi.responses import JSONResponse
+    running = bool(_backtest_stats.get("log_lines") and not _backtest_stats.get("last_log"))
+    lines: list[str] = list(_backtest_stats.get("log_lines") or [])
+    last_log: str = _backtest_stats.get("last_log") or ""
+    return JSONResponse({
+        "running": running,
+        "lines":   lines if (running or not last_log) else last_log.splitlines(),
+        "status":  _backtest_stats.get("last_status"),
+    })
+
+
+@app.get("/api/optimize/log", dependencies=[Depends(_verify_bot_secret)])
+def get_optimizer_log():
+    """Return live or completed optimizer log lines."""
+    from fastapi.responses import JSONResponse
+    running = bool(_optimizer_stats.get("running"))
+    lines: list[str] = list(_optimizer_stats.get("log_lines") or [])
+    last_log: str = _optimizer_stats.get("last_log") or ""
+    return JSONResponse({
+        "running": running,
+        "lines":   lines if running else (last_log.splitlines() if last_log else []),
+        "status":  _optimizer_stats.get("last_status"),
+    })
+
+
 @app.post("/api/optimize/apply", dependencies=[Depends(_verify_bot_secret)])
 def apply_optimal_params():
     """Apply the optimizer's best params to LIVE trading — no redeploy.
@@ -2718,26 +2777,6 @@ def get_applied_params():
     }
 
 
-@app.post("/api/challenge/run", dependencies=[Depends(_verify_bot_secret)])
-async def run_challenge_now(mode: str = "run"):
-    """Trigger the AI4Trade challenge runner. mode: run | list | status."""
-    if _challenge_stats.get("running"):
-        return {"status": "already_running", "timestamp": datetime.utcnow().isoformat()}
-    asyncio.create_task(_run_challenge(mode if mode in ("run", "list", "status") else "run"))
-    return {"status": "challenge_triggered", "mode": mode, "timestamp": datetime.utcnow().isoformat()}
-
-
-@app.get("/api/challenges", dependencies=[Depends(_verify_bot_secret)])
-def get_challenges():
-    """Return the latest challenge results + runner status."""
-    results = None
-    try:
-        results = json.loads((_REPO_ROOT / "challenge_results.json").read_text())
-    except Exception:
-        pass
-    return {"results": results, "status": _challenge_stats}
-
-
 @app.get("/api/scan-stats", dependencies=[Depends(_verify_bot_secret)])
 def get_scan_stats():
     """Return today's scan activity counters and market status."""
@@ -2784,7 +2823,6 @@ def set_trade_mode(body: TradeModeBody):
 def health():
     gemini_set    = bool(os.getenv("GEMINI_API_KEY"))
     anthropic_set = bool(os.getenv("ANTHROPIC_API_KEY"))
-    ai4_set       = bool(os.getenv("AI4TRADE_EMAIL") and os.getenv("AI4TRADE_PASSWORD"))
     execute_live  = os.getenv("EXECUTE_LIVE", "false").lower() in ("1", "true", "yes")
     alpaca_paper  = os.getenv("ALPACA_PAPER", "true").lower() not in ("0", "false", "no")
     auto_execute  = _load_trade_mode()["auto_execute"]
@@ -2794,7 +2832,6 @@ def health():
         "timestamp": datetime.utcnow().isoformat(),
         "backtest":  _backtest_stats,
         "optimizer": _optimizer_stats,
-        "challenge": _challenge_stats,
         "circuit_breaker": _circuit_breaker,
         "trading": {
             "execute_live": execute_live,
@@ -2810,10 +2847,7 @@ def health():
         "keys": {
             "gemini":    gemini_set,
             "anthropic": anthropic_set,
-            "ai4trade":  ai4_set,
-            # Vision needs ANY vision-capable LLM key; social needs AI4Trade creds.
             "vision_ready": gemini_set or anthropic_set,
-            "social_ready": ai4_set,
         },
     }
 

@@ -1,19 +1,18 @@
 """Portfolio Manager -- orchestrator / execution brain.
 
 Pipeline per ticker:
-1. Run Fundamental, Vision, Technical, Liquid (opt), Social (opt), Risk CONCURRENTLY.
+1. Run Fundamental, Vision, Technical, Liquid (opt), Risk CONCURRENTLY.
 2. Blend directional scores by configured weights -> composite [1, 100].
 3. Map composite to LONG / SHORT / PASS via thresholds.
 4. Apply Risk veto and minimum-risk-score gate.
 5. Build concrete plan, size the order, route bracket through the broker.
-6. Optionally publish the decision to AI4Trade.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
@@ -21,12 +20,12 @@ from zoneinfo import ZoneInfo
 from config.settings import DecisionThresholds, Settings
 from core.enums import AgentRole, Decision, OrderSide
 from core.models import AgentEvaluation, AnalysisContext, TradeDecision
+from core.trade_memory import TradeMemory
 from agents.fundamental_agent import FundamentalAgent
 from agents.liquid_agent import LiquidAgent
 from agents.regime_agent import MarketRegime, RegimeSnapshot
 from agents.risk_agent import RiskAgent
 from agents.insider_agent import InsiderAgent
-from agents.social_agent import SocialSentimentAgent
 from agents.macro_agent import MacroSignalAgent
 from agents.squeeze_agent import SqueezeAgent
 from agents.technical_agent import TechnicalAgent
@@ -44,6 +43,25 @@ _AUDIT_FILE = Path(__file__).parents[2] / "logs" / "decisions.jsonl"
 # Runtime tuning file — written by the self-tuner and the optimizer's Apply action.
 _WEIGHTS_FILE = Path(__file__).parents[1] / "data" / "strategy_weights.json"
 
+# Coarse correlation groups for the concentration cap. A symbol may belong to
+# several groups; the cap trips if ANY of its groups is already at the limit.
+# Symbols not listed here are treated as uncorrelated (never capped). This is a
+# deliberately simple heuristic — the goal is only to stop the bot stacking,
+# say, five mega-cap tech names that move together into one undiversified bet.
+_CORRELATION_GROUPS: dict[str, set[str]] = {
+    "mega_tech":  {"AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NVDA", "TSLA", "AMD", "NFLX", "AVGO"},
+    "semis":      {"NVDA", "AMD", "AVGO", "INTC", "MU", "TSM", "QCOM", "ASML", "ARM", "SMCI"},
+    "index_etf":  {"SPY", "QQQ", "IWM", "DIA", "VOO", "VTI"},
+    "ev":         {"TSLA", "RIVN", "LCID", "NIO"},
+    "crypto_eq":  {"COIN", "MARA", "RIOT", "MSTR", "CLSK"},
+}
+
+
+def _correlation_groups(symbol: str) -> set[str]:
+    """Return the set of correlation groups a symbol belongs to (may be empty)."""
+    sym = symbol.upper()
+    return {g for g, members in _CORRELATION_GROUPS.items() if sym in members}
+
 
 class PortfolioManager:
     def __init__(
@@ -56,11 +74,9 @@ class PortfolioManager:
         technical: TechnicalAgent = None,
         risk: RiskAgent,
         liquid: Optional[LiquidAgent] = None,
-        social: Optional[SocialSentimentAgent] = None,
         insider: Optional["InsiderAgent"] = None,
         squeeze: Optional["SqueezeAgent"] = None,
         macro: Optional["MacroSignalAgent"] = None,
-        publisher=None,
         decision_agent: Optional[DecisionAgent] = None,
     ) -> None:
         self.settings = settings
@@ -70,11 +86,9 @@ class PortfolioManager:
         self.technical = technical
         self.risk = risk
         self.liquid = liquid
-        self.social = social
         self.insider = insider
         self.squeeze = squeeze
         self.macro   = macro
-        self.publisher = publisher
         self._decision_agent = decision_agent
         self._weights = settings.weights.as_map()
         self._thresholds: DecisionThresholds = settings.thresholds
@@ -84,6 +98,18 @@ class PortfolioManager:
         self._day_start_equity: Optional[float] = None
         self._kill_switch_date: Optional[date] = None
         self._halted: bool = False
+        self._intraday_peak_equity: Optional[float] = None
+
+        # Trade-protection state (freqtrade-style circuit breakers). Driven by
+        # _observe_positions(), which diffs the open-position set across cycles.
+        self._open_upl: dict[str, float] = {}             # symbol → last-seen unrealized P&L
+        self._cooldown_until: dict[str, datetime] = {}    # symbol → re-entry allowed after (ET)
+        self._recent_stops: list[datetime] = []           # losing-exit timestamps (ET)
+        self._streak_halt_until: Optional[datetime] = None
+
+        # Reflection memory: records outcomes when positions close so the
+        # DecisionAgent can learn from the bot's own track record.
+        self._memory = TradeMemory()
 
         # Strong refs to fire-and-forget tasks (else the event loop may GC them)
         self._bg_tasks: set = set()
@@ -100,16 +126,13 @@ class PortfolioManager:
             self.technical.safe_evaluate(ctx),
             self.risk.safe_evaluate(ctx),
         ]
-        vision_idx = liquid_idx = social_idx = squeeze_idx = None
+        vision_idx = liquid_idx = squeeze_idx = None
         if self.vision is not None:
             vision_idx = len(coros)
             coros.append(self.vision.safe_evaluate(ctx))
         if self.liquid is not None:
             liquid_idx = len(coros)
             coros.append(self.liquid.safe_evaluate(ctx))
-        if self.social is not None:
-            social_idx = len(coros)
-            coros.append(self.social.safe_evaluate(ctx))
         insider_idx = None
         if self.insider is not None:
             insider_idx = len(coros)
@@ -128,7 +151,6 @@ class PortfolioManager:
         risk        = results[2]
         vision_eval:  Optional[AgentEvaluation] = results[vision_idx]  if vision_idx  is not None else None
         liquid_eval:  Optional[AgentEvaluation] = results[liquid_idx]  if liquid_idx  is not None else None
-        social_eval:  Optional[AgentEvaluation] = results[social_idx]  if social_idx  is not None else None
         insider_eval: Optional[AgentEvaluation] = results[insider_idx] if insider_idx is not None else None
         squeeze_eval: Optional[AgentEvaluation] = results[squeeze_idx] if squeeze_idx is not None else None
         macro_eval:   Optional[AgentEvaluation] = results[macro_idx]   if macro_idx   is not None else None
@@ -147,7 +169,7 @@ class PortfolioManager:
                 ctx, all_evals, regime_value, regime_rationale,
             )
         else:
-            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval, insider_eval, squeeze_eval, macro_eval)
+            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, insider_eval, squeeze_eval, macro_eval)
             retail_surcharge = 0.0
             if technical is not None and technical.data:
                 retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
@@ -248,9 +270,11 @@ class PortfolioManager:
         if self._kill_switch_date != today:
             self._kill_switch_date = today
             self._day_start_equity = equity
+            self._intraday_peak_equity = equity
             self._halted = False
             return False
 
+        # From-open daily loss limit
         limit = self._day_start_equity * (1.0 - self.settings.risk.max_daily_loss_pct)
         if not self._halted and equity < limit:
             self._halted = True
@@ -260,14 +284,117 @@ class PortfolioManager:
                 equity, limit, self._day_start_equity,
                 self.settings.risk.max_daily_loss_pct * 100,
             )
+
+        # Intraday peak-to-trough drawdown halt (freqtrade MaxDrawdown, equity
+        # mode): catches give-backs the from-open stop misses (e.g. up 4% then
+        # back to +1%). Tracks the running intraday peak.
+        if self._intraday_peak_equity is None or equity > self._intraday_peak_equity:
+            self._intraday_peak_equity = equity
+        dd_pct = self.settings.risk.intraday_drawdown_halt_pct
+        if not self._halted and dd_pct > 0 and self._intraday_peak_equity > 0:
+            peak_limit = self._intraday_peak_equity * (1.0 - dd_pct)
+            if equity < peak_limit:
+                self._halted = True
+                logger.error(
+                    "DRAWDOWN HALT: equity %.2f is >%.1f%% below intraday peak %.2f "
+                    "— no new entries today",
+                    equity, dd_pct * 100, self._intraday_peak_equity,
+                )
         return self._halted
 
+    def _observe_positions(self, positions: Sequence[dict]) -> None:
+        """Diff the open-position set across cycles to detect exits.
+
+        Drives three things from a single observation:
+          • CooldownPeriod — a symbol that just closed is put on a re-entry
+            cooldown to avoid whipsaw churn.
+          • StoplossGuard — exits whose last-seen unrealized P&L was negative
+            count toward a loss streak; ``loss_streak_limit`` losses inside the
+            rolling window halt all new entries for ``loss_streak_halt_min``.
+          • Reflection memory — the exit's last-seen P&L is recorded against the
+            decision that opened it, so the DecisionAgent can learn from it.
+
+        Approximation: realised P&L is taken as the last unrealized P&L seen
+        while the position was open. Broker-agnostic and accurate enough for a
+        circuit breaker and an advisory memory.
+        """
+        now = datetime.now(_ET)
+        cfg = self.settings.risk
+        current: dict[str, float] = {}
+        for p in positions:
+            sym = str(p.get("symbol", "")).upper()
+            if not sym:
+                continue
+            try:
+                current[sym] = float(p.get("unrealized_pl", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                current[sym] = 0.0
+
+        # Symbols open last cycle but gone now → they exited.
+        for sym, last_upl in self._open_upl.items():
+            if sym in current:
+                continue
+            if cfg.reentry_cooldown_min > 0:
+                self._cooldown_until[sym] = now + timedelta(minutes=cfg.reentry_cooldown_min)
+            if last_upl < 0:
+                self._recent_stops.append(now)
+                logger.info("%s exited at a loss (≈%.2f) — loss-streak count %d",
+                            sym, last_upl, len(self._recent_stops))
+            try:
+                self._memory.record_outcome(sym, last_upl)
+            except Exception:
+                logger.debug("memory record_outcome failed", exc_info=True)
+
+        self._open_upl = current
+
+        # Prune the streak window and trip the guard if breached.
+        cutoff = now - timedelta(minutes=cfg.loss_streak_window_min)
+        self._recent_stops = [t for t in self._recent_stops if t >= cutoff]
+        if cfg.loss_streak_limit > 0 and len(self._recent_stops) >= cfg.loss_streak_limit:
+            self._streak_halt_until = now + timedelta(minutes=cfg.loss_streak_halt_min)
+            logger.error(
+                "STOPLOSS GUARD: %d losing exits within %dmin — pausing new entries for %dmin",
+                len(self._recent_stops), cfg.loss_streak_window_min, cfg.loss_streak_halt_min,
+            )
+            self._recent_stops.clear()
+
+    async def refresh_protections(self) -> None:
+        """Fetch positions and update protection state (once per scan cycle).
+
+        On a broker error the update is skipped — protections never block on
+        stale state, they only act on confirmed exits.
+        """
+        if self.broker is None:
+            return
+        try:
+            positions = await self.broker.get_positions()
+        except Exception:
+            logger.debug("refresh_protections: positions unavailable", exc_info=True)
+            return
+        self._observe_positions(positions)
+
     async def _entry_allowed(self, ticker: str) -> bool:
-        """Pre-trade gate: no duplicate exposure, respect max open positions.
+        """Pre-trade gate: protections, no duplicate exposure, max open positions.
 
         Fails closed — if portfolio state cannot be fetched, the entry is
         skipped rather than risked blind.
         """
+        symbol = ticker.upper()
+        now = datetime.now(_ET)
+
+        # Re-entry cooldown (freqtrade CooldownPeriod)
+        cd_until = self._cooldown_until.get(symbol)
+        if cd_until is not None and now < cd_until:
+            logger.info("%s entry skipped: re-entry cooldown until %s ET",
+                        ticker, cd_until.strftime("%H:%M"))
+            return False
+
+        # Loss-streak halt (freqtrade StoplossGuard)
+        if self._streak_halt_until is not None and now < self._streak_halt_until:
+            logger.info("%s entry skipped: stoploss-guard halt until %s ET",
+                        ticker, self._streak_halt_until.strftime("%H:%M"))
+            return False
+
         try:
             positions = await self.broker.get_positions()
             open_orders = await self.broker.get_open_orders()
@@ -275,7 +402,6 @@ class PortfolioManager:
             logger.error("%s entry blocked: cannot verify portfolio state (%s)", ticker, exc)
             return False
 
-        symbol = ticker.upper()
         if any(p.get("symbol", "").upper() == symbol for p in positions):
             logger.info("%s entry skipped: position already open", ticker)
             return False
@@ -288,6 +414,20 @@ class PortfolioManager:
                 ticker, len(positions), self.settings.risk.max_open_positions,
             )
             return False
+
+        # Concentration cap: limit simultaneous positions in one correlation group.
+        cand_groups = _correlation_groups(symbol)
+        cap = self.settings.risk.max_correlated_positions
+        if cand_groups and cap > 0:
+            open_syms = [str(p.get("symbol", "")).upper() for p in positions]
+            for g in cand_groups:
+                in_group = sum(1 for s in open_syms if g in _correlation_groups(s))
+                if in_group >= cap:
+                    logger.info(
+                        "%s entry skipped: %d positions already in correlated group '%s' (max %d)",
+                        ticker, in_group, g, cap,
+                    )
+                    return False
         return True
 
     async def execute(self, decision: TradeDecision) -> Optional[OrderReceipt]:
@@ -303,6 +443,16 @@ class PortfolioManager:
             logger.info("ORDER %s %s -> %s (%s)",
                         decision.decision.value, decision.ticker,
                         receipt.order_id, receipt.status)
+            # Remember the opened trade so the DecisionAgent can later learn from
+            # its outcome (resolved by _observe_positions when the position exits).
+            try:
+                meta = decision.decision_meta or {}
+                self._memory.record_decision(
+                    decision.ticker, decision.decision.value, decision.composite_score,
+                    factors=meta.get("key_factors"), concerns=meta.get("concerns"),
+                )
+            except Exception:
+                logger.debug("memory record_decision failed", exc_info=True)
             task = asyncio.create_task(self._track_fill(decision, receipt))
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
@@ -315,8 +465,6 @@ class PortfolioManager:
         if execute and decision.is_actionable:
             receipt = await self.execute(decision)
         self._audit_decision(decision, executed=receipt is not None, receipt=receipt)
-        if self.publisher and self.settings.ai4trade_publish:
-            await self.publisher.publish(decision)
         return decision
 
     # ── Audit trail (trade forensics) ─────────────────────────────────────
@@ -421,7 +569,6 @@ class PortfolioManager:
             # Bullish trend regime: momentum signals reliable, fundas lag
             "technical":   1.30,
             "liquid":      1.20,
-            "social":      1.10,
             "fundamental": 0.80,
             "vision":      0.90,
             "insider":     0.90,
@@ -432,7 +579,6 @@ class PortfolioManager:
             "vision":      1.10,
             "risk":        1.20,   # risk agent score matters more
             "technical":   0.75,
-            "social":      0.80,
             "liquid":      0.85,
             "insider":     1.00,
         },
@@ -442,7 +588,6 @@ class PortfolioManager:
             "insider":     1.15,
             "fundamental": 1.10,
             "technical":   0.80,   # trend signals unreliable in chop
-            "social":      0.85,
             "vision":      0.95,
         },
         "neutral": {
@@ -456,7 +601,6 @@ class PortfolioManager:
         v: AgentEvaluation,
         t: AgentEvaluation,
         liquid: Optional[AgentEvaluation],
-        social: Optional[AgentEvaluation],
         insider: Optional[AgentEvaluation] = None,
         squeeze: Optional[AgentEvaluation] = None,
         macro: Optional[AgentEvaluation] = None,
@@ -468,8 +612,6 @@ class PortfolioManager:
         ]
         if liquid is not None:
             agents.append(("liquid", liquid))
-        if social is not None:
-            agents.append(("social", social))
         if insider is not None:
             agents.append(("insider", insider))
         if squeeze is not None:
@@ -491,16 +633,7 @@ class PortfolioManager:
             num += ev.score * w
             den += w
 
-        result = round(num / den, 2) if den else 50.0
-
-        # Social + Squeeze convergence bonus: both agree → ±3 point boost
-        if social is not None and squeeze is not None:
-            if social.score >= 60 and squeeze.score >= 60:
-                result = min(99.0, result + 3.0)
-            elif social.score <= 40 and squeeze.score <= 40:
-                result = max(1.0, result - 3.0)
-
-        return result
+        return round(num / den, 2) if den else 50.0
 
     def _effective_thresholds(self, backtest_mode: bool) -> tuple[float, float]:
         """Live LONG/SHORT entry thresholds.

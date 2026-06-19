@@ -3,8 +3,7 @@
 Usage:
     python main.py                   # auto-scan market (no tickers needed)
     python main.py AAPL MSFT         # manual ticker override
-    python live_runner.py            # heartbeat-driven live mode (recommended)
-    python challenge_runner.py AAPL  # AI4Trade challenge competition
+    python live_runner.py            # live mode (recommended)
     python backtest_runner.py AAPL   # walk-forward backtest + dashboard
 """
 from __future__ import annotations
@@ -21,13 +20,11 @@ from config.settings import load_settings
 from core.enums import RunMode
 from core.models import AnalysisContext
 from data.chart_renderer import render_chart
-from data.ai4trade_client import AI4TradeClient
 from data.sector_scanner import SectorScanner
 from data.dashboard_publisher import push_scan_results
 from data.universe_scanner import UniverseScanner
 from execution.base_broker import BaseBroker
 from execution.portfolio_manager import PortfolioManager
-from execution.signal_publisher import SignalPublisher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 logger = logging.getLogger("desk")
@@ -75,16 +72,8 @@ async def main(tickers: Sequence[str]) -> None:
 
     logger.info("run_mode=%s tickers=%s", settings.run_mode.value, tickers_list)
 
-    ai4 = AI4TradeClient(
-        email=settings.ai4trade_email,
-        password=settings.ai4trade_password,
-        bot_name=settings.ai4trade_bot_name,
-    )
-    await ai4.__aenter__()
-
     broker = build_broker(settings)
-    publisher = SignalPublisher(ai4, publish_pass=True) if ai4.token and settings.ai4trade_publish else None
-    pm = build_manager(settings, broker, ai4, publisher=publisher)
+    pm = build_manager(settings, broker)
 
     execute = (
         settings.run_mode is RunMode.BACKTEST
@@ -128,8 +117,6 @@ async def main(tickers: Sequence[str]) -> None:
             )
         except Exception as e:
             logger.debug("Dashboard push skipped: %s", e)
-
-    await ai4.__aexit__(None, None, None)
 
 
 if __name__ == "__main__":

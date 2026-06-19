@@ -37,19 +37,15 @@ from agents.liquid_agent import LiquidAgent  # noqa: E402
 from agents.regime_agent import detect_regime  # noqa: E402
 from agents.risk_agent import RiskAgent  # noqa: E402
 from agents.insider_agent import InsiderAgent  # noqa: E402
-from agents.social_agent import SocialSentimentAgent  # noqa: E402
 from agents.squeeze_agent import SqueezeAgent  # noqa: E402
 from agents.technical_agent import TechnicalAgent  # noqa: E402
 from agents.vision_agent import VisionAgent  # noqa: E402
-from data.ai4trade_client import AI4TradeClient  # noqa: E402
-from data.market_intel_source import CombinedNewsSource, MarketIntelNewsSource  # noqa: E402
 from data.news_sources import AlpacaNewsSource, NewsSource, PoliStockSource  # noqa: E402
 from execution.alpaca_broker import AlpacaBroker  # noqa: E402
 from execution.base_broker import BaseBroker  # noqa: E402
 from execution.ibkr_broker import IBKRBroker  # noqa: E402
 from execution.liquid_broker import LiquidBroker  # noqa: E402
 from execution.portfolio_manager import PortfolioManager  # noqa: E402
-from execution.signal_publisher import SignalPublisher  # noqa: E402
 
 
 def build_broker(settings: Settings, *, force_live: bool = False) -> BaseBroker:
@@ -69,23 +65,18 @@ def build_broker(settings: Settings, *, force_live: bool = False) -> BaseBroker:
     )
 
 
-def build_news(settings: Settings, ai4: AI4TradeClient | None = None) -> NewsSource:
-    alpaca_news: NewsSource = (
+def build_news(settings: Settings) -> NewsSource:
+    return (
         AlpacaNewsSource(settings.alpaca_key_id, settings.alpaca_secret)
         if settings.alpaca_key_id
         else PoliStockSource(settings.news_base_url, settings.news_api_key)
     )
-    if ai4 is None:
-        return alpaca_news
-    return CombinedNewsSource(alpaca_news, MarketIntelNewsSource(ai4))
 
 
 def build_manager(
     settings: Settings,
     broker: BaseBroker | None,
-    ai4: AI4TradeClient | None = None,
     *,
-    publisher: SignalPublisher | None = None,
     include_live_only_agents: bool = True,
     include_vision: bool = True,
     include_decision_agent: bool = True,
@@ -106,7 +97,7 @@ def build_manager(
     A 30-day backtest generates ~500 evaluation windows, making per-window LLM
     calls prohibitively expensive.
     """
-    news = build_news(settings, ai4)
+    news = build_news(settings)
     live_extras = include_live_only_agents
     squeeze_agent = SqueezeAgent(weight=settings.weights.squeeze) if include_squeeze else None
     macro_agent   = MacroSignalAgent(weight=settings.weights.macro)
@@ -114,28 +105,19 @@ def build_manager(
         settings=settings,
         broker=broker,
         fundamental=FundamentalAgent(news, weight=settings.weights.fundamental,
-                                     anthropic_api_key=settings.anthropic_api_key,
-                                     gemini_api_key=settings.gemini_api_key,
-                                     model=settings.llm_model),
+                                     gemini_api_key=settings.gemini_api_key),
         vision=VisionAgent(weight=settings.weights.vision,
-                           anthropic_api_key=settings.anthropic_api_key,
-                           gemini_api_key=settings.gemini_api_key,
-                           model=settings.llm_model) if include_vision else None,
+                           gemini_api_key=settings.gemini_api_key) if include_vision else None,
         technical=TechnicalAgent(weight=settings.weights.technical),
         risk=RiskAgent(settings.risk),
         liquid=LiquidAgent(weight=settings.weights.liquid)
             if live_extras and settings.weights.liquid > 0 else None,
-        social=SocialSentimentAgent(ai4, weight=settings.weights.social)
-            if live_extras and ai4 is not None and settings.weights.social > 0 else None,
         insider=InsiderAgent(weight=settings.weights.insider)
             if live_extras and include_insider and settings.weights.insider > 0 else None,
         squeeze=squeeze_agent,
         macro=macro_agent,
-        publisher=publisher,
         decision_agent=DecisionAgent(
-            anthropic_api_key=settings.anthropic_api_key,
             gemini_api_key=settings.gemini_api_key,
-            model=settings.llm_model,
         ) if include_decision_agent else None,
     )
 

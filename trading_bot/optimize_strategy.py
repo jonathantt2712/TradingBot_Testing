@@ -309,15 +309,21 @@ async def _run_grid(
     logger.info("%s: %d combos (objective=%s, %s)",
                 label, len(combos), objective,
                 "walk-forward OOS" if oos_cache is not None else "full-window")
+    import time as _time_mod
     results = []
+    _g_start = _time_mod.monotonic()
     for i, params in enumerate(combos, 1):
-        logger.info("  [%d/%d] %s", i, len(combos), _fmt_params(params))
         rec = await _evaluate(params, tickers, spy_bars, objective=objective,
                               use_llm=use_llm, is_cache=is_cache, oos_cache=oos_cache)
+        elapsed = _time_mod.monotonic() - _g_start
+        eta     = int(elapsed / i * (len(combos) - i)) if i else 0
+        logger.info("PROGRESS: %d/%d (%.0f%%) ETA: %ds | %s %s",
+                    i, len(combos), 100 * i / len(combos), eta,
+                    label, _fmt_params(params))
         if rec["trades_ok"]:
             results.append(rec)
         else:
-            logger.info("    → skipped (too few trades)")
+            logger.debug("    → skipped (too few trades)")
     return sorted(results, key=lambda r: r["rank_value"], reverse=True)
 
 

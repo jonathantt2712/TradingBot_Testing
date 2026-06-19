@@ -1,48 +1,47 @@
 import { NextResponse } from 'next/server'
 import { botGet } from '@/lib/bot-api'
-import { getOrders } from '@/lib/alpaca'
+import { getFills, tradesFromFills } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
-import { demoHistory } from '@/lib/api'
 import type { TradeRecord } from '@/types/trading'
 
-/** Merge bot history with real Alpaca orders for full picture. */
+/**
+ * Returns completed round-trip trades with real P&L.
+ * Priority: bot's persisted records (have exact P&L) → Alpaca fills FIFO-matched
+ * (accurate P&L from actual executions) → empty list.
+ * Never falls back to demo data — callers decide what to show when empty.
+ */
 export async function GET() {
   const creds = await getAlpacaCreds()
   if (!creds) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   try {
-    // 1. Bot's persisted trade records
-    const botTrades = await botGet<TradeRecord[]>('/api/history').catch(() => [])
+    const [botResult, fillsResult] = await Promise.allSettled([
+      botGet<TradeRecord[]>('/api/history'),
+      getFills(creds, 500),
+    ])
 
-    // 2. Real closed orders from Alpaca (fills broker gaps)
-    const alpacaOrders = await getOrders(creds, 'closed', 100).catch(() => [])
-    const fromAlpaca: TradeRecord[] = alpacaOrders
-      .filter(o => o.filled_qty && parseFloat(o.filled_qty) > 0)
-      .map(o => ({
-        id:        o.id,
-        ticker:    o.symbol,
-        direction: o.side === 'buy' ? 'LONG' : 'SHORT',
-        entry:     parseFloat(o.filled_avg_price ?? '0'),
-        exit:      null,
-        qty:       parseInt(o.filled_qty),
-        pnl:       null,
-        pnl_pct:   null,
-        opened_at: o.created_at,
-        closed_at: o.filled_at,
-        duration:  null,
-        status:    'closed',
-        order_id:  o.id,
-      } as TradeRecord))
+    // Bot trades have real P&L — use as primary source
+    const botTrades: TradeRecord[] = botResult.status === 'fulfilled'
+      ? botResult.value.map(t => ({
+          ...t,
+          opened_at: t.opened_at ?? (t as any).executed_at ?? '',
+        }))
+      : []
 
-    // Merge — bot records take precedence (they have P&L calc)
-    const botIds = new Set(botTrades.map(t => t.order_id).filter(Boolean))
-    const merged = [
-      ...botTrades,
-      ...fromAlpaca.filter(t => !botIds.has(t.id)),
-    ].sort((a, b) => b.opened_at.localeCompare(a.opened_at))
+    // Fill gaps with FIFO-matched Alpaca fills (complete round-trip P&L)
+    const fillTrades: TradeRecord[] = fillsResult.status === 'fulfilled'
+      ? tradesFromFills(fillsResult.value)
+      : []
 
-    return NextResponse.json(merged.length ? merged : demoHistory())
+    // Deduplicate: prefer bot records (they have more detail)
+    const botKeys = new Set(botTrades.map(t => `${t.ticker}-${t.opened_at?.slice(0, 10)}`))
+    const fillGaps = fillTrades.filter(t => !botKeys.has(`${t.ticker}-${t.opened_at?.slice(0, 10)}`))
+
+    const merged = [...botTrades, ...fillGaps]
+      .sort((a, b) => (b.opened_at ?? '').localeCompare(a.opened_at ?? ''))
+
+    return NextResponse.json(merged)
   } catch {
-    return NextResponse.json(demoHistory())
+    return NextResponse.json([])
   }
 }

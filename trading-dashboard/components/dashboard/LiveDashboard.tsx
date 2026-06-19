@@ -102,7 +102,8 @@ export function LiveDashboard({
     }
   }, [])
 
-  // Initial load of slow data
+  // Initial load — run both immediately so the correct values show on first render
+  useEffect(() => { refreshFast() }, [refreshFast])
   useEffect(() => { refreshSlow() }, [refreshSlow])
 
   useEffect(() => {

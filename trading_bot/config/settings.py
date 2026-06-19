@@ -27,7 +27,6 @@ class AgentWeights:
     vision:      float = 0.14
     technical:   float = 0.32
     liquid:      float = 0.13
-    social:      float = 0.13
     insider:     float = 0.10   # congressional trading intelligence
     squeeze:     float = 0.08   # FINRA short volume squeeze detector
     macro:       float = 0.10   # AI-Trader market-intel macro signals
@@ -38,7 +37,6 @@ class AgentWeights:
             "vision":      self.vision,
             "technical":   self.technical,
             "liquid":      self.liquid,
-            "social":      self.social,
             "insider":     self.insider,
             "squeeze":     self.squeeze,
             "macro":       self.macro,
@@ -59,6 +57,26 @@ class RiskConfig:
     max_open_positions:     int   = field(default_factory=lambda: int(_env_float("MAX_OPEN_POSITIONS", 5)))
     max_daily_loss_pct:     float = field(default_factory=lambda: _env_float("MAX_DAILY_LOSS_PCT", 0.03))
 
+    # ── Trade protections (freqtrade-style circuit breakers) ──────────────────
+    # All of these only ever BLOCK new entries; they never create or enlarge a
+    # trade, so they are strictly risk-reducing. Set any value to 0 to disable it.
+    #
+    # CooldownPeriod: minutes a symbol is blocked from re-entry after it closes,
+    # to avoid whipsaw churn (stop out → immediately re-enter the same setup).
+    reentry_cooldown_min:       int   = field(default_factory=lambda: int(_env_float("REENTRY_COOLDOWN_MIN", 15)))
+    # StoplossGuard: if this many losing exits occur within the rolling window,
+    # pause ALL new entries for the halt duration (catches choppy "death by a
+    # thousand cuts" days before the daily kill switch is reached).
+    loss_streak_limit:          int   = field(default_factory=lambda: int(_env_float("LOSS_STREAK_LIMIT", 3)))
+    loss_streak_window_min:     int   = field(default_factory=lambda: int(_env_float("LOSS_STREAK_WINDOW_MIN", 60)))
+    loss_streak_halt_min:       int   = field(default_factory=lambda: int(_env_float("LOSS_STREAK_HALT_MIN", 60)))
+    # MaxDrawdown (equity mode): halt for the day once equity falls this far below
+    # its intraday PEAK — protects gains the from-open daily stop would miss.
+    intraday_drawdown_halt_pct: float = field(default_factory=lambda: _env_float("INTRADAY_DRAWDOWN_HALT_PCT", 0.03))
+    # Concentration cap: max simultaneous open positions in one correlation group
+    # (e.g. mega-cap tech) so the bot can't stack one undiversified bet.
+    max_correlated_positions:   int   = field(default_factory=lambda: int(_env_float("MAX_CORRELATED_POSITIONS", 3)))
+
 
 @dataclass(slots=True)
 class DecisionThresholds:
@@ -70,7 +88,7 @@ class DecisionThresholds:
 @dataclass(slots=True)
 class ScannerConfig:
     enabled:         bool  = field(default_factory=lambda: _env_bool("SCANNER_ENABLED", True))
-    top_n:           int   = field(default_factory=lambda: int(_env_float("SCANNER_TOP_N", 50)))
+    top_n:           int   = field(default_factory=lambda: int(_env_float("SCANNER_TOP_N", 20)))
     min_price:       float = field(default_factory=lambda: _env_float("SCANNER_MIN_PRICE", 5.0))
     max_price:       float = field(default_factory=lambda: _env_float("SCANNER_MAX_PRICE", 2000.0))
     min_volume:      int   = field(default_factory=lambda: int(_env_float("SCANNER_MIN_VOLUME", 500000)))
@@ -103,16 +121,9 @@ class Settings:
     use_liquid_broker: bool = field(default_factory=lambda: _env_bool("USE_LIQUID_BROKER", False))
     liquid_api_key:    str  = field(default_factory=lambda: _env("LIQUID_API_KEY"))
 
-    ai4trade_email:    str  = field(default_factory=lambda: _env("AI4TRADE_EMAIL"))
-    ai4trade_password: str  = field(default_factory=lambda: _env("AI4TRADE_PASSWORD"))
-    ai4trade_bot_name: str  = field(default_factory=lambda: _env("AI4TRADE_BOT_NAME", "tradingbot2026"))
-    ai4trade_publish:  bool = field(default_factory=lambda: _env_bool("AI4TRADE_PUBLISH", True))
-
     news_base_url:     str  = field(default_factory=lambda: _env("NEWS_BASE_URL", "https://www.polistock.app/"))
     news_api_key:      str  = field(default_factory=lambda: _env("NEWS_API_KEY"))
-    anthropic_api_key: str  = field(default_factory=lambda: _env("ANTHROPIC_API_KEY"))
     gemini_api_key:    str  = field(default_factory=lambda: _env("GEMINI_API_KEY"))
-    llm_model:         str  = field(default_factory=lambda: _env("LLM_MODEL", "claude-sonnet-4-6"))
 
     telegram_bot_token:    str   = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
     telegram_chat_id:      str   = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID"))
