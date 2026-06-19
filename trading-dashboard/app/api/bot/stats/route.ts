@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { botGet } from '@/lib/bot-api'
-import { getAccount, getPortfolioHistory, getFills, winRateFromFills } from '@/lib/alpaca'
+import { getAccount, getPortfolioHistory } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { demoStats } from '@/lib/api'
 import type { PortfolioStats } from '@/types/trading'
@@ -10,16 +10,17 @@ export async function GET() {
   if (!creds) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   try {
-    const [botStats, account, history, fills] = await Promise.allSettled([
+    const [botStats, account, history] = await Promise.allSettled([
       botGet<PortfolioStats>('/api/stats'),
       getAccount(creds),
       getPortfolioHistory(creds, '1A', '1D'),
-      getFills(creds),
     ])
 
+    // When the bot is unreachable use demoStats only for the object *shape*,
+    // not the values — zero out metrics so fake demo numbers never show in UI.
     const stats: PortfolioStats = botStats.status === 'fulfilled'
       ? botStats.value
-      : demoStats()
+      : { ...demoStats(), win_rate: 0, total_trades: 0, total_pnl: 0, today_pnl: 0, sharpe_ratio: 0 }
 
     if (account.status === 'fulfilled') {
       const acc = account.value
@@ -31,19 +32,10 @@ export async function GET() {
         const totalPnl = parseFloat(acc.equity) - base
         if (base > 0 && !isNaN(totalPnl)) stats.total_pnl = +totalPnl.toFixed(2)
       }
-
-      // Always prefer real Alpaca fill-based win rate over bot's local history
-      // (bot history may be empty on ephemeral filesystems like Railway).
-      if (fills.status === 'fulfilled' && Array.isArray(fills.value)) {
-        const computed = winRateFromFills(fills.value)
-        if (computed !== null) stats.win_rate = computed
-      }
-
-      // open_positions is set by the frontend from the live positions fetch
     }
 
     return NextResponse.json(stats)
   } catch {
-    return NextResponse.json(demoStats())
+    return NextResponse.json({ ...demoStats(), win_rate: 0, total_trades: 0, total_pnl: 0, today_pnl: 0, sharpe_ratio: 0 })
   }
 }

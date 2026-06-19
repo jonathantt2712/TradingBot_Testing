@@ -196,8 +196,9 @@ _ALPACA_HEADERS = {
     "APCA-API-SECRET-KEY": _ALPACA_SECRET,
 }
 
-_BROKER_BASE = "https://paper-api.alpaca.markets"
-_DATA_BASE   = "https://data.alpaca.markets"
+_ALPACA_PAPER = os.getenv("ALPACA_PAPER", "true").lower() not in ("false", "0", "no")
+_BROKER_BASE  = "https://paper-api.alpaca.markets" if _ALPACA_PAPER else "https://api.alpaca.markets"
+_DATA_BASE    = "https://data.alpaca.markets"
 
 _SECTOR_MAP: Dict[str, str] = {
     "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
@@ -2245,6 +2246,76 @@ def get_pnl():
     return out
 
 
+def _fetch_alpaca_fills_sync(page_size: int = 500) -> list:
+    """Fetch FILL activities from Alpaca using the bot's own credentials (stdlib only)."""
+    import urllib.request as _urlreq
+    url = (
+        f"{_BROKER_BASE}/v2/account/activities"
+        f"?activity_type=FILL&page_size={page_size}&direction=asc"
+    )
+    req = _urlreq.Request(url, headers={
+        "APCA-API-KEY-ID":     _ALPACA_KEY,
+        "APCA-API-SECRET-KEY": _ALPACA_SECRET,
+    })
+    with _urlreq.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+    return data if isinstance(data, list) else []
+
+
+def _win_rate_from_fills(fills: list) -> "tuple[float, int] | None":
+    """FIFO win-rate from Alpaca fill activities.
+    Returns (win_rate_pct, total_completed_trades) or None when no completed trades.
+    """
+    pos: dict = {}
+    wins = total = 0
+    EPS = 0.0001
+    for f in fills:
+        qty   = float(f.get("qty", 0) or 0)
+        price = float(f.get("price", 0) or 0)
+        sym   = f.get("symbol", "")
+        side  = f.get("side", "")
+        if not sym or not side or qty <= 0 or price <= 0:
+            continue
+        if sym not in pos:
+            pos[sym] = {"qty": 0.0, "avg_cost": 0.0, "pnl": 0.0}
+        p = pos[sym]
+        if side == "buy":
+            if p["qty"] < 0:
+                cover = min(qty, -p["qty"])
+                p["pnl"] += (p["avg_cost"] - price) * cover
+                p["qty"] += cover
+                if abs(p["qty"]) < EPS:
+                    total += 1
+                    if p["pnl"] > 0:
+                        wins += 1
+                    p.update({"qty": 0.0, "avg_cost": 0.0, "pnl": 0.0})
+                rem = qty - cover
+                if rem > EPS:
+                    p.update({"qty": rem, "avg_cost": price, "pnl": 0.0})
+            else:
+                new_qty = p["qty"] + qty
+                p["avg_cost"] = (p["avg_cost"] * p["qty"] + price * qty) / new_qty
+                p["qty"] = new_qty
+        else:
+            if p["qty"] > 0:
+                sell = min(qty, p["qty"])
+                p["pnl"] += (price - p["avg_cost"]) * sell
+                p["qty"] -= sell
+                if abs(p["qty"]) < EPS:
+                    total += 1
+                    if p["pnl"] > 0:
+                        wins += 1
+                    p.update({"qty": 0.0, "avg_cost": 0.0, "pnl": 0.0})
+                rem = qty - sell
+                if rem > EPS:
+                    p.update({"qty": -rem, "avg_cost": price, "pnl": 0.0})
+            else:
+                new_qty = -p["qty"] + qty
+                p["avg_cost"] = (p["avg_cost"] * (-p["qty"]) + price * qty) / new_qty
+                p["qty"] -= qty
+    return (round(wins / total * 100, 1), total) if total > 0 else None
+
+
 @app.get("/api/stats", dependencies=[Depends(_verify_bot_secret)])
 def get_stats():
     all_trades = _load(HISTORY_FILE, [])
@@ -2311,6 +2382,21 @@ def get_stats():
         except Exception:
             pass
     avg_hold_hours = round(sum(hold_times) / len(hold_times), 1) if hold_times else 0.0
+
+    # Override win_rate with Alpaca-sourced FIFO computation when available.
+    # The local HISTORY_FILE is empty on Railway's ephemeral filesystem, so the
+    # local win_rate is always 0 there. The fills-based computation uses the
+    # bot's own credentials — guaranteed to match the account it actually trades on.
+    if _ALPACA_KEY and _ALPACA_SECRET:
+        try:
+            fills   = _fetch_alpaca_fills_sync()
+            result  = _win_rate_from_fills(fills)
+            if result is not None:
+                win_rate, fills_total = result
+                if not total_trades:
+                    total_trades = fills_total
+        except Exception as _exc:
+            logger.warning("fill-based win rate unavailable: %s", _exc)
 
     weights = _load_weights()
     return {
