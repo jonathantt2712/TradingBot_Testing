@@ -578,7 +578,8 @@ def _update_weights_from_backtest(backtest_trades: list) -> None:
 
 # -- Main ----------------------------------------------------------------------
 
-DEFAULT_TICKERS = [
+# Fallback only — used when the universe scanner fails and no --tickers given.
+_FALLBACK_TICKERS = [
     "NVDA", "TSLA", "AAPL", "MSFT", "AMD",
     "META", "AMZN", "GOOGL", "SPY", "QQQ",
 ]
@@ -586,6 +587,20 @@ DEFAULT_TICKERS = [
 
 async def run(tickers: list[str], days: int) -> None:
     settings = load_settings()
+
+    # When no explicit ticker list is provided, pull today's top movers from
+    # Alpaca's universe scanner instead of the hardcoded fallback list.
+    if not tickers:
+        try:
+            from data.universe_scanner import UniverseScanner
+            scanner = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
+            n = int(os.getenv("BACKTEST_TOP_N", "30"))
+            logger.info("Universe scanner: fetching top %d candidates…", n)
+            tickers = await scanner.get_candidates(top_n=n)
+            logger.info("Universe: %s", " ".join(tickers))
+        except Exception as exc:
+            logger.warning("Universe scanner failed (%s) — using fallback list", exc)
+            tickers = _FALLBACK_TICKERS
 
     if not settings.alpaca_key_id or not settings.alpaca_secret:
         logger.error("Set ALPACA_API_KEY_ID and ALPACA_API_SECRET in .env")
@@ -675,23 +690,20 @@ async def run(tickers: list[str], days: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="30-day intraday backtest")
     parser.add_argument("--days",    type=int, default=30, help="Lookback days (default 30)")
-    parser.add_argument("--tickers", nargs="+", default=DEFAULT_TICKERS,
-                        help="Ticker list (default: top 10 liquid stocks)")
+    parser.add_argument("--tickers", nargs="+", default=[],
+                        help="Explicit ticker list (default: auto from universe scanner)")
     parser.add_argument("--top",     type=int, default=0,
-                        help="Use top N from universe scanner instead of --tickers")
+                        help="Override top-N for universe scanner (default: BACKTEST_TOP_N env or 30)")
     args = parser.parse_args()
 
     async def _run():
         tickers = [t.upper() for t in args.tickers]
 
+        # --top overrides BACKTEST_TOP_N env for one-off CLI runs
         if args.top > 0:
-            from data.universe_scanner import UniverseScanner
-            settings = load_settings()
-            scanner = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
-            logger.info("Scanning universe for top %d candidates...", args.top)
-            tickers = await scanner.get_candidates(top_n=args.top)
-            logger.info("Universe: %s", " ".join(tickers))
+            os.environ["BACKTEST_TOP_N"] = str(args.top)
 
+        # Empty tickers → run() will call the universe scanner itself
         await run(tickers, args.days)
 
     asyncio.run(_run())
