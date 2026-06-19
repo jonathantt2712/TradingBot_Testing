@@ -825,6 +825,7 @@ _backtest_stats: Dict[str, Any] = {
     "last_status":   None,   # "ok" | "failed" | "timeout"
     "error_count":   0,
     "last_error":    None,
+    "last_log":      None,   # full stdout from last run
 }
 
 _optimizer_stats: Dict[str, Any] = {
@@ -833,6 +834,8 @@ _optimizer_stats: Dict[str, Any] = {
     "error_count":   0,
     "last_error":    None,
     "running":       False,
+    "last_log":      None,   # full stdout from last run
+    "log_lines":     [],     # live lines while running
 }
 
 _circuit_breaker: Dict[str, Any] = {
@@ -1465,21 +1468,23 @@ async def _run_backtest() -> None:
             cwd=str(_HERE),
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1800)  # 30 min max
+        decoded = (stdout or b"").decode(errors="replace")
         if proc.returncode == 0:
             logger.info("Auto-backtest complete — results written to %s", _RESULTS_FILE)
             _backtest_stats.update({
                 "last_run_at": datetime.utcnow().isoformat(),
                 "last_status": "ok",
                 "last_error":  None,
+                "last_log":    decoded,
             })
         else:
-            decoded_tail = (stdout or b"").decode()[-500:]
-            logger.error("Auto-backtest failed (rc=%d): %s", proc.returncode, decoded_tail)
+            logger.error("Auto-backtest failed (rc=%d): %s", proc.returncode, decoded[-500:])
             _backtest_stats.update({
                 "last_run_at": datetime.utcnow().isoformat(),
                 "last_status": "failed",
                 "error_count": _backtest_stats["error_count"] + 1,
-                "last_error":  decoded_tail,
+                "last_error":  decoded[-500:],
+                "last_log":    decoded,
             })
     except asyncio.TimeoutError:
         logger.error("Auto-backtest timed out after 30 min — killed")
@@ -1490,6 +1495,7 @@ async def _run_backtest() -> None:
             "last_status": "timeout",
             "error_count": _backtest_stats["error_count"] + 1,
             "last_error":  "timed out after 30 min",
+            "last_log":    _backtest_stats.get("last_log", "") or "",
         })
     except Exception:
         logger.exception("Auto-backtest subprocess error")
@@ -1517,6 +1523,7 @@ async def _run_optimizer() -> None:
         logger.info("Optimizer already running — ignoring trigger")
         return
     _optimizer_stats["running"] = True
+    _optimizer_stats["log_lines"] = []
     logger.info("Optimizer starting…")
     proc = None
     try:
@@ -1526,22 +1533,40 @@ async def _run_optimizer() -> None:
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(_HERE),
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3000)  # 50 min max
+
+        # Stream stdout line-by-line so the dashboard can show live progress
+        log_lines: list[str] = _optimizer_stats["log_lines"]
+        deadline = asyncio.get_event_loop().time() + 3000  # 50 min
+
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            log_lines.append(line)
+            if len(log_lines) > 1000:
+                log_lines.pop(0)
+            if asyncio.get_event_loop().time() > deadline:
+                proc.kill()
+                raise asyncio.TimeoutError
+
+        await proc.wait()
+        full_log = "\n".join(log_lines)
+
         if proc.returncode == 0:
             logger.info("Optimizer complete — wrote backtest_optimal.json + OPTIMAL_CONFIG.txt")
             _optimizer_stats.update({
                 "last_run_at": datetime.utcnow().isoformat(),
                 "last_status": "ok",
                 "last_error":  None,
+                "last_log":    full_log,
             })
         else:
-            decoded_tail = (stdout or b"").decode()[-500:]
-            logger.error("Optimizer failed (rc=%d): %s", proc.returncode, decoded_tail)
+            logger.error("Optimizer failed (rc=%d): %s", proc.returncode, full_log[-500:])
             _optimizer_stats.update({
                 "last_run_at": datetime.utcnow().isoformat(),
                 "last_status": "failed",
                 "error_count": _optimizer_stats["error_count"] + 1,
-                "last_error":  decoded_tail,
+                "last_error":  full_log[-500:],
+                "last_log":    full_log,
             })
     except asyncio.TimeoutError:
         logger.error("Optimizer timed out after 50 min — killed")
@@ -2548,6 +2573,28 @@ async def run_optimizer_now():
         return {"status": "already_running", "timestamp": datetime.utcnow().isoformat()}
     asyncio.create_task(_run_optimizer())
     return {"status": "optimizer_triggered", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/backtest/log", dependencies=[Depends(_verify_bot_secret)])
+def get_backtest_log():
+    """Return the full stdout log from the last backtest run."""
+    from fastapi.responses import PlainTextResponse
+    log = _backtest_stats.get("last_log") or ""
+    return PlainTextResponse(log or "No log available yet — run the backtest first.", media_type="text/plain")
+
+
+@app.get("/api/optimize/log", dependencies=[Depends(_verify_bot_secret)])
+def get_optimizer_log():
+    """Return live or completed optimizer log lines."""
+    from fastapi.responses import JSONResponse
+    running = bool(_optimizer_stats.get("running"))
+    lines: list[str] = list(_optimizer_stats.get("log_lines") or [])
+    last_log: str = _optimizer_stats.get("last_log") or ""
+    return JSONResponse({
+        "running": running,
+        "lines":   lines if running else (last_log.splitlines() if last_log else []),
+        "status":  _optimizer_stats.get("last_status"),
+    })
 
 
 @app.post("/api/optimize/apply", dependencies=[Depends(_verify_bot_secret)])

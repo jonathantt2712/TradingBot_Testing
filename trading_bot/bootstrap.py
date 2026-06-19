@@ -105,13 +105,9 @@ def build_manager(
         settings=settings,
         broker=broker,
         fundamental=FundamentalAgent(news, weight=settings.weights.fundamental,
-                                     anthropic_api_key=settings.anthropic_api_key,
-                                     gemini_api_key=settings.gemini_api_key,
-                                     model=settings.llm_model),
+                                     gemini_api_key=settings.gemini_api_key),
         vision=VisionAgent(weight=settings.weights.vision,
-                           anthropic_api_key=settings.anthropic_api_key,
-                           gemini_api_key=settings.gemini_api_key,
-                           model=settings.llm_model) if include_vision else None,
+                           gemini_api_key=settings.gemini_api_key) if include_vision else None,
         technical=TechnicalAgent(weight=settings.weights.technical),
         risk=RiskAgent(settings.risk),
         liquid=LiquidAgent(weight=settings.weights.liquid)
@@ -121,9 +117,7 @@ def build_manager(
         squeeze=squeeze_agent,
         macro=macro_agent,
         decision_agent=DecisionAgent(
-            anthropic_api_key=settings.anthropic_api_key,
             gemini_api_key=settings.gemini_api_key,
-            model=settings.llm_model,
         ) if include_decision_agent else None,
     )
 

@@ -103,9 +103,7 @@ class Settings:
 
     news_base_url:     str  = field(default_factory=lambda: _env("NEWS_BASE_URL", "https://www.polistock.app/"))
     news_api_key:      str  = field(default_factory=lambda: _env("NEWS_API_KEY"))
-    anthropic_api_key: str  = field(default_factory=lambda: _env("ANTHROPIC_API_KEY"))
     gemini_api_key:    str  = field(default_factory=lambda: _env("GEMINI_API_KEY"))
-    llm_model:         str  = field(default_factory=lambda: _env("LLM_MODEL", "claude-sonnet-4-6"))
 
     telegram_bot_token:    str   = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
     telegram_chat_id:      str   = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID"))

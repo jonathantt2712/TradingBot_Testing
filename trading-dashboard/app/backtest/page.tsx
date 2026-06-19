@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   TrendingUp, TrendingDown, BarChart2, Target, AlertTriangle,
-  RefreshCw, CheckCircle2, XCircle, Clock, Activity, Play, Loader2,
+  RefreshCw, CheckCircle2, XCircle, Clock, Activity, Play, Loader2, Download, ChevronDown, ChevronUp,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EquityCurve, ParamHeatmap, type BacktestTrade } from '@/components/backtest/BacktestCharts'
@@ -219,9 +219,12 @@ export default function BacktestPage() {
   const [applyMsg,   setApplyMsg]   = useState<{ ok: boolean; text: string } | null>(null)
   const [health,     setHealth]     = useState<BacktestHealth | null>(null)
   const [optHealth,  setOptHealth]  = useState<BacktestHealth | null>(null)
-  const [rejections, setRejections] = useState<RejectionRecord[]>([])
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [rejections,   setRejections]   = useState<RejectionRecord[]>([])
+  const [optLogLines,  setOptLogLines]  = useState<string[]>([])
+  const [showOptLog,   setShowOptLog]   = useState(false)
+  const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null)
   const optPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const logPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   async function loadHealth() {
     try {
@@ -283,11 +286,25 @@ export default function BacktestPage() {
   async function runOptimizer() {
     if (optimizing) return
     setOptimizing(true)
+    setShowOptLog(true)
+    setOptLogLines([])
     try {
       await fetch('/api/optimize/run', { method: 'POST' })
     } catch { /* ignore trigger errors — bot may queue it */ }
-    // The optimizer is heavy (grid × walk-forward). Poll health for completion,
-    // then reload results (it writes backtest_optimal.json which /api/backtest serves).
+    // Poll live log lines while running
+    logPollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch('/api/optimize/log', { cache: 'no-store' })
+        if (r.ok) {
+          const d = await r.json()
+          setOptLogLines(d.lines ?? [])
+          if (!d.running) {
+            if (logPollRef.current) clearInterval(logPollRef.current)
+          }
+        }
+      } catch { /* keep polling */ }
+    }, 3_000)
+    // Poll health for completion
     optPollRef.current = setInterval(async () => {
       try {
         const res = await fetch('/api/bot/health', { cache: 'no-store' })
@@ -329,6 +346,7 @@ export default function BacktestPage() {
   useEffect(() => () => {
     if (pollRef.current) clearInterval(pollRef.current)
     if (optPollRef.current) clearInterval(optPollRef.current)
+    if (logPollRef.current) clearInterval(logPollRef.current)
   }, [])
 
   return (
@@ -414,6 +432,14 @@ export default function BacktestPage() {
         {(health?.error_count ?? 0) > 0 && (
           <span className="text-bear font-semibold">Failures: {health!.error_count}</span>
         )}
+        <a
+          href="/api/backtest/log"
+          download="backtest.log"
+          className="ml-auto flex items-center gap-1 text-muted hover:text-subtle transition-colors"
+          title="Download full backtest log"
+        >
+          <Download className="h-3 w-3" /> Log
+        </a>
       </div>
 
       {/* Optimizer status */}
@@ -443,7 +469,43 @@ export default function BacktestPage() {
         {(optHealth?.error_count ?? 0) > 0 && (
           <span className="text-bear font-semibold">Failures: {optHealth!.error_count}</span>
         )}
+        {optLogLines.length > 0 && (
+          <button
+            onClick={() => setShowOptLog(v => !v)}
+            className="ml-auto flex items-center gap-1 text-muted hover:text-subtle transition-colors"
+          >
+            {showOptLog ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            {optimizing ? 'Live log' : 'Log'}
+          </button>
+        )}
       </div>
+
+      {/* Optimizer live log panel */}
+      {showOptLog && optLogLines.length > 0 && (
+        <div className="rounded-xl border border-bg-border bg-bg-base overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-bg-border">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">
+              {optimizing ? 'Live optimizer output' : 'Last optimizer run log'}
+            </span>
+            {!optimizing && (
+              <button
+                onClick={() => {
+                  const blob = new Blob([optLogLines.join('\n')], { type: 'text/plain' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a'); a.href = url; a.download = 'optimizer.log'; a.click()
+                  URL.revokeObjectURL(url)
+                }}
+                className="flex items-center gap-1 text-[10px] text-muted hover:text-subtle transition-colors"
+              >
+                <Download className="h-3 w-3" /> Download
+              </button>
+            )}
+          </div>
+          <pre className="px-4 py-3 text-[10px] font-mono text-subtle overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+            {optLogLines.slice(-100).join('\n')}
+          </pre>
+        </div>
+      )}
 
       {/* Apply-to-live result */}
       {applyMsg && (
