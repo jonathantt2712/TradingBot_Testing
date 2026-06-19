@@ -110,7 +110,9 @@ class TechnicalAgent(BaseAgent):
         # ── Stale-data guard ─────────────────────────────────────────────
         # If the most recent bar is more than 30 minutes old during RTH,
         # data is stale (broker connectivity issue) — return neutral.
-        try:
+        # Skip in backtest mode: historical bars are always "old" vs. now().
+        if not getattr(ctx, "backtest_mode", False):
+          try:
             from datetime import datetime
             from zoneinfo import ZoneInfo
             _ET = ZoneInfo("America/New_York")
@@ -134,7 +136,7 @@ class TechnicalAgent(BaseAgent):
                     confidence=0.05,
                     rationale=f"stale data: last bar {age_min:.0f}min old",
                 )
-        except Exception:
+          except Exception:
             pass  # tz parse error — skip guard
 
         # ── Research #1 (PEAD): Opening-noise guard ──────────────────────

@@ -143,7 +143,7 @@ ATR_GRID = {
     "ATR_TARGET_MULTIPLE": [2.5, 3.0, 4.0, 5.0],
 }
 
-DEFAULT_TICKERS = ["NVDA", "TSLA", "AAPL", "MSFT", "AMD", "META", "AMZN"]
+_FALLBACK_TICKERS = ["NVDA", "TSLA", "AAPL", "MSFT", "AMD", "META", "AMZN"]
 
 
 # ── Settings factory ───────────────────────────────────────────────────────────
@@ -464,6 +464,19 @@ async def run(
         logger.error("ALPACA_API_KEY_ID and ALPACA_API_SECRET must be set in .env or environment")
         return
 
+    # When no explicit ticker list is provided, pull today's top movers
+    if not tickers:
+        try:
+            from data.universe_scanner import UniverseScanner
+            scanner = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
+            n = int(os.getenv("BACKTEST_TOP_N", "20"))
+            logger.info("Universe scanner: fetching top %d candidates for optimizer…", n)
+            tickers = await scanner.get_candidates(top_n=n)
+            logger.info("Universe: %s", " ".join(tickers))
+        except Exception as exc:
+            logger.warning("Universe scanner failed (%s) — using fallback list", exc)
+            tickers = _FALLBACK_TICKERS
+
     # Log and surface real trade history so the optimizer learns from live results.
     _hist_trades = load_closed_trades()
     _hist_stats  = summarize(_hist_trades)
@@ -548,8 +561,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Trading strategy optimizer — maximises live trading profit")
     parser.add_argument("--days",    type=int, default=60,
                         help="Lookback window in days (default 60 — needs enough for a 70/30 split)")
-    parser.add_argument("--tickers", nargs="+", default=DEFAULT_TICKERS,
-                        help="Tickers to backtest")
+    parser.add_argument("--tickers", nargs="+", default=[],
+                        help="Explicit ticker list (default: auto from universe scanner)")
     parser.add_argument("--phase",   choices=["thresholds", "atr", "both"],
                         default="both",
                         help="Which grid to search (default: both)")
