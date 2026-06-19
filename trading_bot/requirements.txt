@@ -13,7 +13,7 @@ ib-insync>=0.9.86
 
 # --- Vision / LLM sentiment ---
 anthropic>=0.50
-google-generativeai>=0.8   # Gemini fallback in core/llm_adapter.py
+google-genai>=1.5          # Gemini fallback in core/llm_adapter.py
 
 # --- Charting (vision agent) ---
 matplotlib>=3.8
