@@ -4,7 +4,7 @@ import { usePathname } from 'next/navigation'
 import { signOut } from 'next-auth/react'
 import {
   LayoutDashboard, TrendingUp, History, BarChart2,
-  Zap, Settings, ExternalLink, FlaskConical, LogOut, User, Brain,
+  Zap, Settings, FlaskConical, LogOut, User, Brain,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -127,15 +127,6 @@ export function Sidebar({ email }: SidebarProps) {
           <Settings className="h-4 w-4" />
           Settings
         </Link>
-        <a
-          href="https://github.com/itaitoker64/tradingbot2026"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-subtle hover:bg-bg-hover hover:text-primary transition-colors"
-        >
-          <ExternalLink className="h-4 w-4" />
-          GitHub
-        </a>
         {email && (
           <button
             onClick={() => signOut({ callbackUrl: '/login' })}
