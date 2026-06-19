@@ -1,7 +1,7 @@
 'use client'
 import { useState, useEffect, useCallback } from 'react'
 import { RefreshCw, Wifi, WifiOff, Clock } from 'lucide-react'
-import { demoRegime, demoRecommendations, api } from '@/lib/api'
+import { api } from '@/lib/api'
 import { AGENT_ORDER } from '@/lib/agents'
 import { AgentOverviewCard } from '@/components/agents/AgentOverviewCard'
 import { cn, regimeLabel, regimeColor } from '@/lib/utils'
@@ -19,19 +19,17 @@ function relativeTime(iso: string | null): string {
 }
 
 export default function AgentsPage() {
-  const [recommendations, setRecommendations] = useState<TradeRecommendation[]>(demoRecommendations())
-  const [regime,          setRegime]          = useState<RegimeInfo>(demoRegime())
+  const [recommendations, setRecommendations] = useState<TradeRecommendation[]>([])
+  const [regime,          setRegime]          = useState<RegimeInfo | null>(null)
   const [live,            setLive]            = useState(false)
-  const [loading,         setLoading]         = useState(false)
+  const [loading,         setLoading]         = useState(true)
 
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
       const [recs, reg] = await Promise.allSettled([api.recommendations(), api.regime()])
-      // Only replace recommendations if the API returns a non-empty array;
-      // otherwise keep whatever is shown (demo data or last known state).
-      if (recs.status === 'fulfilled' && recs.value.length > 0) setRecommendations(recs.value)
-      if (reg.status === 'fulfilled') setRegime(reg.value)
+      if (recs.status === 'fulfilled') setRecommendations(recs.value)
+      if (reg.status  === 'fulfilled') setRegime(reg.value)
       setLive(recs.status === 'fulfilled' && reg.status === 'fulfilled')
     } catch {
       setLive(false)
@@ -46,7 +44,7 @@ export default function AgentsPage() {
     return () => clearInterval(id)
   }, [fetchData])
 
-  const lastUpdated = [regime.timestamp, ...recommendations.map(r => r.timestamp)]
+  const lastUpdated = [regime?.timestamp, ...recommendations.map(r => r.timestamp)]
     .filter(Boolean)
     .sort()
     .at(-1) ?? null
@@ -57,9 +55,11 @@ export default function AgentsPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3 flex-wrap">
           <h1 className="text-lg font-bold text-primary">Agents</h1>
-          <span className={cn('rounded-full border px-3 py-0.5 text-xs font-bold', regimeColor(regime.regime))}>
-            {regimeLabel(regime.regime)}
-          </span>
+          {regime && (
+            <span className={cn('rounded-full border px-3 py-0.5 text-xs font-bold', regimeColor(regime.regime))}>
+              {regimeLabel(regime.regime)}
+            </span>
+          )}
           <span className="flex items-center gap-1 text-xs text-muted">
             <Clock className="h-3 w-3" />
             {relativeTime(lastUpdated)}
@@ -67,8 +67,8 @@ export default function AgentsPage() {
         </div>
         <div className="flex items-center gap-2">
           {live
-            ? <span className="flex items-center gap-1.5 text-xs text-bull"><Wifi    className="h-3 w-3" /> Live</span>
-            : <span className="flex items-center gap-1.5 text-xs text-caution"><WifiOff className="h-3 w-3" /> Demo</span>
+            ? <span className="flex items-center gap-1.5 text-xs text-bull"><Wifi     className="h-3 w-3" /> Live</span>
+            : <span className="flex items-center gap-1.5 text-xs text-caution"><WifiOff className="h-3 w-3" /> Offline</span>
           }
           <button onClick={fetchData} className="btn-ghost text-xs" disabled={loading}>
             <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
@@ -76,10 +76,10 @@ export default function AgentsPage() {
         </div>
       </div>
 
-      {/* Agent cards — one per agent, showing what each agent observed */}
+      {/* Agent cards — always shown, each handles its own empty state */}
       <div className="space-y-3">
         {AGENT_ORDER.map(role => (
-          <AgentOverviewCard key={role} role={role} recommendations={recommendations} />
+          <AgentOverviewCard key={role} role={role} recommendations={recommendations} loading={loading} />
         ))}
       </div>
     </div>

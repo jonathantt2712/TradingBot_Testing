@@ -99,9 +99,10 @@ function TickerRow({ ticker, ev }: { ticker: string; ev: AgentEvaluation }) {
 interface Props {
   role:            string
   recommendations: TradeRecommendation[]
+  loading?:        boolean
 }
 
-export function AgentOverviewCard({ role, recommendations }: Props) {
+export function AgentOverviewCard({ role, recommendations, loading }: Props) {
   const [expanded, setExpanded] = useState(false)
 
   const entries: { ticker: string; ev: AgentEvaluation }[] = []
@@ -114,9 +115,11 @@ export function AgentOverviewCard({ role, recommendations }: Props) {
 
   if (entries.length === 0) {
     return (
-      <div className="rounded-xl border border-bg-border bg-bg-card px-5 py-4">
+      <div className="rounded-xl border border-bg-border bg-bg-card px-5 py-4 flex items-center justify-between gap-4">
         <h3 className="text-sm font-semibold text-primary">{label}</h3>
-        <p className="text-xs text-muted mt-1">No data for this agent right now.</p>
+        <p className="text-xs text-muted">
+          {loading ? 'Loading…' : 'No analysis from last scan'}
+        </p>
       </div>
     )
   }
