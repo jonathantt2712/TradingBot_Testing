@@ -1451,15 +1451,16 @@ async def _run_market_scan() -> None:
                 r["hot_sector"] = r["sector"] in top_sectors
 
         recs.sort(key=lambda x: x["composite_score"], reverse=True)
-        if recs or _is_market_open():
+        if recs:
             _save(RECS_FILE, recs)
+        # If scan produced nothing, keep whatever is on disk.
+        # Revalidation prunes stale recs during market hours;
+        # EOD extension (in _background_loop) keeps valid ones visible overnight.
         _save(SCAN_LOG_FILE, {
             "picked":     recs,
             "rejected":   rejected,
             "scanned_at": datetime.utcnow().isoformat(),
         })
-        # else: market closed and this scan found nothing — keep whatever
-        # recommendations are already on disk available until Monday.
 
         # Push high-conviction signals to Telegram
         if _telegram is not None and recs:
@@ -2132,6 +2133,7 @@ async def _background_loop() -> None:
     last_backtest_day = ""
     last_snapshot_day  = ""
     last_premarket_day = ""
+    last_eod_extend_day = ""
     while True:
         # Reset daily scan stats at midnight
         today = str(date.today())
@@ -2173,6 +2175,29 @@ async def _background_loop() -> None:
                     and now_et.hour == 9 and now_et.minute < 25):
                 last_premarket_day = today
                 asyncio.create_task(_run_premarket_scan())
+
+        # EOD rec extension: at market close, extend surviving rec expiries
+        # to next market open so the dashboard stays populated overnight.
+        if _ET is not None:
+            now_et = datetime.now(_ET)
+            if (today != last_eod_extend_day
+                    and now_et.weekday() < 5
+                    and now_et.hour == 16 and now_et.minute < 10):
+                last_eod_extend_day = today
+                try:
+                    recs_on_disk = _load(RECS_FILE, [])
+                    if isinstance(recs_on_disk, list) and recs_on_disk:
+                        next_open = _next_market_open()
+                        new_expiry = (next_open + timedelta(minutes=45)).isoformat()
+                        for r in recs_on_disk:
+                            r["expires_at"] = new_expiry
+                        _save(RECS_FILE, recs_on_disk)
+                        logger.info(
+                            "EOD: extended %d recs to next market open (%s)",
+                            len(recs_on_disk), next_open.strftime("%Y-%m-%d %H:%M UTC"),
+                        )
+                except Exception as exc:
+                    logger.warning("EOD rec extension failed: %s", exc)
 
         # Backoff: after 3 consecutive errors, wait 10× longer
         wait = 300 if consecutive_errors < 3 else 3000
