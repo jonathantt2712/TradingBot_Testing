@@ -1300,62 +1300,63 @@ async def _run_market_scan() -> None:
                 ctx      = AnalysisContext(ticker=sym, bars=df, account={"equity": equity},
                                           hourly_bars=hourly_map.get(sym))
                 decision = await _evaluate(ctx)
-                if decision is None:
-                    continue
-                score       = decision.composite_score
-                agent_evals = decision.evaluations
-                evaluations_out   = [
-                    {
-                        "role":       ev.role.value if hasattr(ev.role, "value") else str(ev.role),
-                        "score":      round(float(ev.score), 1),
-                        "confidence": round(float(ev.confidence), 2),
-                        "rationale":  ev.rationale or "",
-                        "reasoning":  ev.reasoning,
-                    }
-                    for ev in agent_evals
-                ]
-                # Primary rationale from technical agent if available
-                for ev in agent_evals:
-                    if hasattr(ev.role, "value") and ev.role.value == "technical":
-                        rationale = ev.rationale or ""
-                        break
+                if decision is not None:
+                    score       = decision.composite_score
+                    agent_evals = decision.evaluations
+                    evaluations_out   = [
+                        {
+                            "role":       ev.role.value if hasattr(ev.role, "value") else str(ev.role),
+                            "score":      round(float(ev.score), 1),
+                            "confidence": round(float(ev.confidence), 2),
+                            "rationale":  ev.rationale or "",
+                            "reasoning":  ev.reasoning,
+                        }
+                        for ev in agent_evals
+                    ]
+                    # Primary rationale from technical agent if available
+                    for ev in agent_evals:
+                        if hasattr(ev.role, "value") and ev.role.value == "technical":
+                            rationale = ev.rationale or ""
+                            break
 
-                # Dashboard "ideas" gate is looser (55/45 + self-tuned
-                # min_score) than the bot's trade gate — keep it that way.
-                if score > 55:
-                    direction = "LONG"
-                elif score < 45:
-                    direction = "SHORT"
-                else:
-                    continue
+                    # 52/48 dead zone — narrower than old 55/45 so borderline
+                    # conviction still surfaces as an idea. Cap min_score at 55
+                    # so adaptive tuning can't choke all signals.
+                    if score > 52:
+                        direction = "LONG"
+                    elif score < 48:
+                        direction = "SHORT"
+                    else:
+                        continue
 
-                if score < min_score:
-                    continue
+                    if score < min(min_score, 55):
+                        continue
 
-                agent_used = True
-                intended   = _Decision.LONG if direction == "LONG" else _Decision.SHORT
-                # Reuse the plan pm.decide() already built when it agrees with
-                # the dashboard direction; otherwise build one for this side.
-                if decision.is_actionable and decision.decision.value == direction:
-                    plan = decision.risk
-                else:
-                    plan = _pm.risk.build_plan(ctx, intended=intended)
+                    agent_used = True
+                    intended   = _Decision.LONG if direction == "LONG" else _Decision.SHORT
+                    # Reuse the plan pm.decide() already built when it agrees with
+                    # the dashboard direction; otherwise build one for this side.
+                    if decision.is_actionable and decision.decision.value == direction:
+                        plan = decision.risk
+                    else:
+                        plan = _pm.risk.build_plan(ctx, intended=intended)
 
-                if plan is not None and plan.risk_reward >= 1.0:
-                    entry       = round(plan.entry, 2)
-                    stop_loss   = round(plan.stop_loss, 2)
-                    take_profit = round(plan.take_profit, 2)
-                    qty         = int(plan.qty)   # 0 when unsizable — never fabricate
-                    rr          = round(plan.risk_reward, 2)
-                else:
-                    entry = round(price, 2)
-                    d     = 1 if direction == "LONG" else -1
-                    stop_loss   = round(entry * (1 - d * stop_pct), 2)
-                    take_profit = round(entry * (1 + d * tp_pct),   2)
-                    qty  = _kelly_qty(equity, entry, stop_loss, take_profit, score)
-                    rr   = round(tp_pct / stop_pct, 2)
+                    if plan is not None and plan.risk_reward >= 1.0:
+                        entry       = round(plan.entry, 2)
+                        stop_loss   = round(plan.stop_loss, 2)
+                        take_profit = round(plan.take_profit, 2)
+                        qty         = int(plan.qty)   # 0 when unsizable — never fabricate
+                        rr          = round(plan.risk_reward, 2)
+                    else:
+                        entry = round(price, 2)
+                        d     = 1 if direction == "LONG" else -1
+                        stop_loss   = round(entry * (1 - d * stop_pct), 2)
+                        take_profit = round(entry * (1 + d * tp_pct),   2)
+                        qty  = _kelly_qty(equity, entry, stop_loss, take_profit, score)
+                        rr   = round(tp_pct / stop_pct, 2)
 
-            else:
+            if not agent_used:
+                # Fallback formula: agents unavailable, no bars, or agent timed out.
                 chg_w   = weights.get("chg_weight", 4.0)
                 intra_w = weights.get("intra_weight", 2.0)
                 score   = min(max(50 + chg_pct * chg_w + intra_pct * intra_w, score_floor), score_ceil)

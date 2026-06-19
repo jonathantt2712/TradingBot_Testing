@@ -114,8 +114,11 @@ export default function TradesPage() {
     setLoading(true)
     try {
       const [recs, reg] = await Promise.allSettled([api.recommendations(), api.regime()])
+      const now = Date.now()
       const newRecs = recs.status === 'fulfilled'
-        ? [...recs.value].sort(byScore)
+        ? recs.value
+            .filter(t => !t.expires_at || new Date(t.expires_at).getTime() > now)
+            .sort(byScore)
         : []
       setTrades(newRecs)
       setLive(recs.status === 'fulfilled')

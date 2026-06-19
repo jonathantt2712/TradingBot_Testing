@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useState } from 'react'
-import { ArrowUpRight, ArrowDownLeft, Flame, Zap, TrendingUp, TrendingDown, Clock, RefreshCw, Info } from 'lucide-react'
+import { ArrowUpRight, ArrowDownLeft, Flame, Zap, TrendingUp, TrendingDown, Clock, Info } from 'lucide-react'
 import { cn, formatPrice, bgColorForScore } from '@/lib/utils'
 import type { TradeRecommendation } from '@/types/trading'
 
@@ -33,20 +33,17 @@ function useCountdown(expiresAt?: string) {
 }
 
 function CountdownBadge({ secondsLeft }: { secondsLeft: number | null }) {
-  if (secondsLeft === null) return null
-  const mins    = Math.floor(Math.abs(secondsLeft) / 60)
-  const expired = secondsLeft <= 0
-  const color   = expired
-    ? 'border-muted/30 text-muted bg-bg-hover'
-    : secondsLeft < 300
-      ? 'border-bear/30 text-bear bg-bear/10'
-      : secondsLeft < 1200
-        ? 'border-caution/30 text-caution bg-caution/10'
-        : 'border-bull/30 text-bull bg-bull/10'
+  if (secondsLeft === null || secondsLeft <= 0) return null
+  const mins  = Math.floor(secondsLeft / 60)
+  const color = secondsLeft < 300
+    ? 'border-bear/30 text-bear bg-bear/10'
+    : secondsLeft < 1200
+      ? 'border-caution/30 text-caution bg-caution/10'
+      : 'border-bull/30 text-bull bg-bull/10'
   return (
     <div className={cn('flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-mono font-semibold', color)}>
-      {expired ? <RefreshCw className="h-2.5 w-2.5" /> : <Clock className="h-2.5 w-2.5" />}
-      {expired ? 'Re-eval...' : `${mins}m`}
+      <Clock className="h-2.5 w-2.5" />
+      {`${mins}m`}
     </div>
   )
 }
@@ -64,14 +61,12 @@ export function TradeCard({ trade, onExecute, onInfo, currentPrice }: Props) {
   const totalCost   = trade.risk.qty * trade.risk.entry
   const secondsLeft = useCountdown(trade.expires_at)
   const isExpiring  = secondsLeft !== null && secondsLeft < 300 && secondsLeft > 0
-  const isExpired   = secondsLeft !== null && secondsLeft <= 0
 
   return (
     <div className={cn(
       'relative card p-5 animate-slide-up transition-all duration-200 hover:border-bg-hover',
       isLong ? 'shadow-glow-bull' : 'shadow-glow-bear',
       isExpiring && 'ring-1 ring-caution/30',
-      isExpired  && 'opacity-70',
     )}>
       <button
         onClick={() => onInfo(trade)}
@@ -177,21 +172,14 @@ export function TradeCard({ trade, onExecute, onInfo, currentPrice }: Props) {
 
       <button
         onClick={() => onExecute(trade)}
-        disabled={isExpired}
         className={cn(
           'w-full rounded-lg py-2.5 text-sm font-semibold transition-all duration-200',
-          isExpired
-            ? 'bg-bg-hover border border-bg-border text-muted cursor-not-allowed opacity-60'
-            : isLong
-              ? 'bg-bull/15 border border-bull/30 text-bull hover:bg-bull/25'
-              : 'bg-bear/15 border border-bear/30 text-bear hover:bg-bear/25',
+          isLong
+            ? 'bg-bull/15 border border-bull/30 text-bull hover:bg-bull/25'
+            : 'bg-bear/15 border border-bear/30 text-bear hover:bg-bear/25',
         )}
       >
-        {isExpired
-          ? `Expired · ${trade.ticker}`
-          : isLong
-            ? `Execute Long · ${trade.ticker}`
-            : `Execute Short · ${trade.ticker}`}
+        {isLong ? `Execute Long · ${trade.ticker}` : `Execute Short · ${trade.ticker}`}
       </button>
     </div>
   )
