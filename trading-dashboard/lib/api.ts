@@ -5,6 +5,7 @@ import type {
   PortfolioStats,
   RegimeInfo,
   SectorStat,
+  ScanResults,
   ExecuteRequest,
   ExecuteResponse,
 } from '@/types/trading'
@@ -44,6 +45,7 @@ export const api = {
   positions:       ()                                   => clientGet('/api/alpaca/positions'),
   account:         ()                                   => clientGet('/api/alpaca/account'),
   snapshots:       (syms: string[])                     => clientGet(`/api/alpaca/snapshots?symbols=${syms.join(',')}`),
+  scanResults:     (): Promise<ScanResults>                        => clientGet('/api/bot/scan-results'),
   execute:         (req: ExecuteRequest): Promise<ExecuteResponse> => clientPost('/api/bot/execute', req),
 }
 

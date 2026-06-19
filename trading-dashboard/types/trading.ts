@@ -35,6 +35,8 @@ export interface TradeRecommendation {
   rationale?:           string
   premarket?:           boolean
   gap_pct?:             number
+  chg_pct?:             number
+  beta?:                number
 }
 
 export interface TradeRecord {
@@ -86,6 +88,21 @@ export interface SectorStat {
   score:  number
   change: number
   count:  number
+}
+
+export interface ScanRejection {
+  ticker:      string
+  price:       number
+  chg_pct:     number
+  score:       number | null
+  skip_reason: string
+  scanned_at:  string
+}
+
+export interface ScanResults {
+  picked:     TradeRecommendation[]
+  rejected:   ScanRejection[]
+  scanned_at: string | null
 }
 
 export interface ExecuteRequest {

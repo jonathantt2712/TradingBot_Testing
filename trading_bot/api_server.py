@@ -214,7 +214,8 @@ _SECTOR_MAP: Dict[str, str] = {
 
 DATA_DIR    = _HERE / "data"
 DATA_DIR.mkdir(exist_ok=True)
-RECS_FILE    = DATA_DIR / "recommendations.json"
+RECS_FILE     = DATA_DIR / "recommendations.json"
+SCAN_LOG_FILE = DATA_DIR / "scan_log.json"
 TRADES_FILE  = DATA_DIR / "trades.json"
 HISTORY_FILE = TRADES_FILE                        # alias — executed trades = history
 PNL_FILE     = DATA_DIR / "pnl.json"
@@ -1263,15 +1264,28 @@ async def _run_market_scan() -> None:
             },
         })
 
-        recs: List[Dict[str, Any]] = []
+        recs:     List[Dict[str, Any]] = []
+        rejected: List[Dict[str, Any]] = []
+
+        def _rej(sym: str, reason: str, price: float = 0.0, chg_pct: float = 0.0, score: float = 0.0) -> None:
+            rejected.append({
+                "ticker":      sym,
+                "price":       round(price, 2),
+                "chg_pct":     round(chg_pct, 2),
+                "score":       round(score, 1) if score else None,
+                "skip_reason": reason,
+                "scanned_at":  datetime.utcnow().isoformat(),
+            })
 
         for sym in symbols_raw:
             snap = snaps.get(sym) or {}
             if not snap:
+                _rej(sym, "No snapshot data")
                 continue
 
             if sym in earnings_blacklist:
                 _scan_stats["recs_skipped"] += 1
+                _rej(sym, "Earnings blackout")
                 continue
 
             daily_bar  = snap.get("dailyBar")     or {}
@@ -1283,12 +1297,14 @@ async def _run_market_scan() -> None:
             day_open   = float(daily_bar.get("o") or price)
 
             if price < 5 or price > 2000:
+                _rej(sym, f"Price out of range (${price:.2f})", price=price)
                 continue
 
             chg_pct   = (price - prev_close) / prev_close * 100 if prev_close else 0
             intra_pct = (price - day_open)   / day_open   * 100 if day_open   else 0
 
             if abs(chg_pct) < min_chg:
+                _rej(sym, f"Low movement ({chg_pct:+.1f}%)", price=price, chg_pct=chg_pct)
                 continue
 
             df         = bars_map.get(sym)
@@ -1301,6 +1317,7 @@ async def _run_market_scan() -> None:
                                           hourly_bars=hourly_map.get(sym))
                 decision = await _evaluate(ctx)
                 if decision is None:
+                    _rej(sym, "Agent evaluation failed", price=price, chg_pct=chg_pct)
                     continue
                 score       = decision.composite_score
                 agent_evals = decision.evaluations
@@ -1334,9 +1351,11 @@ async def _run_market_scan() -> None:
                     direction = "SHORT"
                 else:
                     logger.debug("%s score=%.1f in dead zone — no rec", sym, score)
+                    _rej(sym, f"Score neutral zone ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
                     continue
 
                 if score < min_score:
+                    _rej(sym, f"Below min score ({score:.1f} < {min_score})", price=price, chg_pct=chg_pct, score=score)
                     continue
 
                 agent_used = True
@@ -1367,6 +1386,7 @@ async def _run_market_scan() -> None:
                 intra_w = weights.get("intra_weight", 2.0)
                 score   = min(max(50 + chg_pct * chg_w + intra_pct * intra_w, score_floor), score_ceil)
                 if score < min_score:
+                    _rej(sym, f"Fallback score too low ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
                     continue
                 direction   = "LONG" if chg_pct > 0 else "SHORT"
                 entry       = round(price, 2)
@@ -1425,6 +1445,11 @@ async def _run_market_scan() -> None:
         recs.sort(key=lambda x: x["composite_score"], reverse=True)
         if recs or _is_market_open():
             _save(RECS_FILE, recs)
+        _save(SCAN_LOG_FILE, {
+            "picked":     recs,
+            "rejected":   rejected,
+            "scanned_at": datetime.utcnow().isoformat(),
+        })
         # else: market closed and this scan found nothing — keep whatever
         # recommendations are already on disk available until Monday.
 
@@ -2214,6 +2239,14 @@ def get_recommendations():
     if isinstance(data, list):
         return data
     return []
+
+
+@app.get("/api/scan-results", dependencies=[Depends(_verify_bot_secret)])
+def get_scan_results():
+    data = _load(SCAN_LOG_FILE, {})
+    if isinstance(data, dict):
+        return data
+    return {"picked": [], "rejected": [], "scanned_at": None}
 
 
 @app.get("/api/history", dependencies=[Depends(_verify_bot_secret)])
