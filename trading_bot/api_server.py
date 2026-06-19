@@ -826,6 +826,7 @@ _backtest_stats: Dict[str, Any] = {
     "error_count":   0,
     "last_error":    None,
     "last_log":      None,   # full stdout from last run
+    "log_lines":     [],     # live lines while running
 }
 
 _optimizer_stats: Dict[str, Any] = {
@@ -1467,8 +1468,22 @@ async def _run_backtest() -> None:
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(_HERE),
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=1800)  # 30 min max
-        decoded = (stdout or b"").decode(errors="replace")
+        log_lines: list[str] = []
+        _backtest_stats["log_lines"] = log_lines
+        deadline = asyncio.get_event_loop().time() + 1800  # 30 min
+
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            log_lines.append(line)
+            if len(log_lines) > 2000:
+                log_lines.pop(0)
+            if asyncio.get_event_loop().time() > deadline:
+                proc.kill()
+                raise asyncio.TimeoutError
+
+        await proc.wait()
+        decoded = "\n".join(log_lines)
         if proc.returncode == 0:
             logger.info("Auto-backtest complete — results written to %s", _RESULTS_FILE)
             _backtest_stats.update({
@@ -2577,10 +2592,16 @@ async def run_optimizer_now():
 
 @app.get("/api/backtest/log", dependencies=[Depends(_verify_bot_secret)])
 def get_backtest_log():
-    """Return the full stdout log from the last backtest run."""
-    from fastapi.responses import PlainTextResponse
-    log = _backtest_stats.get("last_log") or ""
-    return PlainTextResponse(log or "No log available yet — run the backtest first.", media_type="text/plain")
+    """Return live or completed backtest log lines as JSON."""
+    from fastapi.responses import JSONResponse
+    running = bool(_backtest_stats.get("log_lines") and not _backtest_stats.get("last_log"))
+    lines: list[str] = list(_backtest_stats.get("log_lines") or [])
+    last_log: str = _backtest_stats.get("last_log") or ""
+    return JSONResponse({
+        "running": running,
+        "lines":   lines if (running or not last_log) else last_log.splitlines(),
+        "status":  _backtest_stats.get("last_status"),
+    })
 
 
 @app.get("/api/optimize/log", dependencies=[Depends(_verify_bot_secret)])

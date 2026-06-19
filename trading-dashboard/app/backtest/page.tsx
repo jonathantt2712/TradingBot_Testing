@@ -72,6 +72,14 @@ interface RejectionRecord {
   [key: string]:   unknown
 }
 
+function parseProgress(lines: string[]): { pct: number; eta: number } | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/PROGRESS:\s*\d+\/\d+\s*\((\d+(?:\.\d+)?)%\)\s*ETA:\s*(\d+)s/)
+    if (m) return { pct: parseFloat(m[1]), eta: parseInt(m[2], 10) }
+  }
+  return null
+}
+
 function relativeTime(iso: string): string {
   const ms   = Date.now() - new Date(iso + (iso.endsWith('Z') ? '' : 'Z')).getTime()
   const mins = Math.floor(ms / 60000)
@@ -221,10 +229,13 @@ export default function BacktestPage() {
   const [optHealth,  setOptHealth]  = useState<BacktestHealth | null>(null)
   const [rejections,   setRejections]   = useState<RejectionRecord[]>([])
   const [optLogLines,  setOptLogLines]  = useState<string[]>([])
+  const [btLogLines,   setBtLogLines]   = useState<string[]>([])
   const [showOptLog,   setShowOptLog]   = useState(false)
+  const [showBtLog,    setShowBtLog]    = useState(false)
   const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null)
   const optPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const logPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const btLogPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   async function loadHealth() {
     try {
@@ -265,9 +276,24 @@ export default function BacktestPage() {
   async function runBacktest() {
     if (running) return
     setRunning(true)
+    setShowBtLog(true)
+    setBtLogLines([])
     try {
       await fetch('/api/backtest/run', { method: 'POST' })
     } catch { /* ignore trigger errors — bot may queue it */ }
+    // Poll live log lines while running
+    btLogPollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch('/api/backtest/log', { cache: 'no-store' })
+        if (r.ok) {
+          const d = await r.json()
+          setBtLogLines(d.lines ?? [])
+          if (!d.running) {
+            if (btLogPollRef.current) clearInterval(btLogPollRef.current)
+          }
+        }
+      } catch { /* keep polling */ }
+    }, 3_000)
     // Poll for updated results every 10s while running
     pollRef.current = setInterval(async () => {
       const res = await fetch('/api/backtest', { cache: 'no-store' })
@@ -347,7 +373,11 @@ export default function BacktestPage() {
     if (pollRef.current) clearInterval(pollRef.current)
     if (optPollRef.current) clearInterval(optPollRef.current)
     if (logPollRef.current) clearInterval(logPollRef.current)
+    if (btLogPollRef.current) clearInterval(btLogPollRef.current)
   }, [])
+
+  const btProg  = running ? parseProgress(btLogLines) : null
+  const optProg = optimizing ? parseProgress(optLogLines) : null
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">
@@ -406,77 +436,149 @@ export default function BacktestPage() {
       </div>
 
       {/* Auto-backtest status — shows the 24/7 scheduler is running */}
-      <div className="rounded-xl border border-bg-border bg-bg-card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
-        <span className="flex items-center gap-1.5 font-medium text-primary">
-          <span className={cn(
-            'h-2 w-2 rounded-full',
-            running ? 'bg-brand-cyan animate-pulse'
-              : health?.last_status === 'ok' ? 'bg-bull'
-              : health?.last_status ? 'bg-bear' : 'bg-muted',
-          )} />
-          Auto-backtest
-        </span>
-        <span className="text-muted">Runs automatically every day after market close (server runs 24/7).</span>
-        {running ? (
-          <span className="text-brand-cyan font-medium">Running now…</span>
-        ) : health?.last_run_at ? (
-          <span className="text-subtle">
-            Last run: {relativeTime(health.last_run_at)}
-            {health.last_status === 'ok'
-              ? <span className="text-bull ml-1">· ok</span>
-              : <span className="text-bear ml-1">· {health.last_status}</span>}
+      <div className="rounded-xl border border-bg-border bg-bg-card overflow-hidden">
+        <div className="px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+          <span className="flex items-center gap-1.5 font-medium text-primary">
+            <span className={cn(
+              'h-2 w-2 rounded-full',
+              running ? 'bg-brand-cyan animate-pulse'
+                : health?.last_status === 'ok' ? 'bg-bull'
+                : health?.last_status ? 'bg-bear' : 'bg-muted',
+            )} />
+            Auto-backtest
           </span>
-        ) : (
-          <span className="text-muted">No run recorded yet — first run happens on next server start or close.</span>
+          <span className="text-muted">Runs automatically every day after market close (server runs 24/7).</span>
+          {running ? (
+            <span className="text-brand-cyan font-medium">Running now…</span>
+          ) : health?.last_run_at ? (
+            <span className="text-subtle">
+              Last run: {relativeTime(health.last_run_at)}
+              {health.last_status === 'ok'
+                ? <span className="text-bull ml-1">· ok</span>
+                : <span className="text-bear ml-1">· {health.last_status}</span>}
+            </span>
+          ) : (
+            <span className="text-muted">No run recorded yet — first run happens on next server start or close.</span>
+          )}
+          {(health?.error_count ?? 0) > 0 && (
+            <span className="text-bear font-semibold">Failures: {health!.error_count}</span>
+          )}
+          <div className="ml-auto flex items-center gap-3">
+            {btLogLines.length > 0 && (
+              <button
+                onClick={() => setShowBtLog(v => !v)}
+                className="flex items-center gap-1 text-muted hover:text-subtle transition-colors"
+              >
+                {showBtLog ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                {running ? 'Live log' : 'Log'}
+              </button>
+            )}
+            <a
+              href="/api/backtest/log"
+              download="backtest.log"
+              className="flex items-center gap-1 text-muted hover:text-subtle transition-colors"
+              title="Download full backtest log"
+            >
+              <Download className="h-3 w-3" /> Download
+            </a>
+          </div>
+        </div>
+        {/* Progress bar */}
+        {btProg && (
+          <div className="px-4 pb-3 space-y-1">
+            <div className="flex items-center justify-between text-[10px] text-muted">
+              <span>{btProg.pct.toFixed(0)}% complete</span>
+              <span>ETA {btProg.eta >= 60 ? `${Math.ceil(btProg.eta / 60)}m` : `${btProg.eta}s`}</span>
+            </div>
+            <div className="h-1.5 rounded-full bg-bg-hover overflow-hidden">
+              <div
+                className="h-full rounded-full bg-brand-cyan/70 transition-all duration-500"
+                style={{ width: `${btProg.pct}%` }}
+              />
+            </div>
+          </div>
         )}
-        {(health?.error_count ?? 0) > 0 && (
-          <span className="text-bear font-semibold">Failures: {health!.error_count}</span>
-        )}
-        <a
-          href="/api/backtest/log"
-          download="backtest.log"
-          className="ml-auto flex items-center gap-1 text-muted hover:text-subtle transition-colors"
-          title="Download full backtest log"
-        >
-          <Download className="h-3 w-3" /> Log
-        </a>
       </div>
 
+      {/* Backtest live log panel */}
+      {showBtLog && btLogLines.length > 0 && (
+        <div className="rounded-xl border border-bg-border bg-bg-base overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-bg-border">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">
+              {running ? 'Live backtest output' : 'Last backtest run log'}
+            </span>
+            {!running && (
+              <button
+                onClick={() => {
+                  const blob = new Blob([btLogLines.join('\n')], { type: 'text/plain' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a'); a.href = url; a.download = 'backtest.log'; a.click()
+                  URL.revokeObjectURL(url)
+                }}
+                className="flex items-center gap-1 text-[10px] text-muted hover:text-subtle transition-colors"
+              >
+                <Download className="h-3 w-3" /> Download
+              </button>
+            )}
+          </div>
+          <pre className="px-4 py-3 text-[10px] font-mono text-subtle overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap leading-relaxed">
+            {btLogLines.slice(-100).join('\n')}
+          </pre>
+        </div>
+      )}
+
       {/* Optimizer status */}
-      <div className="rounded-xl border border-bg-border bg-bg-card px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
-        <span className="flex items-center gap-1.5 font-medium text-primary">
-          <span className={cn(
-            'h-2 w-2 rounded-full',
-            optimizing ? 'bg-bull animate-pulse'
-              : optHealth?.last_status === 'ok' ? 'bg-bull'
-              : optHealth?.last_status ? 'bg-bear' : 'bg-muted',
-          )} />
-          Profit Optimizer
-        </span>
-        <span className="text-muted">Walk-forward tune of thresholds &amp; ATR, ranked on held-out (out-of-sample) profit.</span>
-        {optimizing ? (
-          <span className="text-bull font-medium">Running now… (this takes a few minutes)</span>
-        ) : optHealth?.last_run_at ? (
-          <span className="text-subtle">
-            Last run: {relativeTime(optHealth.last_run_at)}
-            {optHealth.last_status === 'ok'
-              ? <span className="text-bull ml-1">· ok</span>
-              : <span className="text-bear ml-1">· {optHealth.last_status}</span>}
+      <div className="rounded-xl border border-bg-border bg-bg-card overflow-hidden">
+        <div className="px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+          <span className="flex items-center gap-1.5 font-medium text-primary">
+            <span className={cn(
+              'h-2 w-2 rounded-full',
+              optimizing ? 'bg-bull animate-pulse'
+                : optHealth?.last_status === 'ok' ? 'bg-bull'
+                : optHealth?.last_status ? 'bg-bear' : 'bg-muted',
+            )} />
+            Profit Optimizer
           </span>
-        ) : (
-          <span className="text-muted">Not run yet — click “Run Optimizer” to tune for maximum profit.</span>
-        )}
-        {(optHealth?.error_count ?? 0) > 0 && (
-          <span className="text-bear font-semibold">Failures: {optHealth!.error_count}</span>
-        )}
-        {optLogLines.length > 0 && (
-          <button
-            onClick={() => setShowOptLog(v => !v)}
-            className="ml-auto flex items-center gap-1 text-muted hover:text-subtle transition-colors"
-          >
-            {showOptLog ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-            {optimizing ? 'Live log' : 'Log'}
-          </button>
+          <span className="text-muted">Walk-forward tune of thresholds &amp; ATR, ranked on held-out (out-of-sample) profit.</span>
+          {optimizing ? (
+            <span className="text-bull font-medium">Running now… (this takes a few minutes)</span>
+          ) : optHealth?.last_run_at ? (
+            <span className="text-subtle">
+              Last run: {relativeTime(optHealth.last_run_at)}
+              {optHealth.last_status === 'ok'
+                ? <span className="text-bull ml-1">· ok</span>
+                : <span className="text-bear ml-1">· {optHealth.last_status}</span>}
+            </span>
+          ) : (
+            <span className="text-muted">Not run yet — click "Run Optimizer" to tune for maximum profit.</span>
+          )}
+          {(optHealth?.error_count ?? 0) > 0 && (
+            <span className="text-bear font-semibold">Failures: {optHealth!.error_count}</span>
+          )}
+          {optLogLines.length > 0 && (
+            <button
+              onClick={() => setShowOptLog(v => !v)}
+              className="ml-auto flex items-center gap-1 text-muted hover:text-subtle transition-colors"
+            >
+              {showOptLog ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+              {optimizing ? 'Live log' : 'Log'}
+            </button>
+          )}
+        </div>
+        {/* Progress bar */}
+        {optProg && (
+          <div className="px-4 pb-3 space-y-1">
+            <div className="flex items-center justify-between text-[10px] text-muted">
+              <span>{optProg.pct.toFixed(0)}% complete</span>
+              <span>ETA {optProg.eta >= 60 ? `${Math.ceil(optProg.eta / 60)}m` : `${optProg.eta}s`}</span>
+            </div>
+            <div className="h-1.5 rounded-full bg-bg-hover overflow-hidden">
+              <div
+                className="h-full rounded-full bg-bull/70 transition-all duration-500"
+                style={{ width: `${optProg.pct}%` }}
+              />
+            </div>
+          </div>
         )}
       </div>
 

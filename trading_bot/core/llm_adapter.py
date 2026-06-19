@@ -118,32 +118,46 @@ class LLMAdapter:
     # ── Gemini implementation ─────────────────────────────────────────────────
 
     async def _gemini_chat(self, prompt: str, system: str) -> Optional[str]:
-        try:
-            import google.generativeai as genai  # type: ignore
-            genai.configure(api_key=self.gemini_key)
-            model = genai.GenerativeModel(
-                self.gemini_model,
-                system_instruction=system or None,
-            )
-            full = (system + "\n\n" + prompt).strip() if system and not hasattr(model, "_system_instruction") else prompt
-            resp = await asyncio.to_thread(model.generate_content, full)
-            return resp.text.strip()
-        except Exception as exc:
-            logger.debug("Gemini chat failed: %s", exc)
-            return None
+        for attempt in range(3):
+            try:
+                import google.generativeai as genai  # type: ignore
+                genai.configure(api_key=self.gemini_key)
+                model = genai.GenerativeModel(
+                    self.gemini_model,
+                    system_instruction=system or None,
+                )
+                full = (system + "\n\n" + prompt).strip() if system and not hasattr(model, "_system_instruction") else prompt
+                resp = await asyncio.to_thread(model.generate_content, full)
+                text = resp.text.strip() if resp.text else ""
+                if text:
+                    return text
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+            except Exception as exc:
+                logger.debug("Gemini chat attempt %d failed: %s", attempt + 1, exc)
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+        return None
 
     async def _gemini_vision(self, image_bytes: bytes, prompt: str, media_type: str) -> Optional[str]:
-        try:
-            import google.generativeai as genai  # type: ignore
-            from google.generativeai.types import Part  # type: ignore
-            genai.configure(api_key=self.gemini_key)
-            model = genai.GenerativeModel(self.gemini_model)
-            image_part = {"mime_type": media_type, "data": image_bytes}
-            resp = await asyncio.to_thread(model.generate_content, [prompt, image_part])
-            return resp.text.strip()
-        except Exception as exc:
-            logger.debug("Gemini vision failed: %s", exc)
-            return None
+        for attempt in range(3):
+            try:
+                import google.generativeai as genai  # type: ignore
+                from google.generativeai.types import Part  # type: ignore
+                genai.configure(api_key=self.gemini_key)
+                model = genai.GenerativeModel(self.gemini_model)
+                image_part = {"mime_type": media_type, "data": image_bytes}
+                resp = await asyncio.to_thread(model.generate_content, [prompt, image_part])
+                text = resp.text.strip() if resp.text else ""
+                if text:
+                    return text
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+            except Exception as exc:
+                logger.debug("Gemini vision attempt %d failed: %s", attempt + 1, exc)
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+        return None
 
     # ── Anthropic implementation ──────────────────────────────────────────────
 

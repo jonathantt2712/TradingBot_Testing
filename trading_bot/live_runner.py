@@ -76,6 +76,10 @@ def _auto_execute_enabled() -> bool:
 # deep-liquidity names so the bot stays alive until the scanner recovers.
 FALLBACK_WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA"]
 
+# Core names always included — highest liquidity + consistent intraday range.
+# The universe scanner adds momentum movers on top of these.
+CORE_WATCHLIST = os.environ.get("CORE_WATCHLIST", "NVDA,TSLA,AAPL,MSFT,AMD,META,AMZN,GOOGL").split(",")
+
 # Protects concurrent reads/writes to the active_tickers list across async tasks.
 _ticker_lock: asyncio.Lock | None = None
 
@@ -408,7 +412,11 @@ async def main(tickers: Sequence[str]) -> None:
                 active_tickers, RESCAN_INTERVAL_MIN,
             )
         else:
-            logger.info("Auto-selected %d tickers: %s", len(active_tickers), active_tickers)
+            # Merge core watchlist into scanner results (deduplicate, core first)
+            core = [t.upper() for t in CORE_WATCHLIST if t.strip()]
+            merged = core + [t for t in active_tickers if t.upper() not in {c.upper() for c in core}]
+            active_tickers = merged[:30]  # cap at 30 total
+            logger.info("Auto-selected %d tickers (core+scanner): %s", len(active_tickers), active_tickers)
     elif not active_tickers:
         logger.error("No tickers provided and SCANNER_ENABLED=false -- nothing to do")
         return

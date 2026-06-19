@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+import time as _time_mod
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -626,7 +627,7 @@ async def run(tickers: list[str], days: int) -> None:
     # daily auto-run (set USE_LLM_BACKTEST=true to include them).
     use_llm = os.getenv("USE_LLM_BACKTEST", "false").lower() in ("1", "true", "yes")
     pm = build_manager(
-        settings, broker=None, ai4=None,
+        settings, broker=None,
         include_live_only_agents=True,
         include_vision=use_llm,
         include_decision_agent=use_llm,
@@ -636,6 +637,9 @@ async def run(tickers: list[str], days: int) -> None:
         logger.info("SPY bars injected into TechnicalAgent (%d bars)", len(all_bars["SPY"]))
 
     all_trades: list[TradeResult] = []
+    _bt_start = _time_mod.monotonic()
+    _bt_total = sum(1 for t in tickers if t in all_bars)
+    _bt_done  = 0
 
     for ticker in tickers:
         if ticker not in all_bars:
@@ -644,7 +648,11 @@ async def run(tickers: list[str], days: int) -> None:
         logger.info("Running walk-forward for %s (%d bars)...", ticker, len(bars))
         trades = await backtest_ticker(pm, ticker, bars, spy_bars=all_bars.get("SPY"))
         all_trades.extend(trades)
-        logger.info("%s done: %d trades, P&L=$%.2f",
+        _bt_done += 1
+        elapsed = _time_mod.monotonic() - _bt_start
+        eta     = int(elapsed / _bt_done * (_bt_total - _bt_done)) if _bt_done else 0
+        logger.info("PROGRESS: %d/%d (%.0f%%) ETA: %ds | %s done: %d trades P&L=$%.2f",
+                    _bt_done, _bt_total, 100 * _bt_done / _bt_total, eta,
                     ticker, len(trades), sum(t.pnl_usd for t in trades))
 
     summary = print_summary(all_trades)
