@@ -2228,11 +2228,19 @@ def get_stats():
         if str(t.get("closed_at", ""))[:10] == today_s
     )
 
-    # Sharpe, max drawdown, avg R/R
+    # Sharpe: bucket per-trade PnL into daily totals, then annualise.
+    # sqrt(252) is the daily→annual factor; applying it to raw per-trade
+    # amounts (as before) gave a meaningless number because trades aren't days.
     import numpy as _np
+    from collections import defaultdict as _dd
+    _daily_pnl: dict = _dd(float)
+    for t in closed:
+        day = str(t.get("closed_at", ""))[:10]
+        if day:
+            _daily_pnl[day] += float(t.get("pnl") or t.get("realized_pnl") or 0)
     sharpe = 0.0
-    if len(pnls) >= 2:
-        arr = _np.array(pnls)
+    if len(_daily_pnl) >= 2:
+        arr = _np.array(list(_daily_pnl.values()))
         std = float(_np.std(arr))
         if std > 0:
             sharpe = round(float(_np.mean(arr)) / std * _np.sqrt(252), 2)
