@@ -99,26 +99,53 @@ export function PnLAnalytics({ pnl, stats, trades, live, attribution, monteCarlo
         ))}
       </div>
 
-      {/* Equity curve */}
-      <div className="card p-5">
-        <h2 className="text-sm font-semibold text-primary mb-4">Equity Curve (30 days)</h2>
-        <div className="h-[220px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={pnl} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor="#06B6D4" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#06B6D4" stopOpacity={0.0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748B' }} tickFormatter={d => d.slice(5)} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: '#64748B' }} tickFormatter={v => `$${(v/1000).toFixed(1)}k`} axisLine={false} tickLine={false} width={48} />
-              <Tooltip content={<ChartTooltip />} />
-              <ReferenceLine y={0} stroke="#334155" strokeDasharray="4 4" />
-              <Area type="monotone" dataKey="cumulative_pnl" name="Cumulative P&L" stroke="#06B6D4" strokeWidth={2} fill="url(#equityGrad)" dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
-            </AreaChart>
-          </ResponsiveContainer>
+      {/* Portfolio Value + Equity Curve */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Portfolio value (absolute account balance) */}
+        {pnl.some(p => p.equity != null) && (
+          <div className="card p-5">
+            <h2 className="text-sm font-semibold text-primary mb-4">Portfolio Value</h2>
+            <div className="h-[220px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={pnl} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="portfolioGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor="#A78BFA" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#A78BFA" stopOpacity={0.0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
+                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748B' }} tickFormatter={d => d.slice(5)} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: '#64748B' }} tickFormatter={v => `$${(v/1000).toFixed(1)}k`} axisLine={false} tickLine={false} width={52} domain={['auto', 'auto']} />
+                  <Tooltip content={<ChartTooltip />} />
+                  <Area type="monotone" dataKey="equity" name="Account Value" stroke="#A78BFA" strokeWidth={2} fill="url(#portfolioGrad)" dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
+
+        {/* Cumulative P&L */}
+        <div className="card p-5">
+          <h2 className="text-sm font-semibold text-primary mb-4">Cumulative P&L</h2>
+          <div className="h-[220px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={pnl} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor="#06B6D4" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#06B6D4" stopOpacity={0.0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748B' }} tickFormatter={d => d.slice(5)} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: '#64748B' }} tickFormatter={v => `$${(v/1000).toFixed(1)}k`} axisLine={false} tickLine={false} width={48} />
+                <Tooltip content={<ChartTooltip />} />
+                <ReferenceLine y={0} stroke="#334155" strokeDasharray="4 4" />
+                <Area type="monotone" dataKey="cumulative_pnl" name="Cumulative P&L" stroke="#06B6D4" strokeWidth={2} fill="url(#equityGrad)" dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       </div>
 

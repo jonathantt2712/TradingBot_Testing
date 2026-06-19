@@ -19,6 +19,7 @@ function histToPnL(h: PortfolioHistory): PnLPoint[] {
       daily_pnl:      +p.pl.toFixed(2),
       cumulative_pnl: +(p.equity - base).toFixed(2),
       trade_count:    0,
+      equity:         +p.equity.toFixed(2),
     }))
 }
 

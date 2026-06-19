@@ -60,6 +60,7 @@ export interface PnLPoint {
   cumulative_pnl: number
   daily_pnl:      number
   trade_count:    number
+  equity?:        number
 }
 
 export interface PortfolioStats {
