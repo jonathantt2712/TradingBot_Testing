@@ -56,6 +56,8 @@ sys.path.insert(0, str(_here))
 
 from config.settings import load_settings, Settings, AgentWeights, RiskConfig, DecisionThresholds
 from core.enums import Decision
+from core.trade_stats import load_closed_trades, summarize, format_block
+from core.paths import volume_dir
 from backtest_30day import (
     fetch_bars_range,
     backtest_ticker,
@@ -73,10 +75,11 @@ logging.basicConfig(
 logger = logging.getLogger("opt")
 logging.getLogger("opt").setLevel(logging.INFO)
 
-RESULTS_FILE   = _here.parent / "optimization_results.json"
+_OUT_DIR       = volume_dir() or _here.parent
+RESULTS_FILE   = _OUT_DIR / "optimization_results.json"
 # Dashboard files — the existing /backtest "Optimizer Run" panel + config box read these.
-OPTIMAL_JSON   = _here.parent / "backtest_optimal.json"
-OPTIMAL_CONFIG = _here.parent / "OPTIMAL_CONFIG.txt"
+OPTIMAL_JSON   = _OUT_DIR / "backtest_optimal.json"
+OPTIMAL_CONFIG = _OUT_DIR / "OPTIMAL_CONFIG.txt"
 MIN_TRADES     = 20   # min in-sample trades (statistical significance)
 MIN_OOS_TRADES = 6    # min out-of-sample trades to trust the validation number
 SPLIT_FRAC     = 0.70 # walk-forward: tune on first 70%, validate on last 30%
@@ -140,7 +143,7 @@ ATR_GRID = {
     "ATR_TARGET_MULTIPLE": [2.5, 3.0, 4.0, 5.0],
 }
 
-DEFAULT_TICKERS = ["NVDA", "TSLA", "AAPL", "MSFT", "AMD", "META", "AMZN"]
+_FALLBACK_TICKERS = ["NVDA", "TSLA", "AAPL", "MSFT", "AMD", "META", "AMZN"]
 
 
 # ── Settings factory ───────────────────────────────────────────────────────────
@@ -461,11 +464,37 @@ async def run(
         logger.error("ALPACA_API_KEY_ID and ALPACA_API_SECRET must be set in .env or environment")
         return
 
+    # When no explicit ticker list is provided, pull today's top movers
+    if not tickers:
+        try:
+            from data.universe_scanner import UniverseScanner
+            scanner = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
+            n = int(os.getenv("BACKTEST_TOP_N", "20"))
+            logger.info("Universe scanner: fetching top %d candidates for optimizer…", n)
+            tickers = await scanner.get_candidates(top_n=n)
+            if not tickers:
+                logger.warning("Universe scanner returned 0 candidates — using fallback list")
+                tickers = _FALLBACK_TICKERS
+            else:
+                logger.info("Universe: %s", " ".join(tickers))
+        except Exception as exc:
+            logger.warning("Universe scanner failed (%s) — using fallback list", exc)
+            tickers = _FALLBACK_TICKERS
+
+    # Log and surface real trade history so the optimizer learns from live results.
+    _hist_trades = load_closed_trades()
+    _hist_stats  = summarize(_hist_trades)
+    print(format_block(_hist_stats))
+
+    # Use live bias to pre-filter the threshold grid: if live history shows a
+    # strong directional bias (≥20% win-rate gap), skip combos that contradict it.
+    _live_bias = _hist_stats.get("bias", "neutral")
+
     agent_note = "ALL agents (Vision LLM ON)" if use_llm else "all non-LLM agents (Vision/Decision off)"
     mode_note  = f"walk-forward {int(SPLIT_FRAC*100)}/{int((1-SPLIT_FRAC)*100)} OOS" if validate else "full-window (NO validation)"
     print(f"\nOptimizer — {days}d window, {len(tickers)} tickers: {tickers}")
     print(f"Objective: {objective}  |  Validation: {mode_note}  |  Agents: {agent_note}")
-    print(f"Phase: {phase}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%\n")
+    print(f"Phase: {phase}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%  |  Live bias: {_live_bias}\n")
 
     bars_cache, spy_bars = await _fetch_all(tickers, days, settings.alpaca_key_id, settings.alpaca_secret)
     if not bars_cache:
@@ -486,6 +515,19 @@ async def run(
 
     if phase in ("thresholds", "both"):
         combos = _threshold_combos(atr_stop=2.0, atr_target=4.0)
+        # Prune combos that contradict a confirmed live directional bias:
+        # - bias=long  → skip combos where LONG_THRESHOLD > 68 (too restrictive on LONGs)
+        # - bias=short → skip combos where SHORT_THRESHOLD < 32 (too restrictive on SHORTs)
+        if _live_bias == "long" and len(combos) > 1:
+            pruned = [c for c in combos if c["LONG_THRESHOLD"] <= 68]
+            if pruned:
+                print(f"  [bias=long] Pruned threshold grid: {len(combos)} → {len(pruned)} combos (capped LONG_T at 68)")
+                combos = pruned
+        elif _live_bias == "short" and len(combos) > 1:
+            pruned = [c for c in combos if c["SHORT_THRESHOLD"] >= 32]
+            if pruned:
+                print(f"  [bias=short] Pruned threshold grid: {len(combos)} → {len(pruned)} combos (floored SHORT_T at 32)")
+                combos = pruned
         thresh_results = await _run_grid("Phase 1 — threshold grid", combos, tickers, spy_bars,
                                          objective=objective, use_llm=use_llm,
                                          is_cache=is_cache, oos_cache=oos_cache)
@@ -523,8 +565,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Trading strategy optimizer — maximises live trading profit")
     parser.add_argument("--days",    type=int, default=60,
                         help="Lookback window in days (default 60 — needs enough for a 70/30 split)")
-    parser.add_argument("--tickers", nargs="+", default=DEFAULT_TICKERS,
-                        help="Tickers to backtest")
+    parser.add_argument("--tickers", nargs="+", default=[],
+                        help="Explicit ticker list (default: auto from universe scanner)")
     parser.add_argument("--phase",   choices=["thresholds", "atr", "both"],
                         default="both",
                         help="Which grid to search (default: both)")

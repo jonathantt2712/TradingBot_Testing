@@ -71,7 +71,7 @@ MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
 DAILY_LOSS_LIMIT_PCT    = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))   # 2% daily drawdown halt
 MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 3 consecutive losses halt
 TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", "0.05"))  # 5% trailing distance
-PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "2.0"))  # max net |beta| across open positions
+PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "5.0"))  # max net |beta| across open positions
 
 # Position exit monitor
 EXIT_MONITOR_INTERVAL_MIN = int(os.getenv("EXIT_MONITOR_INTERVAL_MIN", "5"))    # how often to re-score open positions
@@ -113,6 +113,10 @@ logging.basicConfig(level=logging.INFO)
 _HERE = Path(__file__).parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
+
+from core.paths import volume_dir
+# Persistent volume (Railway) when attached — keeps runtime data across deploys.
+_VOLUME = volume_dir()
 
 _AGENTS_AVAILABLE = False
 _pm                = None   # PortfolioManager — the SAME composition live/backtest use
@@ -212,9 +216,10 @@ _SECTOR_MAP: Dict[str, str] = {
 
 # === Persistent storage ===
 
-DATA_DIR    = _HERE / "data"
-DATA_DIR.mkdir(exist_ok=True)
-RECS_FILE    = DATA_DIR / "recommendations.json"
+DATA_DIR    = (_VOLUME / "data") if _VOLUME else (_HERE / "data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+RECS_FILE     = DATA_DIR / "recommendations.json"
+SCAN_LOG_FILE = DATA_DIR / "scan_log.json"
 TRADES_FILE  = DATA_DIR / "trades.json"
 HISTORY_FILE = TRADES_FILE                        # alias — executed trades = history
 PNL_FILE     = DATA_DIR / "pnl.json"
@@ -1263,15 +1268,28 @@ async def _run_market_scan() -> None:
             },
         })
 
-        recs: List[Dict[str, Any]] = []
+        recs:     List[Dict[str, Any]] = []
+        rejected: List[Dict[str, Any]] = []
+
+        def _rej(sym: str, reason: str, price: float = 0.0, chg_pct: float = 0.0, score: float = 0.0) -> None:
+            rejected.append({
+                "ticker":      sym,
+                "price":       round(price, 2),
+                "chg_pct":     round(chg_pct, 2),
+                "score":       round(score, 1) if score else None,
+                "skip_reason": reason,
+                "scanned_at":  datetime.utcnow().isoformat(),
+            })
 
         for sym in symbols_raw:
             snap = snaps.get(sym) or {}
             if not snap:
+                _rej(sym, "No snapshot data")
                 continue
 
             if sym in earnings_blacklist:
                 _scan_stats["recs_skipped"] += 1
+                _rej(sym, "Earnings blackout")
                 continue
 
             daily_bar  = snap.get("dailyBar")     or {}
@@ -1283,12 +1301,14 @@ async def _run_market_scan() -> None:
             day_open   = float(daily_bar.get("o") or price)
 
             if price < 5 or price > 2000:
+                _rej(sym, f"Price out of range (${price:.2f})", price=price)
                 continue
 
             chg_pct   = (price - prev_close) / prev_close * 100 if prev_close else 0
             intra_pct = (price - day_open)   / day_open   * 100 if day_open   else 0
 
             if abs(chg_pct) < min_chg:
+                _rej(sym, f"Low movement ({chg_pct:+.1f}%)", price=price, chg_pct=chg_pct)
                 continue
 
             df         = bars_map.get(sym)
@@ -1319,18 +1339,31 @@ async def _run_market_scan() -> None:
                             rationale = ev.rationale or ""
                             break
 
-                    # 52/48 dead zone — narrower than old 55/45 so borderline
-                    # conviction still surfaces as an idea. Cap min_score at 55
-                    # so adaptive tuning can't choke all signals.
-                    if score > 52:
+                    # Dashboard "ideas" gate is looser than the live bot's trade gate.
+                    # When PM already decided LONG/SHORT (strict threshold passed),
+                    # show it directly. Otherwise apply the dashboard's own looser
+                    # threshold (>53 / <47) so mildly directional agent composites
+                    # still surface as ideas (the live bot applies its own stricter
+                    # gate before actually submitting a bracket order).
+                    if decision.is_actionable:
+                        direction = decision.decision.value  # LONG or SHORT
+                    elif score > 53:
                         direction = "LONG"
-                    elif score < 48:
+                    elif score < 47:
                         direction = "SHORT"
                     else:
+                        logger.debug("%s score=%.1f in dead zone — no rec", sym, score)
+                        _rej(sym, f"Score neutral zone ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
                         continue
 
-                    if score < min(min_score, 55):
+                    # Cap min_score at 55 so adaptive tuning can't choke all signals.
+                    effective_min = min(min_score, 55)
+                    if score < effective_min:
+                        _rej(sym, f"Below min score ({score:.1f} < {effective_min})", price=price, chg_pct=chg_pct, score=score)
                         continue
+                else:
+                    _rej(sym, "Agent evaluation failed", price=price, chg_pct=chg_pct)
+                    # agent_used stays False; fallback formula runs below
 
                     agent_used = True
                     intended   = _Decision.LONG if direction == "LONG" else _Decision.SHORT
@@ -1361,6 +1394,7 @@ async def _run_market_scan() -> None:
                 intra_w = weights.get("intra_weight", 2.0)
                 score   = min(max(50 + chg_pct * chg_w + intra_pct * intra_w, score_floor), score_ceil)
                 if score < min_score:
+                    _rej(sym, f"Fallback score too low ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
                     continue
                 direction   = "LONG" if chg_pct > 0 else "SHORT"
                 entry       = round(price, 2)
@@ -1419,6 +1453,11 @@ async def _run_market_scan() -> None:
         recs.sort(key=lambda x: x["composite_score"], reverse=True)
         if recs or _is_market_open():
             _save(RECS_FILE, recs)
+        _save(SCAN_LOG_FILE, {
+            "picked":     recs,
+            "rejected":   rejected,
+            "scanned_at": datetime.utcnow().isoformat(),
+        })
         # else: market closed and this scan found nothing — keep whatever
         # recommendations are already on disk available until Monday.
 
@@ -1452,7 +1491,7 @@ async def _run_market_scan() -> None:
 # === Background loop ===
 
 _BACKTEST_SCRIPT  = _HERE / "backtest_30day.py"
-_RESULTS_FILE     = _HERE.parent / "backtest_results.json"
+_RESULTS_FILE     = (_VOLUME or _HERE.parent) / "backtest_results.json"
 _BACKTEST_INTERVAL_H = int(os.getenv("BACKTEST_INTERVAL_H", "24"))
 
 
@@ -2210,6 +2249,18 @@ def get_recommendations():
     return []
 
 
+@app.get("/api/scan-results", dependencies=[Depends(_verify_bot_secret)])
+def get_scan_results():
+    data = _load(SCAN_LOG_FILE, {})
+    if isinstance(data, dict):
+        return {
+            "picked":     data.get("picked", []),
+            "rejected":   data.get("rejected", []),
+            "scanned_at": data.get("scanned_at"),
+        }
+    return {"picked": [], "rejected": [], "scanned_at": None}
+
+
 @app.get("/api/history", dependencies=[Depends(_verify_bot_secret)])
 def get_history():
     data = _load(HISTORY_FILE, [])
@@ -2641,16 +2692,17 @@ _REPO_ROOT = _HERE.parent  # trading_bot/ -> repo root
 
 @app.get("/api/backtest", dependencies=[Depends(_verify_bot_secret)])
 def get_backtest():
-    """Return backtest_results.json and backtest_optimal.json from the repo root."""
+    """Return backtest_results.json and backtest_optimal.json (volume or repo root)."""
+    base = _VOLUME or _REPO_ROOT
     def read_json(name: str):
         try:
-            return json.loads((_REPO_ROOT / name).read_text())
+            return json.loads((base / name).read_text())
         except Exception:
             return None
 
     def read_text(name: str):
         try:
-            return (_REPO_ROOT / name).read_text()
+            return (base / name).read_text()
         except Exception:
             return None
 

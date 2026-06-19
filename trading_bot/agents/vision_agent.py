@@ -95,7 +95,7 @@ class VisionAgent(BaseAgent):
                 },
             )
         except Exception as exc:
-            logger.debug("VisionAgent failed for %s: %s", ctx.ticker, exc)
+            logger.warning("VisionAgent failed for %s: %s", ctx.ticker, exc)
             return AgentEvaluation(
                 role=self.role,
                 score=NEUTRAL_SCORE,

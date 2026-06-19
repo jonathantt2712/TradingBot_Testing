@@ -50,6 +50,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config.settings import load_settings
 from core.enums import Decision
 from core.models import AnalysisContext, RiskParameters
+from core.trade_stats import load_closed_trades, summarize, format_block
+from core.paths import volume_dir
 from bootstrap import build_manager, build_news
 
 logging.basicConfig(
@@ -59,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bt30")
 
-RESULTS_FILE = Path(__file__).parent.parent / "backtest_results.json"
+RESULTS_FILE = (volume_dir() or Path(__file__).parent.parent) / "backtest_results.json"
 
 # -- Slippage model ------------------------------------------------------------
 SLIPPAGE_PCT = float(os.getenv("BACKTEST_SLIPPAGE_PCT", "0.0005"))  # 0.05% per side
@@ -576,7 +578,8 @@ def _update_weights_from_backtest(backtest_trades: list) -> None:
 
 # -- Main ----------------------------------------------------------------------
 
-DEFAULT_TICKERS = [
+# Fallback only — used when the universe scanner fails and no --tickers given.
+_FALLBACK_TICKERS = [
     "NVDA", "TSLA", "AAPL", "MSFT", "AMD",
     "META", "AMZN", "GOOGL", "SPY", "QQQ",
 ]
@@ -585,9 +588,31 @@ DEFAULT_TICKERS = [
 async def run(tickers: list[str], days: int) -> None:
     settings = load_settings()
 
+    # When no explicit ticker list is provided, pull today's top movers from
+    # Alpaca's universe scanner instead of the hardcoded fallback list.
+    if not tickers:
+        try:
+            from data.universe_scanner import UniverseScanner
+            scanner = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
+            n = int(os.getenv("BACKTEST_TOP_N", "30"))
+            logger.info("Universe scanner: fetching top %d candidates…", n)
+            tickers = await scanner.get_candidates(top_n=n)
+            if tickers:
+                logger.info("Universe: %s", " ".join(tickers))
+            else:
+                logger.warning("Universe scanner returned 0 candidates (holiday/off-hours?) — using fallback list")
+                tickers = _FALLBACK_TICKERS
+        except Exception as exc:
+            logger.warning("Universe scanner failed (%s) — using fallback list", exc)
+            tickers = _FALLBACK_TICKERS
+
     if not settings.alpaca_key_id or not settings.alpaca_secret:
         logger.error("Set ALPACA_API_KEY_ID and ALPACA_API_SECRET in .env")
         return
+
+    # Log real trade history so the run learns from the history tab.
+    _hist_stats = summarize(load_closed_trades())
+    logger.info(format_block(_hist_stats))
 
     end_dt   = datetime.now(tz=timezone.utc).replace(hour=23, minute=59, second=59)
     start_dt = end_dt - timedelta(days=days + 5)   # buffer for weekends
@@ -657,9 +682,16 @@ async def run(tickers: list[str], days: int) -> None:
 
     summary = print_summary(all_trades)
 
-    if summary:
-        RESULTS_FILE.write_text(json.dumps(summary, indent=2, default=str))
-        logger.info("Results saved to %s", RESULTS_FILE)
+    # Always write results so the dashboard shows something (even "0 trades").
+    out = summary if summary else {
+        "total_trades": 0, "wins": 0, "losses": 0, "eods": 0,
+        "win_rate": 0.0, "total_pnl": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
+        "profit_factor": 0.0, "sharpe": 0.0, "max_drawdown": 0.0,
+        "ev_per_trade": 0.0, "by_ticker": [], "trades": [],
+        "message": "No trades generated — signals may be insufficient or tickers had no setups",
+    }
+    RESULTS_FILE.write_text(json.dumps(out, indent=2, default=str))
+    logger.info("Results saved to %s", RESULTS_FILE)
 
     _update_weights_from_backtest(all_trades)
 
@@ -669,23 +701,20 @@ async def run(tickers: list[str], days: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="30-day intraday backtest")
     parser.add_argument("--days",    type=int, default=30, help="Lookback days (default 30)")
-    parser.add_argument("--tickers", nargs="+", default=DEFAULT_TICKERS,
-                        help="Ticker list (default: top 10 liquid stocks)")
+    parser.add_argument("--tickers", nargs="+", default=[],
+                        help="Explicit ticker list (default: auto from universe scanner)")
     parser.add_argument("--top",     type=int, default=0,
-                        help="Use top N from universe scanner instead of --tickers")
+                        help="Override top-N for universe scanner (default: BACKTEST_TOP_N env or 30)")
     args = parser.parse_args()
 
     async def _run():
         tickers = [t.upper() for t in args.tickers]
 
+        # --top overrides BACKTEST_TOP_N env for one-off CLI runs
         if args.top > 0:
-            from data.universe_scanner import UniverseScanner
-            settings = load_settings()
-            scanner = UniverseScanner(settings.alpaca_key_id, settings.alpaca_secret)
-            logger.info("Scanning universe for top %d candidates...", args.top)
-            tickers = await scanner.get_candidates(top_n=args.top)
-            logger.info("Universe: %s", " ".join(tickers))
+            os.environ["BACKTEST_TOP_N"] = str(args.top)
 
+        # Empty tickers → run() will call the universe scanner itself
         await run(tickers, args.days)
 
     asyncio.run(_run())

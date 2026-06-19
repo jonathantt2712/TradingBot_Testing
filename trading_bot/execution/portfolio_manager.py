@@ -168,6 +168,16 @@ class PortfolioManager:
             decision, composite, decision_meta = await self._decision_agent.decide(
                 ctx, all_evals, regime_value, regime_rationale,
             )
+            # LLM unavailable (Gemini quota/outage) → fall back to weighted composite
+            # so recommendations still flow rather than everything becoming PASS.
+            if decision_meta and "error" in decision_meta:
+                composite = self._composite(fundamental, vision_eval, technical, liquid_eval, insider_eval, squeeze_eval, macro_eval)
+                retail_surcharge = float(technical.data.get("retail_surcharge", 0.0)) if technical and technical.data else 0.0
+                long_base, short_base = self._effective_thresholds(getattr(ctx, "backtest_mode", False))
+                decision = self._direction(composite, retail_surcharge=retail_surcharge,
+                                           long_base=long_base, short_base=short_base)
+                decision_meta["fallback"] = "LLM unavailable — weighted composite used"
+                logger.debug("%s: DecisionAgent error → composite fallback (%.1f)", ctx.ticker, composite)
         else:
             composite = self._composite(fundamental, vision_eval, technical, liquid_eval, insider_eval, squeeze_eval, macro_eval)
             retail_surcharge = 0.0
