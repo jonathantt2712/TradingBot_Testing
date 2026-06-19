@@ -1320,13 +1320,20 @@ async def _run_market_scan() -> None:
                         rationale = ev.rationale or ""
                         break
 
-                # Dashboard "ideas" gate is looser (55/45 + self-tuned
-                # min_score) than the bot's trade gate — keep it that way.
-                if score > 55:
+                # Dashboard "ideas" gate is looser than the live bot's trade gate.
+                # When PM already decided LONG/SHORT (strict threshold passed),
+                # show it directly. Otherwise apply the dashboard's own looser
+                # threshold (>53 / <47) so mildly directional agent composites
+                # still surface as ideas (the live bot applies its own stricter
+                # gate before actually submitting a bracket order).
+                if decision.is_actionable:
+                    direction = decision.decision.value  # LONG or SHORT
+                elif score > 53:
                     direction = "LONG"
-                elif score < 45:
+                elif score < 47:
                     direction = "SHORT"
                 else:
+                    logger.debug("%s score=%.1f in dead zone — no rec", sym, score)
                     continue
 
                 if score < min_score:
