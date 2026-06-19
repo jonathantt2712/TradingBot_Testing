@@ -361,6 +361,7 @@ export default function TradesPage() {
       )}
 
       <ConfirmModal
+        key={selected?.id ?? 'none'}
         trade={selected}
         onClose={() => setSelected(null)}
         onDone={() => selected && handleExecuted(selected)}
