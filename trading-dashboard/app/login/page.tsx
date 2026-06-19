@@ -92,11 +92,11 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-bg-base px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-bg-border bg-bg-card p-6 space-y-5">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-cyan/10 border border-brand-cyan/30">
-            <Zap className="h-4 w-4 text-brand-cyan" />
+    <div className="flex min-h-dvh items-center justify-center bg-bg-base px-4 py-4">
+      <div className="w-full max-w-sm rounded-2xl border border-bg-border bg-bg-card p-5 space-y-3">
+        <div className="flex items-center gap-2">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-cyan/10 border border-brand-cyan/30">
+            <Zap className="h-3.5 w-3.5 text-brand-cyan" />
           </div>
           <div>
             <p className="text-sm font-semibold text-primary leading-tight">TradingBot</p>
@@ -104,7 +104,7 @@ export default function LoginPage() {
           </div>
         </div>
 
-        <div className="flex rounded-lg bg-bg-base p-1 text-xs font-medium">
+        <div className="flex rounded-lg bg-bg-base p-0.5 text-xs font-medium">
           <button
             type="button"
             onClick={() => { setMode('signin'); setError(null) }}
@@ -121,28 +121,22 @@ export default function LoginPage() {
           </button>
         </div>
 
-        <form onSubmit={mode === 'signin' ? handleSignIn : handleSignUp} className="space-y-3">
-          <div>
-            <label className="text-xs text-muted">Email</label>
+        <form onSubmit={mode === 'signin' ? handleSignIn : handleSignUp} className="space-y-2">
+          <input
+            type="email" required placeholder="Email" value={email} onChange={e => setEmail(e.target.value)}
+            className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-1.5 text-sm text-primary placeholder:text-muted"
+          />
+          <div className="relative">
             <input
-              type="email" required value={email} onChange={e => setEmail(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 text-sm text-primary"
+              type={showPassword ? 'text' : 'password'} required placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
+              className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-1.5 pr-9 text-sm text-primary placeholder:text-muted"
             />
-          </div>
-          <div>
-            <label className="text-xs text-muted">Password</label>
-            <div className="relative mt-1">
-              <input
-                type={showPassword ? 'text' : 'password'} required value={password} onChange={e => setPassword(e.target.value)}
-                className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 pr-9 text-sm text-primary"
-              />
-              <button
-                type="button" onClick={() => setShowPassword(s => !s)} tabIndex={-1}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-subtle"
-              >
-                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
-            </div>
+            <button
+              type="button" onClick={() => setShowPassword(s => !s)} tabIndex={-1}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-subtle"
+            >
+              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
           </div>
 
           {mode === 'signin' && (
@@ -153,51 +147,41 @@ export default function LoginPage() {
 
           {mode === 'signup' && (
             <>
-              <div>
-                <label className="text-xs text-muted">Confirm password</label>
-                <div className="relative mt-1">
-                  <input
-                    type={showPassword ? 'text' : 'password'} required value={confirm} onChange={e => setConfirm(e.target.value)}
-                    className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 pr-9 text-sm text-primary"
-                  />
-                  <button
-                    type="button" onClick={() => setShowPassword(s => !s)} tabIndex={-1}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-subtle"
-                  >
-                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </button>
-                </div>
-              </div>
-              <div>
-                <label className="text-xs text-muted">Phone number</label>
-                <div className="mt-1 flex gap-2">
-                  <select
-                    value={countryCode} onChange={e => setCountryCode(e.target.value)}
-                    className="rounded-lg border border-bg-border bg-bg-base px-2 py-2 text-sm text-primary"
-                  >
-                    {COUNTRY_CODES.map(({ name, code }) => (
-                      <option key={name} value={code}>{name} ({code})</option>
-                    ))}
-                  </select>
-                  <input
-                    type="tel" required value={phone} onChange={e => setPhone(e.target.value)}
-                    pattern="\d{6,14}" title="Digits only, 6-14 digits"
-                    className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 text-sm text-primary"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="text-xs text-muted">Alpaca API Key ID</label>
+              <div className="relative">
                 <input
-                  type="text" required value={alpacaKeyId} onChange={e => setAlpacaKeyId(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 text-sm text-primary font-mono"
+                  type={showPassword ? 'text' : 'password'} required placeholder="Confirm password" value={confirm} onChange={e => setConfirm(e.target.value)}
+                  className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-1.5 pr-9 text-sm text-primary placeholder:text-muted"
+                />
+                <button
+                  type="button" onClick={() => setShowPassword(s => !s)} tabIndex={-1}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-subtle"
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <select
+                  value={countryCode} onChange={e => setCountryCode(e.target.value)}
+                  className="rounded-lg border border-bg-border bg-bg-base px-2 py-1.5 text-sm text-primary"
+                >
+                  {COUNTRY_CODES.map(({ name, code }) => (
+                    <option key={name} value={code}>{name} ({code})</option>
+                  ))}
+                </select>
+                <input
+                  type="tel" required placeholder="Phone number" value={phone} onChange={e => setPhone(e.target.value)}
+                  pattern="\d{6,14}" title="Digits only, 6-14 digits"
+                  className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-1.5 text-sm text-primary placeholder:text-muted"
                 />
               </div>
-              <div>
-                <label className="text-xs text-muted">Alpaca Secret Key</label>
+              <div className="grid grid-cols-2 gap-2">
                 <input
-                  type="password" required value={alpacaSecret} onChange={e => setAlpacaSecret(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 text-sm text-primary font-mono"
+                  type="text" required placeholder="Alpaca Key ID" value={alpacaKeyId} onChange={e => setAlpacaKeyId(e.target.value)}
+                  className="w-full rounded-lg border border-bg-border bg-bg-base px-2 py-1.5 text-xs text-primary font-mono placeholder:text-muted"
+                />
+                <input
+                  type="password" required placeholder="Alpaca Secret" value={alpacaSecret} onChange={e => setAlpacaSecret(e.target.value)}
+                  className="w-full rounded-lg border border-bg-border bg-bg-base px-2 py-1.5 text-xs text-primary font-mono placeholder:text-muted"
                 />
               </div>
               <div className="flex items-center gap-4 text-xs text-subtle">
