@@ -28,8 +28,10 @@ export default function AgentsPage() {
     setLoading(true)
     try {
       const [recs, reg] = await Promise.allSettled([api.recommendations(), api.regime()])
-      if (recs.status === 'fulfilled') setRecommendations(recs.value)
-      if (reg.status === 'fulfilled')  setRegime(reg.value)
+      // Only replace recommendations if the API returns a non-empty array;
+      // otherwise keep whatever is shown (demo data or last known state).
+      if (recs.status === 'fulfilled' && recs.value.length > 0) setRecommendations(recs.value)
+      if (reg.status === 'fulfilled') setRegime(reg.value)
       setLive(recs.status === 'fulfilled' && reg.status === 'fulfilled')
     } catch {
       setLive(false)
@@ -75,18 +77,11 @@ export default function AgentsPage() {
       </div>
 
       {/* Agent cards — one per agent, showing what each agent observed */}
-      {recommendations.length > 0 ? (
-        <div className="space-y-3">
-          {AGENT_ORDER.map(role => (
-            <AgentOverviewCard key={role} role={role} recommendations={recommendations} />
-          ))}
-        </div>
-      ) : (
-        <div className="rounded-xl border border-bg-border bg-bg-card px-6 py-12 text-center">
-          <p className="text-sm text-muted">No agent data right now.</p>
-          <p className="text-xs text-muted mt-1">Agents will post their analysis once the bot runs a scan.</p>
-        </div>
-      )}
+      <div className="space-y-3">
+        {AGENT_ORDER.map(role => (
+          <AgentOverviewCard key={role} role={role} recommendations={recommendations} />
+        ))}
+      </div>
     </div>
   )
 }
