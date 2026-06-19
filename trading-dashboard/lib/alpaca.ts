@@ -316,6 +316,141 @@ export function winRateFromFills(fills: AlpacaFill[]): number | null {
   return total > 0 ? +(wins / total * 100).toFixed(1) : null
 }
 
+/**
+ * Convert Alpaca closed orders into completed round-trip TradeRecord objects using FIFO.
+ * Orders must be sorted oldest-first. Each time a position returns to flat a trade is emitted.
+ */
+export function tradesFromOrders(orders: AlpacaOrder[]): import('@/types/trading').TradeRecord[] {
+  type Pos = { qty: number; avgCost: number; openedAt: string; runningPnl: number }
+  const pos: Record<string, Pos> = {}
+  const trades: import('@/types/trading').TradeRecord[] = []
+  const EPS = 0.0001
+
+  // Process oldest-first for correct FIFO matching
+  const sorted = [...orders]
+    .filter(o => parseFloat(o.filled_qty ?? '0') > 0 && o.filled_avg_price)
+    .sort((a, b) => (a.filled_at ?? a.created_at).localeCompare(b.filled_at ?? b.created_at))
+
+  for (const o of sorted) {
+    const qty   = parseFloat(o.filled_qty!)
+    const price = parseFloat(o.filled_avg_price!)
+    const sym   = o.symbol
+    const ts    = o.filled_at ?? o.created_at
+    if (!pos[sym]) pos[sym] = { qty: 0, avgCost: 0, openedAt: ts, runningPnl: 0 }
+    const p = pos[sym]
+
+    if (o.side === 'buy') {
+      if (p.qty < 0) {
+        const cover = Math.min(qty, -p.qty)
+        p.runningPnl += (p.avgCost - price) * cover
+        p.qty        += cover
+        if (Math.abs(p.qty) < EPS) {
+          trades.push({ id: o.id, ticker: sym, direction: 'SHORT',
+            entry: +p.avgCost.toFixed(4), exit: +price.toFixed(4), qty: cover,
+            pnl: +p.runningPnl.toFixed(2),
+            pnl_pct: +(p.runningPnl / (p.avgCost * cover) * 100).toFixed(2),
+            opened_at: p.openedAt, closed_at: ts, duration: null, status: 'closed' })
+          p.qty = 0; p.avgCost = 0; p.runningPnl = 0
+        }
+        const rem = qty - cover
+        if (rem > EPS) { p.qty = rem; p.avgCost = price; p.openedAt = ts; p.runningPnl = 0 }
+      } else {
+        p.avgCost = p.qty === 0 ? price : (p.avgCost * p.qty + price * qty) / (p.qty + qty)
+        if (p.qty === 0) p.openedAt = ts
+        p.qty += qty
+      }
+    } else {
+      if (p.qty > 0) {
+        const sell = Math.min(qty, p.qty)
+        p.runningPnl += (price - p.avgCost) * sell
+        p.qty        -= sell
+        if (Math.abs(p.qty) < EPS) {
+          trades.push({ id: o.id, ticker: sym, direction: 'LONG',
+            entry: +p.avgCost.toFixed(4), exit: +price.toFixed(4), qty: sell,
+            pnl: +p.runningPnl.toFixed(2),
+            pnl_pct: +(p.runningPnl / (p.avgCost * sell) * 100).toFixed(2),
+            opened_at: p.openedAt, closed_at: ts, duration: null, status: 'closed' })
+          p.qty = 0; p.avgCost = 0; p.runningPnl = 0
+        }
+        const rem = qty - sell
+        if (rem > EPS) { p.qty = -rem; p.avgCost = price; p.openedAt = ts; p.runningPnl = 0 }
+      } else {
+        p.avgCost = p.qty === 0 ? price : (p.avgCost * (-p.qty) + price * qty) / (-p.qty + qty)
+        if (p.qty === 0) p.openedAt = ts
+        p.qty -= qty
+      }
+    }
+  }
+
+  return trades.sort((a, b) => (b.opened_at ?? '').localeCompare(a.opened_at ?? ''))
+}
+
+/**
+ * Convert raw Alpaca fill activities into completed round-trip TradeRecord objects.
+ * Uses the same FIFO algorithm as winRateFromFills but emits full trade details.
+ */
+export function tradesFromFills(fills: AlpacaFill[]): import('@/types/trading').TradeRecord[] {
+  type Pos = { qty: number; avgCost: number; openedAt: string; runningPnl: number }
+  const pos: Record<string, Pos> = {}
+  const trades: import('@/types/trading').TradeRecord[] = []
+  const EPS = 0.0001
+
+  for (const f of fills) {
+    const qty   = parseFloat(f.qty)
+    const price = parseFloat(f.price)
+    const sym   = f.symbol
+    const ts    = f.transaction_time
+    if (!pos[sym]) pos[sym] = { qty: 0, avgCost: 0, openedAt: ts, runningPnl: 0 }
+    const p = pos[sym]
+
+    if (f.side === 'buy') {
+      if (p.qty < 0) {
+        const cover = Math.min(qty, -p.qty)
+        p.runningPnl += (p.avgCost - price) * cover
+        p.qty        += cover
+        if (Math.abs(p.qty) < EPS) {
+          const totalQty = cover
+          trades.push({ id: `${sym}-${p.openedAt}`, ticker: sym, direction: 'SHORT',
+            entry: +p.avgCost.toFixed(4), exit: +price.toFixed(4), qty: totalQty,
+            pnl: +p.runningPnl.toFixed(2),
+            pnl_pct: +(p.runningPnl / (p.avgCost * totalQty) * 100).toFixed(2),
+            opened_at: p.openedAt, closed_at: ts, duration: null, status: 'closed' })
+          p.qty = 0; p.avgCost = 0; p.runningPnl = 0
+        }
+        const rem = qty - cover
+        if (rem > EPS) { p.qty = rem; p.avgCost = price; p.openedAt = ts; p.runningPnl = 0 }
+      } else {
+        p.avgCost = p.qty === 0 ? price : (p.avgCost * p.qty + price * qty) / (p.qty + qty)
+        if (p.qty === 0) p.openedAt = ts
+        p.qty += qty
+      }
+    } else {
+      if (p.qty > 0) {
+        const sell = Math.min(qty, p.qty)
+        p.runningPnl += (price - p.avgCost) * sell
+        p.qty        -= sell
+        if (Math.abs(p.qty) < EPS) {
+          const totalQty = sell
+          trades.push({ id: `${sym}-${p.openedAt}`, ticker: sym, direction: 'LONG',
+            entry: +p.avgCost.toFixed(4), exit: +price.toFixed(4), qty: totalQty,
+            pnl: +p.runningPnl.toFixed(2),
+            pnl_pct: +(p.runningPnl / (p.avgCost * totalQty) * 100).toFixed(2),
+            opened_at: p.openedAt, closed_at: ts, duration: null, status: 'closed' })
+          p.qty = 0; p.avgCost = 0; p.runningPnl = 0
+        }
+        const rem = qty - sell
+        if (rem > EPS) { p.qty = -rem; p.avgCost = price; p.openedAt = ts; p.runningPnl = 0 }
+      } else {
+        p.avgCost = p.qty === 0 ? price : (p.avgCost * (-p.qty) + price * qty) / (-p.qty + qty)
+        if (p.qty === 0) p.openedAt = ts
+        p.qty -= qty
+      }
+    }
+  }
+
+  return trades.sort((a, b) => (b.opened_at ?? '').localeCompare(a.opened_at ?? ''))
+}
+
 // Close a position
 
 export async function closePosition(creds: AlpacaCreds, symbol: string): Promise<AlpacaOrderResponse> {

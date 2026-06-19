@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { botGet } from '@/lib/bot-api'
-import { getAccount, getPortfolioHistory } from '@/lib/alpaca'
+import { getAccount, getPortfolioHistory, getOrders, tradesFromOrders } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { demoStats } from '@/lib/api'
 import type { PortfolioStats, TradeRecord } from '@/types/trading'
@@ -20,26 +20,31 @@ export async function GET() {
   if (!creds) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   try {
-    const [botStats, account, portfolioHistory, tradeHistory] = await Promise.allSettled([
+    const [botStats, account, portfolioHistory, tradeHistory, closedOrders] = await Promise.allSettled([
       botGet<PortfolioStats>('/api/stats'),
       getAccount(creds),
       getPortfolioHistory(creds, '1A', '1D'),
       botGet<TradeRecord[]>('/api/history'),
+      getOrders(creds, 'closed', 200),
     ])
 
     const stats: PortfolioStats = botStats.status === 'fulfilled'
       ? botStats.value
       : { ...demoStats(), win_rate: 0, total_trades: 0, total_pnl: 0, today_pnl: 0, sharpe_ratio: 0 }
 
-    // Compute win rate from history trades (same source as History page).
-    // This works even when the bot's local HISTORY_FILE is empty on Railway,
-    // because the history route merges bot records with real Alpaca orders.
-    if (tradeHistory.status === 'fulfilled') {
-      const computed = winRateFromHistory(tradeHistory.value)
-      if (computed) {
-        stats.win_rate     = computed.win_rate
-        stats.total_trades = computed.total_trades
-      }
+    // Compute win rate from real trades.
+    // Primary: bot history (has exact P&L per trade).
+    // Fallback: FIFO-match Alpaca closed orders (guaranteed to work regardless of bot state).
+    const botTrades = tradeHistory.status === 'fulfilled' ? tradeHistory.value : []
+    const orderTrades = closedOrders.status === 'fulfilled' ? tradesFromOrders(closedOrders.value) : []
+    const allTrades = [
+      ...botTrades,
+      ...orderTrades.filter(t => !botTrades.some(b => b.ticker === t.ticker && b.opened_at?.slice(0,10) === t.opened_at?.slice(0,10))),
+    ]
+    const computed = winRateFromHistory(allTrades)
+    if (computed) {
+      stats.win_rate     = computed.win_rate
+      stats.total_trades = computed.total_trades
     }
 
     if (account.status === 'fulfilled') {

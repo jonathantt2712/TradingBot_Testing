@@ -1,29 +1,35 @@
 export const dynamic = 'force-dynamic'
 import { PnLAnalytics } from '@/components/pnl/PnLAnalytics'
 import { botGet }       from '@/lib/bot-api'
-import { getAccount, getPortfolioHistory, type AlpacaCreds, type PortfolioHistory } from '@/lib/alpaca'
+import { getAccount, getPortfolioHistory, getOrders, tradesFromOrders, type AlpacaCreds, type PortfolioHistory } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
-import { demoPnL, demoStats, demoHistory } from '@/lib/api'
+import { demoPnL, demoStats } from '@/lib/api'
 import type { PnLPoint, PortfolioStats, TradeRecord } from '@/types/trading'
 
-/** Convert Alpaca portfolio history into the dashboard's PnLPoint series. */
+/** Convert Alpaca portfolio history into the dashboard's PnLPoint series.
+ *  Filters out zero-equity points — Alpaca returns equity=0 for non-trading
+ *  hours/weekends which creates false massive drawdowns in the chart. */
 function histToPnL(h: PortfolioHistory): PnLPoint[] {
-  const base = h.base_value || h.equity[0] || 0
-  return h.timestamp.map((ts, i) => ({
-    date:           new Date(ts * 1000).toISOString().slice(0, 10),
-    daily_pnl:      +(h.profit_loss[i] ?? 0).toFixed(2),
-    cumulative_pnl: +((h.equity[i] ?? base) - base).toFixed(2),
-    trade_count:    0,
-  }))
+  const base = h.base_value || h.equity.find(e => e > 0) || 0
+  return h.timestamp
+    .map((ts, i) => ({ ts, equity: h.equity[i] ?? 0, pl: h.profit_loss[i] ?? 0 }))
+    .filter(p => p.equity > 0)
+    .map(p => ({
+      date:           new Date(p.ts * 1000).toISOString().slice(0, 10),
+      daily_pnl:      +p.pl.toFixed(2),
+      cumulative_pnl: +(p.equity - base).toFixed(2),
+      trade_count:    0,
+    }))
 }
 
 async function loadPnL(creds: AlpacaCreds | null) {
-  const [pnl, stats, account, history, botHistory, attrResult, mcResult, regimeResult] = await Promise.allSettled([
+  const [pnl, stats, account, history, botHistory, fillsResult, attrResult, mcResult, regimeResult] = await Promise.allSettled([
     botGet<PnLPoint[]>('/api/pnl'),
     botGet<PortfolioStats>('/api/stats'),
     creds ? getAccount(creds) : Promise.reject(new Error('no creds')),
-    creds ? getPortfolioHistory(creds, '1A', '1D') : Promise.reject(new Error('no creds')),
+    creds ? getPortfolioHistory(creds, '3M', '1D') : Promise.reject(new Error('no creds')),
     botGet<TradeRecord[]>('/api/history'),
+    creds ? getOrders(creds, 'closed', 200) : Promise.reject(new Error('no creds')),
     botGet<Record<string, { wins: number; losses: number; total: number; win_rate: number; total_pnl: number }>>('/api/agent-attribution'),
     botGet<{ actual_win_rate: number; ci_95_lo: number; ci_95_hi: number; pnl_p5: number; pnl_p50: number; pnl_p95: number; n_trades: number; skill_signal: boolean; error?: string }>('/api/monte-carlo'),
     botGet<Record<string, { trades: number; wins: number; win_rate: number; total_pnl: number; avg_pnl: number }>>('/api/regime-performance'),
@@ -52,28 +58,26 @@ async function loadPnL(creds: AlpacaCreds | null) {
         ? pnl.value
         : demoPnL()
 
-  // Win/Loss + monthly need per-trade realized P&L. Alpaca's order list doesn't
-  // expose paired entry/exit P&L, so use the bot's closed-trade history, which
-  // records real pnl per trade.
-  const resolvedTrades: TradeRecord[] =
-    botHistory.status === 'fulfilled' && Array.isArray(botHistory.value) && botHistory.value.length
-      ? botHistory.value
-          .filter(t => t.status === 'closed' && t.pnl != null)
-          .map(t => ({
-            id:        t.id,
-            ticker:    t.ticker,
-            direction: t.direction,
-            entry:     t.entry,
-            exit:      t.exit ?? null,
-            qty:       t.qty,
-            pnl:       t.pnl,
-            pnl_pct:   t.pnl_pct ?? null,
-            opened_at: (t as any).executed_at ?? t.opened_at ?? '',
-            closed_at: t.closed_at ?? null,
-            duration:  t.duration ?? null,
-            status:    'closed' as const,
-          }))
-      : demoHistory()
+  // Per-trade P&L: bot history (has exact pnl) merged with FIFO-matched fills
+  const botTrades: TradeRecord[] = botHistory.status === 'fulfilled'
+    ? botHistory.value.filter(t => t.pnl != null)
+    : []
+  const fillTrades: TradeRecord[] = fillsResult.status === 'fulfilled'
+    ? tradesFromOrders(fillsResult.value)
+    : []
+  const botKeys = new Set(botTrades.map(t => `${t.ticker}-${t.opened_at?.slice(0, 10)}`))
+  const resolvedTrades: TradeRecord[] = [
+    ...botTrades,
+    ...fillTrades.filter(t => !botKeys.has(`${t.ticker}-${t.opened_at?.slice(0, 10)}`)),
+  ].sort((a, b) => (b.opened_at ?? '').localeCompare(a.opened_at ?? ''))
+
+  // Override win_rate and total_trades from real trades (bot stats may use demo fallback)
+  const closedWithPnl = resolvedTrades.filter(t => t.pnl != null)
+  if (closedWithPnl.length > 0) {
+    const wins = closedWithPnl.filter(t => (t.pnl ?? 0) > 0).length
+    resolvedStats.win_rate     = +(wins / closedWithPnl.length * 100).toFixed(1)
+    resolvedStats.total_trades = closedWithPnl.length
+  }
 
   const live = history.status === 'fulfilled' || account.status === 'fulfilled' || pnl.status === 'fulfilled'
   const attribution  = attrResult.status   === 'fulfilled' ? attrResult.value   : undefined
