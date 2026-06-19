@@ -25,7 +25,6 @@ _DIRECTIONAL_ROLES = {
     AgentRole.VISION,
     AgentRole.TECHNICAL,
     AgentRole.LIQUID,
-    AgentRole.SOCIAL,
     AgentRole.INSIDER,
     AgentRole.SQUEEZE,
 }

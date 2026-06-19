@@ -1,12 +1,11 @@
 """Portfolio Manager -- orchestrator / execution brain.
 
 Pipeline per ticker:
-1. Run Fundamental, Vision, Technical, Liquid (opt), Social (opt), Risk CONCURRENTLY.
+1. Run Fundamental, Vision, Technical, Liquid (opt), Risk CONCURRENTLY.
 2. Blend directional scores by configured weights -> composite [1, 100].
 3. Map composite to LONG / SHORT / PASS via thresholds.
 4. Apply Risk veto and minimum-risk-score gate.
 5. Build concrete plan, size the order, route bracket through the broker.
-6. Optionally publish the decision to AI4Trade.
 """
 from __future__ import annotations
 
@@ -26,7 +25,6 @@ from agents.liquid_agent import LiquidAgent
 from agents.regime_agent import MarketRegime, RegimeSnapshot
 from agents.risk_agent import RiskAgent
 from agents.insider_agent import InsiderAgent
-from agents.social_agent import SocialSentimentAgent
 from agents.macro_agent import MacroSignalAgent
 from agents.squeeze_agent import SqueezeAgent
 from agents.technical_agent import TechnicalAgent
@@ -56,11 +54,9 @@ class PortfolioManager:
         technical: TechnicalAgent = None,
         risk: RiskAgent,
         liquid: Optional[LiquidAgent] = None,
-        social: Optional[SocialSentimentAgent] = None,
         insider: Optional["InsiderAgent"] = None,
         squeeze: Optional["SqueezeAgent"] = None,
         macro: Optional["MacroSignalAgent"] = None,
-        publisher=None,
         decision_agent: Optional[DecisionAgent] = None,
     ) -> None:
         self.settings = settings
@@ -70,11 +66,9 @@ class PortfolioManager:
         self.technical = technical
         self.risk = risk
         self.liquid = liquid
-        self.social = social
         self.insider = insider
         self.squeeze = squeeze
         self.macro   = macro
-        self.publisher = publisher
         self._decision_agent = decision_agent
         self._weights = settings.weights.as_map()
         self._thresholds: DecisionThresholds = settings.thresholds
@@ -100,16 +94,13 @@ class PortfolioManager:
             self.technical.safe_evaluate(ctx),
             self.risk.safe_evaluate(ctx),
         ]
-        vision_idx = liquid_idx = social_idx = squeeze_idx = None
+        vision_idx = liquid_idx = squeeze_idx = None
         if self.vision is not None:
             vision_idx = len(coros)
             coros.append(self.vision.safe_evaluate(ctx))
         if self.liquid is not None:
             liquid_idx = len(coros)
             coros.append(self.liquid.safe_evaluate(ctx))
-        if self.social is not None:
-            social_idx = len(coros)
-            coros.append(self.social.safe_evaluate(ctx))
         insider_idx = None
         if self.insider is not None:
             insider_idx = len(coros)
@@ -128,7 +119,6 @@ class PortfolioManager:
         risk        = results[2]
         vision_eval:  Optional[AgentEvaluation] = results[vision_idx]  if vision_idx  is not None else None
         liquid_eval:  Optional[AgentEvaluation] = results[liquid_idx]  if liquid_idx  is not None else None
-        social_eval:  Optional[AgentEvaluation] = results[social_idx]  if social_idx  is not None else None
         insider_eval: Optional[AgentEvaluation] = results[insider_idx] if insider_idx is not None else None
         squeeze_eval: Optional[AgentEvaluation] = results[squeeze_idx] if squeeze_idx is not None else None
         macro_eval:   Optional[AgentEvaluation] = results[macro_idx]   if macro_idx   is not None else None
@@ -147,7 +137,7 @@ class PortfolioManager:
                 ctx, all_evals, regime_value, regime_rationale,
             )
         else:
-            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, social_eval, insider_eval, squeeze_eval, macro_eval)
+            composite = self._composite(fundamental, vision_eval, technical, liquid_eval, insider_eval, squeeze_eval, macro_eval)
             retail_surcharge = 0.0
             if technical is not None and technical.data:
                 retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
@@ -315,8 +305,6 @@ class PortfolioManager:
         if execute and decision.is_actionable:
             receipt = await self.execute(decision)
         self._audit_decision(decision, executed=receipt is not None, receipt=receipt)
-        if self.publisher and self.settings.ai4trade_publish:
-            await self.publisher.publish(decision)
         return decision
 
     # ── Audit trail (trade forensics) ─────────────────────────────────────
@@ -421,7 +409,6 @@ class PortfolioManager:
             # Bullish trend regime: momentum signals reliable, fundas lag
             "technical":   1.30,
             "liquid":      1.20,
-            "social":      1.10,
             "fundamental": 0.80,
             "vision":      0.90,
             "insider":     0.90,
@@ -432,7 +419,6 @@ class PortfolioManager:
             "vision":      1.10,
             "risk":        1.20,   # risk agent score matters more
             "technical":   0.75,
-            "social":      0.80,
             "liquid":      0.85,
             "insider":     1.00,
         },
@@ -442,7 +428,6 @@ class PortfolioManager:
             "insider":     1.15,
             "fundamental": 1.10,
             "technical":   0.80,   # trend signals unreliable in chop
-            "social":      0.85,
             "vision":      0.95,
         },
         "neutral": {
@@ -456,7 +441,6 @@ class PortfolioManager:
         v: AgentEvaluation,
         t: AgentEvaluation,
         liquid: Optional[AgentEvaluation],
-        social: Optional[AgentEvaluation],
         insider: Optional[AgentEvaluation] = None,
         squeeze: Optional[AgentEvaluation] = None,
         macro: Optional[AgentEvaluation] = None,
@@ -468,8 +452,6 @@ class PortfolioManager:
         ]
         if liquid is not None:
             agents.append(("liquid", liquid))
-        if social is not None:
-            agents.append(("social", social))
         if insider is not None:
             agents.append(("insider", insider))
         if squeeze is not None:
@@ -491,16 +473,7 @@ class PortfolioManager:
             num += ev.score * w
             den += w
 
-        result = round(num / den, 2) if den else 50.0
-
-        # Social + Squeeze convergence bonus: both agree → ±3 point boost
-        if social is not None and squeeze is not None:
-            if social.score >= 60 and squeeze.score >= 60:
-                result = min(99.0, result + 3.0)
-            elif social.score <= 40 and squeeze.score <= 40:
-                result = max(1.0, result - 3.0)
-
-        return result
+        return round(num / den, 2) if den else 50.0
 
     def _effective_thresholds(self, backtest_mode: bool) -> tuple[float, float]:
         """Live LONG/SHORT entry thresholds.

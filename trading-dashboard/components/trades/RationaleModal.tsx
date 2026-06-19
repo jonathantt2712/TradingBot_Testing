@@ -16,7 +16,6 @@ function notConfiguredReason(ev: AgentEvaluation): string | null {
   if (r.includes('no vision api key'))       return 'No vision API key set on the bot server (Railway)'
   if (r.includes('no chart image'))          return 'No chart image available for this evaluation'
   if (r.includes('vision error'))            return 'Vision API call failed — check the key/quota'
-  if (r.includes('no community signals'))    return 'No AI4Trade community feed data (or creds not set)'
   if (r.includes('no directional signals'))  return 'Community feed returned no directional signal'
   if (r.includes('no congressional trades')) return 'No congressional trading disclosures found in last 30 days'
   if (r.includes('fetch failed'))            return 'House Stock Watcher data fetch failed — check network'

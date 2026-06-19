@@ -27,7 +27,6 @@ class AgentWeights:
     vision:      float = 0.14
     technical:   float = 0.32
     liquid:      float = 0.13
-    social:      float = 0.13
     insider:     float = 0.10   # congressional trading intelligence
     squeeze:     float = 0.08   # FINRA short volume squeeze detector
     macro:       float = 0.10   # AI-Trader market-intel macro signals
@@ -38,7 +37,6 @@ class AgentWeights:
             "vision":      self.vision,
             "technical":   self.technical,
             "liquid":      self.liquid,
-            "social":      self.social,
             "insider":     self.insider,
             "squeeze":     self.squeeze,
             "macro":       self.macro,
@@ -102,11 +100,6 @@ class Settings:
 
     use_liquid_broker: bool = field(default_factory=lambda: _env_bool("USE_LIQUID_BROKER", False))
     liquid_api_key:    str  = field(default_factory=lambda: _env("LIQUID_API_KEY"))
-
-    ai4trade_email:    str  = field(default_factory=lambda: _env("AI4TRADE_EMAIL"))
-    ai4trade_password: str  = field(default_factory=lambda: _env("AI4TRADE_PASSWORD"))
-    ai4trade_bot_name: str  = field(default_factory=lambda: _env("AI4TRADE_BOT_NAME", "tradingbot2026"))
-    ai4trade_publish:  bool = field(default_factory=lambda: _env_bool("AI4TRADE_PUBLISH", True))
 
     news_base_url:     str  = field(default_factory=lambda: _env("NEWS_BASE_URL", "https://www.polistock.app/"))
     news_api_key:      str  = field(default_factory=lambda: _env("NEWS_API_KEY"))

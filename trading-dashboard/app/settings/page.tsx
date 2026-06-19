@@ -97,8 +97,8 @@ export default function SettingsPage() {
   const [botStatus, setBotStatus] = useState<boolean | null>(null)
   const [agentsOk,  setAgentsOk]  = useState<boolean | null>(null)
   const [agentKeys, setAgentKeys] = useState<{
-    gemini: boolean; anthropic: boolean; ai4trade: boolean
-    vision_ready: boolean; social_ready: boolean
+    gemini: boolean; anthropic: boolean
+    vision_ready: boolean
   } | null>(null)
   const [envVars,   setEnvVars]   = useState<{ keySet: boolean | null; secretSet: boolean | null; paper: boolean | null }>({
     keySet: null, secretSet: null, paper: null,
@@ -187,8 +187,6 @@ export default function SettingsPage() {
         : 'set GEMINI_API_KEY' },
     { label: 'GEMINI_API_KEY',    ok: agentKeys ? agentKeys.gemini    : null, detail: agentKeys?.gemini    ? 'set' : 'missing' },
     { label: 'ANTHROPIC_API_KEY', ok: agentKeys ? agentKeys.anthropic : null, detail: agentKeys?.anthropic ? 'set' : 'missing' },
-    { label: 'Social agent (community feed)', ok: agentKeys ? agentKeys.social_ready : null,
-      detail: agentKeys?.social_ready ? 'AI4Trade' : 'set AI4TRADE_EMAIL/PASSWORD' },
   ]
 
   const marketLabel =
@@ -277,11 +275,9 @@ ALPACA_PAPER=true`}
                 <p>Set these on the <span className="text-brand-cyan">bot server (Railway)</span>, not the dashboard:</p>
                 <pre className="mt-1 text-[10px] font-mono text-subtle whitespace-pre-wrap">
 {`GEMINI_API_KEY=...        # vision (free tier)
-ANTHROPIC_API_KEY=...     # vision fallback
-AI4TRADE_EMAIL=...        # social feed
-AI4TRADE_PASSWORD=...`}
+ANTHROPIC_API_KEY=...     # vision fallback`}
                 </pre>
-                <p>Without these, the Vision and Social agents return a neutral 50 score.</p>
+                <p>Without these, the Vision agent returns a neutral 50 score.</p>
               </div>
             </>
           )}

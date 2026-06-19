@@ -3,7 +3,6 @@ python-dotenv>=1.0
 pandas>=2.1
 numpy>=1.26
 aiohttp>=3.9
-websockets>=12.0      # AI4Trade WebSocket heartbeat
 
 # --- Technical analysis ---
 pandas-ta>=0.3.14b

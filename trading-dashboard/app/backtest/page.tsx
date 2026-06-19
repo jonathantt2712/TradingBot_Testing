@@ -6,7 +6,6 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EquityCurve, ParamHeatmap, type BacktestTrade } from '@/components/backtest/BacktestCharts'
-import { ChallengePanel } from '@/components/backtest/ChallengePanel'
 
 interface TickerStat {
   ticker:   string
@@ -566,9 +565,6 @@ export default function BacktestPage() {
               </div>
             </div>
           ) : null}
-
-          {/* AI4Trade challenges */}
-          <ChallengePanel />
 
           {/* No data */}
           {!data.optimal && !data.results && (
