@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { botGet } from '@/lib/bot-api'
-import { getAccount, getPortfolioHistory } from '@/lib/alpaca'
+import { getAccount, getPortfolioHistory, getFills, winRateFromFills } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { demoStats } from '@/lib/api'
 import type { PortfolioStats } from '@/types/trading'
@@ -10,10 +10,11 @@ export async function GET() {
   if (!creds) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   try {
-    const [botStats, account, history] = await Promise.allSettled([
+    const [botStats, account, history, fills] = await Promise.allSettled([
       botGet<PortfolioStats>('/api/stats'),
       getAccount(creds),
       getPortfolioHistory(creds, '1A', '1D'),
+      getFills(creds),
     ])
 
     const stats: PortfolioStats = botStats.status === 'fulfilled'
@@ -34,18 +35,11 @@ export async function GET() {
         if (base > 0 && !isNaN(totalPnl)) stats.total_pnl = +totalPnl.toFixed(2)
 
         // Win rate from bot history is 0 when the bot has no closed trade records
-        // (e.g. ephemeral filesystem on Railway). Fall back to daily win rate from
-        // Alpaca portfolio history: count days with positive P&L change.
-        if (stats.win_rate === 0) {
-          let tradingDays = 0, winDays = 0
-          for (let i = 1; i < pl.length; i++) {
-            const daily = (pl[i] ?? 0) - (pl[i - 1] ?? 0)
-            if (Math.abs(daily) > 0.01) {
-              tradingDays++
-              if (daily > 0) winDays++
-            }
-          }
-          if (tradingDays > 0) stats.win_rate = +(winDays / tradingDays * 100).toFixed(1)
+        // (e.g. ephemeral filesystem on Railway). Fall back to per-trade win rate
+        // computed from Alpaca fill activities via FIFO matching.
+        if (stats.win_rate === 0 && fills.status === 'fulfilled') {
+          const computed = winRateFromFills(fills.value)
+          if (computed !== null) stats.win_rate = computed
         }
       }
 

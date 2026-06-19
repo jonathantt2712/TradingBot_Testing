@@ -221,6 +221,80 @@ export async function getPortfolioHistory(
   )
 }
 
+// Account fill activities
+
+export interface AlpacaFill {
+  id:               string
+  activity_type:    string
+  symbol:           string
+  side:             'buy' | 'sell'
+  qty:              string
+  price:            string
+  transaction_time: string
+  type:             string
+}
+
+export async function getFills(creds: AlpacaCreds, pageSize = 200): Promise<AlpacaFill[]> {
+  return alpacaGet<AlpacaFill[]>(
+    brokerBase(creds),
+    `/v2/account/activities?activity_type=FILL&page_size=${pageSize}&direction=asc`,
+    creds,
+  )
+}
+
+/**
+ * Compute per-trade win rate from raw fill activities.
+ * Uses FIFO matching: every time a position in a symbol closes back to 0,
+ * that counts as one completed trade (win if P&L > 0).
+ */
+export function winRateFromFills(fills: AlpacaFill[]): number | null {
+  // position state per symbol: { qty (signed: + long, - short), basis (cost) }
+  const positions: Record<string, { qty: number; basis: number }> = {}
+  let wins = 0, total = 0
+
+  for (const fill of fills) {
+    const qty   = parseFloat(fill.qty)
+    const price = parseFloat(fill.price)
+    const sym   = fill.symbol
+    if (!positions[sym]) positions[sym] = { qty: 0, basis: 0 }
+    const pos = positions[sym]
+
+    if (fill.side === 'buy') {
+      if (pos.qty < 0) {
+        // Closing a short
+        const closeQty = Math.min(qty, -pos.qty)
+        const pnl = (pos.basis / -pos.qty - price) * closeQty
+        if (closeQty === -pos.qty) { total++; if (pnl > 0) wins++ }
+        pos.qty  += closeQty
+        pos.basis = pos.qty < 0 ? pos.basis * (1 + closeQty / -pos.qty) : 0
+        // Open remaining as new long
+        const remaining = qty - closeQty
+        if (remaining > 0) { pos.qty += remaining; pos.basis += remaining * price }
+      } else {
+        pos.qty   += qty
+        pos.basis += qty * price
+      }
+    } else {
+      if (pos.qty > 0) {
+        // Closing a long
+        const closeQty = Math.min(qty, pos.qty)
+        const pnl = (price - pos.basis / pos.qty) * closeQty
+        if (closeQty === pos.qty) { total++; if (pnl > 0) wins++ }
+        pos.qty  -= closeQty
+        pos.basis = pos.qty > 0 ? pos.basis * (1 - closeQty / (pos.qty + closeQty)) : 0
+        // Open remaining as new short
+        const remaining = qty - closeQty
+        if (remaining > 0) { pos.qty -= remaining; pos.basis += remaining * price }
+      } else {
+        pos.qty   -= qty
+        pos.basis += qty * price
+      }
+    }
+  }
+
+  return total > 0 ? +(wins / total * 100).toFixed(1) : null
+}
+
 // Close a position
 
 export async function closePosition(creds: AlpacaCreds, symbol: string): Promise<AlpacaOrderResponse> {
