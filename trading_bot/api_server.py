@@ -114,6 +114,10 @@ _HERE = Path(__file__).parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+from core.paths import volume_dir
+# Persistent volume (Railway) when attached — keeps runtime data across deploys.
+_VOLUME = volume_dir()
+
 _AGENTS_AVAILABLE = False
 _pm                = None   # PortfolioManager — the SAME composition live/backtest use
 _Decision          = None
@@ -212,8 +216,8 @@ _SECTOR_MAP: Dict[str, str] = {
 
 # === Persistent storage ===
 
-DATA_DIR    = _HERE / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR    = (_VOLUME / "data") if _VOLUME else (_HERE / "data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 RECS_FILE     = DATA_DIR / "recommendations.json"
 SCAN_LOG_FILE = DATA_DIR / "scan_log.json"
 TRADES_FILE  = DATA_DIR / "trades.json"
@@ -1483,7 +1487,7 @@ async def _run_market_scan() -> None:
 # === Background loop ===
 
 _BACKTEST_SCRIPT  = _HERE / "backtest_30day.py"
-_RESULTS_FILE     = _HERE.parent / "backtest_results.json"
+_RESULTS_FILE     = (_VOLUME or _HERE.parent) / "backtest_results.json"
 _BACKTEST_INTERVAL_H = int(os.getenv("BACKTEST_INTERVAL_H", "24"))
 
 
@@ -2684,16 +2688,17 @@ _REPO_ROOT = _HERE.parent  # trading_bot/ -> repo root
 
 @app.get("/api/backtest", dependencies=[Depends(_verify_bot_secret)])
 def get_backtest():
-    """Return backtest_results.json and backtest_optimal.json from the repo root."""
+    """Return backtest_results.json and backtest_optimal.json (volume or repo root)."""
+    base = _VOLUME or _REPO_ROOT
     def read_json(name: str):
         try:
-            return json.loads((_REPO_ROOT / name).read_text())
+            return json.loads((base / name).read_text())
         except Exception:
             return None
 
     def read_text(name: str):
         try:
-            return (_REPO_ROOT / name).read_text()
+            return (base / name).read_text()
         except Exception:
             return None
 
