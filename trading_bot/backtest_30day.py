@@ -51,6 +51,7 @@ from config.settings import load_settings
 from core.enums import Decision
 from core.models import AnalysisContext, RiskParameters
 from core.trade_stats import load_closed_trades, summarize, format_block
+from core.paths import volume_dir
 from bootstrap import build_manager, build_news
 
 logging.basicConfig(
@@ -60,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bt30")
 
-RESULTS_FILE = Path(__file__).parent.parent / "backtest_results.json"
+RESULTS_FILE = (volume_dir() or Path(__file__).parent.parent) / "backtest_results.json"
 
 # -- Slippage model ------------------------------------------------------------
 SLIPPAGE_PCT = float(os.getenv("BACKTEST_SLIPPAGE_PCT", "0.0005"))  # 0.05% per side

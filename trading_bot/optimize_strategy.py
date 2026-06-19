@@ -57,6 +57,7 @@ sys.path.insert(0, str(_here))
 from config.settings import load_settings, Settings, AgentWeights, RiskConfig, DecisionThresholds
 from core.enums import Decision
 from core.trade_stats import load_closed_trades, summarize, format_block
+from core.paths import volume_dir
 from backtest_30day import (
     fetch_bars_range,
     backtest_ticker,
@@ -74,10 +75,11 @@ logging.basicConfig(
 logger = logging.getLogger("opt")
 logging.getLogger("opt").setLevel(logging.INFO)
 
-RESULTS_FILE   = _here.parent / "optimization_results.json"
+_OUT_DIR       = volume_dir() or _here.parent
+RESULTS_FILE   = _OUT_DIR / "optimization_results.json"
 # Dashboard files — the existing /backtest "Optimizer Run" panel + config box read these.
-OPTIMAL_JSON   = _here.parent / "backtest_optimal.json"
-OPTIMAL_CONFIG = _here.parent / "OPTIMAL_CONFIG.txt"
+OPTIMAL_JSON   = _OUT_DIR / "backtest_optimal.json"
+OPTIMAL_CONFIG = _OUT_DIR / "OPTIMAL_CONFIG.txt"
 MIN_TRADES     = 20   # min in-sample trades (statistical significance)
 MIN_OOS_TRADES = 6    # min out-of-sample trades to trust the validation number
 SPLIT_FRAC     = 0.70 # walk-forward: tune on first 70%, validate on last 30%
