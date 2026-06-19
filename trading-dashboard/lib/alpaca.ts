@@ -60,6 +60,19 @@ export function getAccount(creds: AlpacaCreds): Promise<AlpacaAccount> {
   return alpacaGet(brokerBase(creds), '/v2/account', creds)
 }
 
+// Market clock
+
+export interface AlpacaClock {
+  timestamp:  string
+  is_open:    boolean
+  next_open:  string
+  next_close: string
+}
+
+export function getClock(creds: AlpacaCreds): Promise<AlpacaClock> {
+  return alpacaGet<AlpacaClock>(brokerBase(creds), '/v2/clock', creds)
+}
+
 // Positions
 
 export interface AlpacaPosition {

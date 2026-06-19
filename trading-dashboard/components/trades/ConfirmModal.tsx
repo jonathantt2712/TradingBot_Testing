@@ -1,6 +1,6 @@
 'use client'
-import { useState } from 'react'
-import { X, AlertTriangle, CheckCircle2, Loader2, ArrowUpRight, ArrowDownLeft } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { X, AlertTriangle, CheckCircle2, Loader2, ArrowUpRight, ArrowDownLeft, Clock, BanknoteIcon } from 'lucide-react'
 import { cn, formatPrice, regimeLabel, regimeColor } from '@/lib/utils'
 import { api } from '@/lib/api'
 import { toast } from 'sonner'
@@ -12,11 +12,47 @@ interface Props {
   onDone:   () => void
 }
 
+interface PreflightState {
+  loading:       boolean
+  marketOpen:    boolean | null
+  nextOpen:      string | null
+  buyingPower:   number | null
+}
+
+function formatNextOpen(iso: string): string {
+  const d = new Date(iso)
+  return d.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+}
+
 export function ConfirmModal({ trade, onClose, onDone }: Props) {
   const [loading,   setLoading]   = useState(false)
   const [confirmed, setConfirmed] = useState(false)
+  const [preflight, setPreflight] = useState<PreflightState>({ loading: true, marketOpen: null, nextOpen: null, buyingPower: null })
+
+  useEffect(() => {
+    if (!trade) return
+    setPreflight({ loading: true, marketOpen: null, nextOpen: null, buyingPower: null })
+    Promise.allSettled([
+      fetch('/api/alpaca/clock').then(r => r.ok ? r.json() : null),
+      fetch('/api/alpaca/account').then(r => r.ok ? r.json() : null),
+    ]).then(([clockRes, accountRes]) => {
+      const clock   = clockRes.status   === 'fulfilled' ? clockRes.value   : null
+      const account = accountRes.status === 'fulfilled' ? accountRes.value : null
+      setPreflight({
+        loading:     false,
+        marketOpen:  clock?.is_open   ?? null,
+        nextOpen:    clock?.next_open ?? null,
+        buyingPower: account?.buying_power != null ? parseFloat(account.buying_power) : null,
+      })
+    })
+  }, [trade])
 
   if (!trade) return null
+
+  const tradeCost        = trade.risk.qty * trade.risk.entry
+  const insufficientFunds = preflight.buyingPower !== null && preflight.buyingPower < tradeCost
+  const marketClosed     = preflight.marketOpen === false
+  const blocked          = marketClosed || insufficientFunds
 
   const isLong = trade.direction === 'LONG'
 
@@ -131,6 +167,34 @@ export function ConfirmModal({ trade, onClose, onDone }: Props) {
           </div>
         </div>
 
+        {/* Preflight warnings */}
+        {!preflight.loading && (marketClosed || insufficientFunds) && (
+          <div className="px-6 pb-2 space-y-2">
+            {marketClosed && (
+              <div className="flex items-start gap-2 rounded-lg border border-caution/30 bg-caution/10 px-3 py-2.5 text-xs text-caution">
+                <Clock className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold">Market is closed</p>
+                  {preflight.nextOpen && (
+                    <p className="text-caution/80 mt-0.5">Opens {formatNextOpen(preflight.nextOpen)}</p>
+                  )}
+                </div>
+              </div>
+            )}
+            {insufficientFunds && (
+              <div className="flex items-start gap-2 rounded-lg border border-bear/30 bg-bear/10 px-3 py-2.5 text-xs text-bear">
+                <BanknoteIcon className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold">Insufficient buying power</p>
+                  <p className="text-bear/80 mt-0.5">
+                    Available ${preflight.buyingPower!.toLocaleString('en-US', { maximumFractionDigits: 0 })} · Trade costs ${tradeCost.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex gap-2 border-t border-bg-border px-6 py-4">
           {confirmed ? (
             <div className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-bull/10 py-2.5 text-sm font-semibold text-bull">
@@ -142,7 +206,7 @@ export function ConfirmModal({ trade, onClose, onDone }: Props) {
               <button onClick={onClose} className="btn-ghost flex-1" disabled={loading}>Cancel</button>
               <button
                 onClick={handleExecute}
-                disabled={loading}
+                disabled={loading || preflight.loading || blocked}
                 className={cn(
                   'flex-1 rounded-lg py-2.5 text-sm font-semibold transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed',
                   isLong
@@ -150,11 +214,16 @@ export function ConfirmModal({ trade, onClose, onDone }: Props) {
                     : 'bg-bear text-white hover:bg-red-400',
                 )}
               >
-                {loading ? (
+                {preflight.loading ? (
                   <span className="flex items-center justify-center gap-2">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Executing...
+                    <Loader2 className="h-4 w-4 animate-spin" /> Checking...
                   </span>
+                ) : loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Executing...
+                  </span>
+                ) : blocked ? (
+                  'Cannot Execute'
                 ) : (
                   `Execute ${trade.direction} ${trade.ticker}`
                 )}
