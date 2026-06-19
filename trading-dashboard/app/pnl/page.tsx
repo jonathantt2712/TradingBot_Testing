@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic'
 import { PnLAnalytics } from '@/components/pnl/PnLAnalytics'
 import { botGet }       from '@/lib/bot-api'
-import { getAccount, getPortfolioHistory, getOrders, tradesFromOrders, type AlpacaCreds, type PortfolioHistory } from '@/lib/alpaca'
+import { getAccount, getPortfolioHistory, getOrders, tradesFromOrders, mergeTrades, type AlpacaCreds, type PortfolioHistory } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { demoPnL, demoStats } from '@/lib/api'
 import type { PnLPoint, PortfolioStats, TradeRecord } from '@/types/trading'
@@ -69,17 +69,9 @@ async function loadPnL(creds: AlpacaCreds | null) {
         : demoPnL()
 
   // Per-trade P&L: bot history (has exact pnl) merged with FIFO-matched fills
-  const botTrades: TradeRecord[] = botHistory.status === 'fulfilled'
-    ? botHistory.value.filter(t => t.pnl != null)
-    : []
-  const fillTrades: TradeRecord[] = fillsResult.status === 'fulfilled'
-    ? tradesFromOrders(fillsResult.value)
-    : []
-  const botKeys = new Set(botTrades.map(t => `${t.ticker}-${t.opened_at?.slice(0, 10)}`))
-  const resolvedTrades: TradeRecord[] = [
-    ...botTrades,
-    ...fillTrades.filter(t => !botKeys.has(`${t.ticker}-${t.opened_at?.slice(0, 10)}`)),
-  ].sort((a, b) => (b.opened_at ?? '').localeCompare(a.opened_at ?? ''))
+  const botTrades:  TradeRecord[] = botHistory.status   === 'fulfilled' ? botHistory.value.filter(t => t.pnl != null) : []
+  const fillTrades: TradeRecord[] = fillsResult.status  === 'fulfilled' ? tradesFromOrders(fillsResult.value)          : []
+  const resolvedTrades = mergeTrades(botTrades, fillTrades)
 
   // Override win_rate and total_trades from real trades (bot stats may use demo fallback)
   const closedWithPnl = resolvedTrades.filter(t => t.pnl != null)

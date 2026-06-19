@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { botGet } from '@/lib/bot-api'
-import { getFills, tradesFromFills } from '@/lib/alpaca'
+import { getFills, tradesFromFills, mergeTrades } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import type { TradeRecord } from '@/types/trading'
 
@@ -33,12 +33,7 @@ export async function GET() {
       ? tradesFromFills(fillsResult.value)
       : []
 
-    // Deduplicate: prefer bot records (they have more detail)
-    const botKeys = new Set(botTrades.map(t => `${t.ticker}-${t.opened_at?.slice(0, 10)}`))
-    const fillGaps = fillTrades.filter(t => !botKeys.has(`${t.ticker}-${t.opened_at?.slice(0, 10)}`))
-
-    const merged = [...botTrades, ...fillGaps]
-      .sort((a, b) => (b.opened_at ?? '').localeCompare(a.opened_at ?? ''))
+    const merged = mergeTrades(botTrades, fillTrades)
 
     return NextResponse.json(merged)
   } catch {

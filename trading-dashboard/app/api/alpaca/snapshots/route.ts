@@ -9,7 +9,10 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url)
     const symbols = (searchParams.get('symbols') ?? 'SPY,QQQ,AAPL,NVDA,MSFT')
-      .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+      .split(',')
+      .map(s => s.trim().toUpperCase())
+      .filter(s => /^[A-Z]{1,5}$/.test(s))
+      .slice(0, 50)
     const snaps = await getSnapshots(creds, symbols)
     return NextResponse.json(snaps)
   } catch (err: any) {

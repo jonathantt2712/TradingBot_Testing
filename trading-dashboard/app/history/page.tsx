@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic'
 import { HistoryTable } from '@/components/history/HistoryTable'
-import { getOrders, tradesFromOrders, type AlpacaCreds } from '@/lib/alpaca'
+import { getOrders, tradesFromOrders, mergeTrades, type AlpacaCreds } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { botGet }       from '@/lib/bot-api'
 import type { TradeRecord } from '@/types/trading'
@@ -20,12 +20,7 @@ async function loadHistory(creds: AlpacaCreds | null): Promise<{ trades: TradeRe
     ? tradesFromOrders(ordersResult.value)
     : []
 
-  // Bot trades take precedence (more detail); fill in the rest from Alpaca orders
-  const botKeys = new Set(botTrades.map(t => `${t.ticker}-${(t.opened_at ?? '').slice(0, 10)}`))
-  const merged = [
-    ...botTrades,
-    ...orderTrades.filter(t => !botKeys.has(`${t.ticker}-${(t.opened_at ?? '').slice(0, 10)}`)),
-  ].sort((a, b) => (b.opened_at ?? '').localeCompare(a.opened_at ?? ''))
+  const merged = mergeTrades(botTrades, orderTrades)
 
   const live = ordersResult.status === 'fulfilled' || botResult.status === 'fulfilled'
   return { trades: merged, live }

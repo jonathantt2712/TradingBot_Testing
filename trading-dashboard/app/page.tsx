@@ -24,13 +24,8 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     botGet<{ trading?: { mode_label?: string; execute_live?: boolean; paper_mode?: boolean } }>('/api/health'),
   ])
 
-  if (account.status === 'rejected') {
-    console.error('getAccount failed:', account.reason)
-    if (creds) console.error('getAccount creds used:', { paper: creds.paper, keyId: `${creds.keyId.slice(0, 4)}...${creds.keyId.slice(-4)}` })
-  }
-
   const accountErrorDetail = account.status === 'rejected'
-    ? `${String((account.reason as Error)?.message ?? account.reason)}${creds ? ` (paper=${creds.paper}, keyId=${creds.keyId.slice(0, 4)}...${creds.keyId.slice(-4)})` : ' (no creds on session)'}`
+    ? String((account.reason as Error)?.message ?? account.reason)
     : null
 
   const resolvedStats: PortfolioStats = stats.status === 'fulfilled' ? stats.value : demoStats()

@@ -258,33 +258,6 @@ export function demoPnL(): PnLPoint[] {
   return points
 }
 
-export function demoHistory(): TradeRecord[] {
-  const tickers = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMD', 'META']
-  return Array.from({ length: 20 }, (_, i) => {
-    const dir = Math.random() > 0.5 ? 'LONG' : 'SHORT'
-    const entry  = 100 + Math.random() * 800
-    const pnlPct = (Math.random() - 0.4) * 8
-    const exit   = dir === 'LONG' ? entry * (1 + pnlPct / 100) : entry * (1 - pnlPct / 100)
-    const qty    = Math.floor(Math.random() * 20) + 1
-    const pnl    = (exit - entry) * qty * (dir === 'LONG' ? 1 : -1)
-    const d      = new Date(); d.setDate(d.getDate() - i)
-    return {
-      id:        `t${i}`,
-      ticker:    tickers[i % tickers.length],
-      direction: dir as 'LONG' | 'SHORT',
-      entry:     +entry.toFixed(2),
-      exit:      +exit.toFixed(2),
-      qty,
-      pnl:       +pnl.toFixed(2),
-      pnl_pct:   +pnlPct.toFixed(2),
-      opened_at: d.toISOString(),
-      closed_at: new Date(d.getTime() + Math.random() * 3_600_000).toISOString(),
-      duration:  `${Math.floor(Math.random() * 120) + 5}m`,
-      status:    'closed',
-    } as TradeRecord
-  })
-}
-
 export function demoRegime(): RegimeInfo {
   return {
     regime: 'risk_on',

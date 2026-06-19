@@ -256,64 +256,18 @@ export async function getFills(creds: AlpacaCreds, pageSize = 200): Promise<Alpa
 }
 
 /**
- * Compute per-trade win rate from Alpaca fill activities using FIFO matching.
- * A "trade" completes when a position in a symbol returns to flat (qty ≈ 0).
- * Accumulates P&L across multiple partial fills so multi-fill closes are counted.
+ * Merge two trade lists, preferring `primary` records when both share the same
+ * ticker + date key. Returns a single list sorted newest-first.
  */
-export function winRateFromFills(fills: AlpacaFill[]): number | null {
-  const pos: Record<string, { qty: number; avgCost: number; runningPnl: number }> = {}
-  let wins = 0, total = 0
-  const EPS = 0.0001
-
-  for (const f of fills) {
-    const qty   = parseFloat(f.qty)
-    const price = parseFloat(f.price)
-    const sym   = f.symbol
-    if (!pos[sym]) pos[sym] = { qty: 0, avgCost: 0, runningPnl: 0 }
-    const p = pos[sym]
-
-    if (f.side === 'buy') {
-      if (p.qty < 0) {
-        // Covering a short — accumulate P&L for this partial close
-        const cover   = Math.min(qty, -p.qty)
-        p.runningPnl += (p.avgCost - price) * cover
-        p.qty        += cover
-        if (Math.abs(p.qty) < EPS) {
-          // Position fully closed — record the trade
-          total++; if (p.runningPnl > 0) wins++
-          p.runningPnl = 0; p.avgCost = 0; p.qty = 0
-        }
-        // Any remaining qty opens a new long
-        const rem = qty - cover
-        if (rem > EPS) { p.qty = rem; p.avgCost = price; p.runningPnl = 0 }
-      } else {
-        // Adding to / opening a long (weighted avg cost)
-        p.avgCost = (p.avgCost * p.qty + price * qty) / (p.qty + qty)
-        p.qty    += qty
-      }
-    } else {
-      if (p.qty > 0) {
-        // Selling a long — accumulate P&L for this partial close
-        const sell    = Math.min(qty, p.qty)
-        p.runningPnl += (price - p.avgCost) * sell
-        p.qty        -= sell
-        if (Math.abs(p.qty) < EPS) {
-          // Position fully closed — record the trade
-          total++; if (p.runningPnl > 0) wins++
-          p.runningPnl = 0; p.avgCost = 0; p.qty = 0
-        }
-        // Any remaining qty opens a new short
-        const rem = qty - sell
-        if (rem > EPS) { p.qty = -rem; p.avgCost = price; p.runningPnl = 0 }
-      } else {
-        // Adding to / opening a short (weighted avg cost)
-        p.avgCost = (p.avgCost * (-p.qty) + price * qty) / (-p.qty + qty)
-        p.qty    -= qty
-      }
-    }
-  }
-
-  return total > 0 ? +(wins / total * 100).toFixed(1) : null
+export function mergeTrades(
+  primary:   import('@/types/trading').TradeRecord[],
+  secondary: import('@/types/trading').TradeRecord[],
+): import('@/types/trading').TradeRecord[] {
+  const keys = new Set(primary.map(t => `${t.ticker}-${t.opened_at?.slice(0, 10)}`))
+  return [
+    ...primary,
+    ...secondary.filter(t => !keys.has(`${t.ticker}-${t.opened_at?.slice(0, 10)}`)),
+  ].sort((a, b) => (b.opened_at ?? '').localeCompare(a.opened_at ?? ''))
 }
 
 /**

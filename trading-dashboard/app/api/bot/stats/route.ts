@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { botGet } from '@/lib/bot-api'
-import { getAccount, getPortfolioHistory, getOrders, tradesFromOrders } from '@/lib/alpaca'
+import { getAccount, getPortfolioHistory, getOrders, tradesFromOrders, mergeTrades } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { demoStats } from '@/lib/api'
 import type { PortfolioStats, TradeRecord } from '@/types/trading'
@@ -35,12 +35,9 @@ export async function GET() {
     // Compute win rate from real trades.
     // Primary: bot history (has exact P&L per trade).
     // Fallback: FIFO-match Alpaca closed orders (guaranteed to work regardless of bot state).
-    const botTrades = tradeHistory.status === 'fulfilled' ? tradeHistory.value : []
-    const orderTrades = closedOrders.status === 'fulfilled' ? tradesFromOrders(closedOrders.value) : []
-    const allTrades = [
-      ...botTrades,
-      ...orderTrades.filter(t => !botTrades.some(b => b.ticker === t.ticker && b.opened_at?.slice(0,10) === t.opened_at?.slice(0,10))),
-    ]
+    const botTrades   = tradeHistory.status   === 'fulfilled' ? tradeHistory.value               : []
+    const orderTrades = closedOrders.status   === 'fulfilled' ? tradesFromOrders(closedOrders.value) : []
+    const allTrades   = mergeTrades(botTrades, orderTrades)
     const computed = winRateFromHistory(allTrades)
     if (computed) {
       stats.win_rate     = computed.win_rate
