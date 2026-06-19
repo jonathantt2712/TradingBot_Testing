@@ -110,16 +110,13 @@ export function Sidebar({ email }: SidebarProps) {
 
       {/* Footer */}
       <div className="border-t border-bg-border px-3 py-3 space-y-0.5">
-        {email && (
-          <Link
-            href="/profile"
-            className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-subtle hover:bg-bg-hover hover:text-primary transition-colors"
-            title={email}
-          >
-            <User className="h-4 w-4 shrink-0" />
-            <span className="truncate">{email}</span>
-          </Link>
-        )}
+        <Link
+          href="/profile"
+          className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-subtle hover:bg-bg-hover hover:text-primary transition-colors"
+        >
+          <User className="h-4 w-4 shrink-0" />
+          Profile
+        </Link>
         <Link
           href="/settings"
           className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-subtle hover:bg-bg-hover hover:text-primary transition-colors"
