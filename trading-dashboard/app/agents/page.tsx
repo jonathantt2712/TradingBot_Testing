@@ -2,9 +2,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { RefreshCw, Wifi, WifiOff, Clock } from 'lucide-react'
 import { demoRegime, demoRecommendations, api } from '@/lib/api'
-import { TickerBriefCard } from '@/components/agents/TickerBriefCard'
-import { cn } from '@/lib/utils'
-import { regimeLabel, regimeColor } from '@/lib/utils'
+import { AGENT_ORDER } from '@/lib/agents'
+import { AgentOverviewCard } from '@/components/agents/AgentOverviewCard'
+import { cn, regimeLabel, regimeColor } from '@/lib/utils'
 import type { TradeRecommendation, RegimeInfo } from '@/types/trading'
 
 const REFRESH_MS = 30_000
@@ -49,8 +49,6 @@ export default function AgentsPage() {
     .sort()
     .at(-1) ?? null
 
-  const sorted = [...recommendations].sort((a, b) => b.composite_score - a.composite_score)
-
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 max-w-[900px] mx-auto">
       {/* Header */}
@@ -76,17 +74,17 @@ export default function AgentsPage() {
         </div>
       </div>
 
-      {/* Ticker cards sorted by conviction */}
-      {sorted.length > 0 ? (
+      {/* Agent cards — one per agent, showing what each agent observed */}
+      {recommendations.length > 0 ? (
         <div className="space-y-3">
-          {sorted.map(rec => (
-            <TickerBriefCard key={rec.id} rec={rec} />
+          {AGENT_ORDER.map(role => (
+            <AgentOverviewCard key={role} role={role} recommendations={recommendations} />
           ))}
         </div>
       ) : (
         <div className="rounded-xl border border-bg-border bg-bg-card px-6 py-12 text-center">
-          <p className="text-sm text-muted">No trade recommendations right now.</p>
-          <p className="text-xs text-muted mt-1">The bot will post here when it sees a setup worth taking.</p>
+          <p className="text-sm text-muted">No agent data right now.</p>
+          <p className="text-xs text-muted mt-1">Agents will post their analysis once the bot runs a scan.</p>
         </div>
       )}
     </div>
