@@ -67,7 +67,8 @@ export function PnLAnalytics({ pnl, stats, trades, live, attribution, monteCarlo
     { label: 'Today',         value: formatCurrency(stats.today_pnl),    sub: 'Current session',   color: stats.today_pnl  >= 0 ? 'text-bull' : 'text-bear' },
     { label: 'Win Rate',      value: `${stats.win_rate.toFixed(1)}%`,    sub: `${wins}W / ${losses}L`, color: 'text-brand-cyan' },
     { label: 'Max Drawdown',  value: formatPct(stats.max_drawdown),      sub: 'Peak → trough',     color: 'text-bear'       },
-    { label: 'Sharpe',        value: stats.sharpe_ratio.toFixed(2),      sub: 'Risk-adj return',   color: 'text-caution'    },
+    { label: 'Sharpe',        value: stats.sharpe_ratio.toFixed(2),      sub: 'Risk-adj return',   color: 'text-caution',
+      tooltip: 'Sharpe ratio: annualized avg daily P&L ÷ its standard deviation. Measures risk-adjusted return — how much gain per unit of volatility. Above 1.0 is good; above 2.0 is excellent; below 0 means losing money on average.' },
     { label: 'Avg R/R',       value: `${stats.avg_rr.toFixed(2)}x`,      sub: 'Expected value',    color: 'text-brand-cyan' },
   ]
 
@@ -87,8 +88,11 @@ export function PnLAnalytics({ pnl, stats, trades, live, attribution, monteCarlo
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
         {summaryCards.map(c => (
-          <div key={c.label} className="card p-4">
-            <p className="stat-label text-[10px]">{c.label}</p>
+          <div key={c.label} className="card p-4" title={(c as any).tooltip}>
+            <p className="stat-label text-[10px] flex items-center gap-1">
+              {c.label}
+              {(c as any).tooltip && <span className="text-muted opacity-60 cursor-help">ⓘ</span>}
+            </p>
             <p className={cn('mt-1 text-xl font-bold font-mono', c.color)}>{c.value}</p>
             <p className="mt-0.5 text-[10px] text-muted">{c.sub}</p>
           </div>

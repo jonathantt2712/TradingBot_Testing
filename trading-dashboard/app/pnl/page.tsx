@@ -22,6 +22,16 @@ function histToPnL(h: PortfolioHistory): PnLPoint[] {
     }))
 }
 
+function computeSharpe(pnl: PnLPoint[]): number | null {
+  const vals = pnl.map(p => p.daily_pnl).filter(v => isFinite(v))
+  if (vals.length < 5) return null
+  const mean = vals.reduce((s, v) => s + v, 0) / vals.length
+  const variance = vals.reduce((s, v) => s + (v - mean) ** 2, 0) / (vals.length - 1)
+  const std = Math.sqrt(variance)
+  if (std < 0.01) return null
+  return +(mean / std * Math.sqrt(252)).toFixed(2)
+}
+
 async function loadPnL(creds: AlpacaCreds | null) {
   const [pnl, stats, account, history, botHistory, fillsResult, attrResult, mcResult, regimeResult] = await Promise.allSettled([
     botGet<PnLPoint[]>('/api/pnl'),
@@ -78,6 +88,10 @@ async function loadPnL(creds: AlpacaCreds | null) {
     resolvedStats.win_rate     = +(wins / closedWithPnl.length * 100).toFixed(1)
     resolvedStats.total_trades = closedWithPnl.length
   }
+
+  // Compute Sharpe ratio from real daily P&L series (mean/std * sqrt(252))
+  const sharpe = computeSharpe(resolvedPnl)
+  if (sharpe !== null) resolvedStats.sharpe_ratio = sharpe
 
   const live = history.status === 'fulfilled' || account.status === 'fulfilled' || pnl.status === 'fulfilled'
   const attribution  = attrResult.status   === 'fulfilled' ? attrResult.value   : undefined
