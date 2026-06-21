@@ -118,6 +118,11 @@ class Settings:
     eod_flatten:             bool = field(default_factory=lambda: _env_bool("EOD_FLATTEN", True))
     eod_flatten_min_before:  int  = field(default_factory=lambda: int(_env_float("EOD_FLATTEN_MIN_BEFORE", 5)))
 
+    # End-of-day desk note: publish a summary of the day's activity this many
+    # minutes before the close (after the flatten). Runs in live and dry-run.
+    eod_report:             bool = field(default_factory=lambda: _env_bool("EOD_REPORT", True))
+    eod_report_min_before:  int  = field(default_factory=lambda: int(_env_float("EOD_REPORT_MIN_BEFORE", 2)))
+
     broker:         str = field(default_factory=lambda: _env("BROKER", "alpaca").lower())
     ibkr_host:      str = field(default_factory=lambda: _env("IBKR_HOST", "127.0.0.1"))
     ibkr_port:      int = field(default_factory=lambda: int(_env("IBKR_PORT", "7497")))

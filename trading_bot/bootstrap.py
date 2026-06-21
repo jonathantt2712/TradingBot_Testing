@@ -40,7 +40,9 @@ from agents.insider_agent import InsiderAgent  # noqa: E402
 from agents.squeeze_agent import SqueezeAgent  # noqa: E402
 from agents.technical_agent import TechnicalAgent  # noqa: E402
 from agents.vision_agent import VisionAgent  # noqa: E402
+from agents.report_agent import EODReportAgent  # noqa: E402
 from data.news_sources import AlpacaNewsSource, NewsSource, PoliStockSource  # noqa: E402
+from data.telegram_publisher import TelegramPublisher  # noqa: E402
 from execution.alpaca_broker import AlpacaBroker  # noqa: E402
 from execution.base_broker import BaseBroker  # noqa: E402
 from execution.ibkr_broker import IBKRBroker  # noqa: E402
@@ -168,4 +170,36 @@ async def eod_flatten_loop(broker: BaseBroker, settings: Settings) -> None:
                 flattened_on = now.date()
             else:
                 logger.error("EOD flatten failed — will retry next minute")
+        await asyncio.sleep(60)
+
+
+async def eod_report_loop(settings: Settings) -> None:
+    """Publish an end-of-day desk note once per trading day near the close.
+
+    Fires in the window [close - eod_report_min_before, close); checks once a
+    minute. Reads only the bot's own recorded activity (audit log / trade
+    history / memory), so it runs in both live and dry-run modes. Logs the
+    report and pushes it to Telegram when configured.
+    """
+    if not settings.eod_report:
+        logger.info("EOD report disabled (EOD_REPORT=false)")
+        return
+
+    agent = EODReportAgent(gemini_api_key=settings.gemini_api_key)
+    publisher = TelegramPublisher(settings.telegram_bot_token, settings.telegram_chat_id)
+    reported_on = None
+    while True:
+        now = datetime.now(_ET)
+        is_weekday = now.weekday() < 5
+        close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        window_start = close - timedelta(minutes=settings.eod_report_min_before)
+
+        if is_weekday and window_start <= now < close and reported_on != now.date():
+            try:
+                report = await agent.generate()
+                logger.info("EOD REPORT:\n%s", report)
+                await publisher.send_report(report)
+                reported_on = now.date()
+            except Exception:
+                logger.exception("EOD report failed — will retry next minute")
         await asyncio.sleep(60)

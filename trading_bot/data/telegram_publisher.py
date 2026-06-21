@@ -57,6 +57,11 @@ class TelegramPublisher:
         except Exception as exc:
             logger.warning("Telegram send error: %s", exc)
 
+    async def send_report(self, text: str) -> None:
+        """Send a plain end-of-day desk note (no-ops if not configured)."""
+        if text:
+            await self._send(f"<b>📊 EOD Report</b>\n{text[:3900]}")
+
     async def send_gapper_alert(self, gappers: list[dict[str, Any]]) -> None:
         """Send a pre-market gapper alert with the top candidates."""
         if not gappers:

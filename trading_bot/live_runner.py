@@ -29,7 +29,10 @@ from zoneinfo import ZoneInfo
 
 
 import bootstrap  # loads .env files on import — keep first
-from bootstrap import build_broker, build_manager, eod_flatten_loop, refresh_market_context
+from bootstrap import (
+    build_broker, build_manager, eod_flatten_loop, eod_report_loop,
+    refresh_market_context,
+)
 from config.settings import load_settings
 from core.models import AnalysisContext
 from data.chart_renderer import render_chart
@@ -446,6 +449,7 @@ async def main(tickers: Sequence[str]) -> None:
                 scanner_cfg=settings.scanner if universe else None,
             ),
             strategy_refresh_loop(pm, interval_min=STRATEGY_REFRESH_MIN),
+            eod_report_loop(settings),
         ]
         if universe is not None:
             loops.append(
