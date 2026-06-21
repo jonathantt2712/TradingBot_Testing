@@ -58,11 +58,24 @@ _VISION_MODEL_DEFAULT    = "claude-sonnet-4-6"
 
 # Substrings that mark an authentication/authorization failure — a bad/expired
 # key that retrying can NEVER fix (unlike a timeout or a 429 quota blip).
+# NOTE: do NOT use bare "401"/"403" — they false-match digit runs inside project
+# IDs / numeric values in error payloads (that mislabelled a 429 as "key rejected").
 _AUTH_MARKERS = (
-    "401", "403", "unauthenticated", "permission_denied", "permission denied",
-    "api key not valid", "invalid api key", "invalid authentication",
-    "access_token_type_unsupported", "api_key_invalid",
+    "unauthenticated", "permission_denied", "permission denied", "unauthorized",
+    "forbidden", "api key not valid", "invalid api key", "invalid authentication",
+    "access_token_type_unsupported", "api_key_invalid", "api key expired",
+    "expired api key", "missing api key",
 )
+# Quota / rate-limit markers — the key is VALID, just throttled. Transient: never
+# disable the provider, and never call it an auth error.
+_QUOTA_MARKERS = (
+    "resource_exhausted", "quota", "rate limit", "ratelimit",
+    "too many requests", "exceeded your",
+)
+
+
+def _is_quota_error(exc: object) -> bool:
+    return any(m in str(exc).lower() for m in _QUOTA_MARKERS)
 
 # Providers whose key has been rejected this process; keyed by provider+fingerprint
 # so a fixed key (after restart) starts clean. Shared across all LLMAdapter
@@ -72,6 +85,8 @@ _disabled_providers: set[str] = set()
 
 def _is_auth_error(exc: object) -> bool:
     s = str(exc).lower()
+    if any(m in s for m in _QUOTA_MARKERS):   # quota/rate-limit is NOT an auth failure
+        return False
     return any(m in s for m in _AUTH_MARKERS)
 
 
@@ -117,6 +132,18 @@ class LLMAdapter:
             f"{env} was rejected by the provider (auth error: {str(exc)[:80]}).",
             remediation=(f"Set a valid {env} and restart. Until then the LLM agents "
                          "fall back to keyword/FinBERT scoring."),
+        )
+
+    @staticmethod
+    def _report_quota(provider: str, exc: object) -> None:
+        """Quota/rate-limit hit — the key is valid, just throttled. Don't disable."""
+        health.report_issue(
+            f"llm_quota:{provider}",
+            f"{provider.title()} API quota / rate limit reached — the key is valid, "
+            "just throttled.",
+            remediation="LLM agents use keyword/FinBERT fallback until it resets; "
+                        "raise your plan limit (or wait for the daily reset) to remove the cap.",
+            severity="warning",
         )
 
     @property
@@ -185,6 +212,9 @@ class LLMAdapter:
                 if _is_auth_error(exc):
                     self._disable("gemini", exc)   # bad key — retrying can't help
                     return None
+                if _is_quota_error(exc):
+                    self._report_quota("gemini", exc)  # valid key, throttled — fall back now
+                    return None
                 logger.warning("Gemini chat attempt %d failed: %s", attempt + 1, exc)
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (attempt + 1))
@@ -211,6 +241,9 @@ class LLMAdapter:
                 if _is_auth_error(exc):
                     self._disable("gemini", exc)
                     return None
+                if _is_quota_error(exc):
+                    self._report_quota("gemini", exc)
+                    return None
                 logger.warning("Gemini vision attempt %d failed: %s", attempt + 1, exc)
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (attempt + 1))
@@ -234,6 +267,8 @@ class LLMAdapter:
         except Exception as exc:
             if _is_auth_error(exc):
                 self._disable("anthropic", exc)
+            elif _is_quota_error(exc):
+                self._report_quota("anthropic", exc)
             else:
                 logger.debug("Anthropic chat failed: %s", exc)
             return None
@@ -258,6 +293,8 @@ class LLMAdapter:
         except Exception as exc:
             if _is_auth_error(exc):
                 self._disable("anthropic", exc)
+            elif _is_quota_error(exc):
+                self._report_quota("anthropic", exc)
             else:
                 logger.debug("Anthropic vision failed: %s", exc)
             return None

@@ -21,6 +21,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from core import health
 from core.base_agent import NEUTRAL_SCORE, BaseAgent, clamp_score
 from core.enums import AgentRole
 from core.models import AgentEvaluation, AnalysisContext
@@ -239,8 +240,18 @@ class InsiderAgent(BaseAgent):
             if isinstance(data, list):
                 self._cache    = data
                 self._cache_ts = now
+                health.resolve("data:congressional")
                 logger.info("InsiderAgent: loaded %d congressional transactions", len(data))
                 return data
         except Exception as exc:
             logger.warning("InsiderAgent: fetch failed: %s", exc)
+        # No data fetched — tell the operator it's a feed problem, not a bug.
+        # (No key or user input is needed; the source is free and public.)
+        health.report_issue(
+            "data:congressional",
+            "Congressional-trades feed (House Stock Watcher) is unreachable.",
+            remediation="No key/input needed — it's free public data; check the backend's "
+                        "outbound network. Insider agent stays neutral until it's reachable.",
+            severity="warning",
+        )
         return None

@@ -37,9 +37,10 @@ class RiskAgent(BaseAgent):
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
         # Fail closed on stale data: a halt/feed-gap/weekend snapshot would have
-        # us size against a price that no longer exists. Skip in backtests, whose
-        # historical bars are "stale" only by wall-clock definition.
-        if not getattr(ctx, "backtest_mode", False):
+        # us size against a price that no longer exists. Skip in backtests (whose
+        # bars are "stale" only by wall-clock) and when freshness isn't enforced
+        # (the dashboard's analysis view, which shows plans on the last close).
+        if not getattr(ctx, "backtest_mode", False) and getattr(ctx, "enforce_freshness", True):
             stale, reason = bar_staleness(ctx.bars, max_age_factor=self.cfg.max_bar_age_factor)
             if stale:
                 return AgentEvaluation(

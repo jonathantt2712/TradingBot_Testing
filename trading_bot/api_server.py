@@ -170,18 +170,19 @@ async def _evaluate(ctx: "AnalysisContext"):
     if not _AGENTS_AVAILABLE or _pm is None:
         return None
 
+    from dataclasses import replace
+    # The dashboard is an analysis view, not live execution — don't fail-closed on
+    # stale bars (after hours the last bar is naturally old), so Risk still shows a
+    # plan on the most recent close. live_runner keeps enforce_freshness=True.
+    ctx = replace(ctx, enforce_freshness=False)
+
     # Build chart image path for VisionAgent (render async in thread)
     chart_path = None
     if _pm.vision is not None and ctx.bars is not None:
         try:
             from data.chart_renderer import render_chart
             chart_path = await asyncio.to_thread(render_chart, ctx.ticker, ctx.bars)
-            ctx = type(ctx)(
-                ticker=ctx.ticker,
-                bars=ctx.bars,
-                account=ctx.account,
-                chart_image_path=chart_path,
-            )
+            ctx = replace(ctx, chart_image_path=chart_path)
         except Exception:
             pass
 
@@ -1100,7 +1101,12 @@ async def _run_premarket_scan() -> None:
         logger.warning("Pre-market scan failed: %s", exc)
 
 
-async def _run_market_scan() -> None:
+async def _run_market_scan(force: bool = False) -> None:
+    """Scan the universe and refresh recommendations/agent readings.
+
+    ``force=True`` (a manual scan from the dashboard button) bypasses the
+    off-hours hourly throttle so a click always runs a fresh scan.
+    """
     _reset_scan_stats_if_needed()
 
     if not _ALPACA_KEY or not _ALPACA_SECRET:
@@ -1111,7 +1117,7 @@ async def _run_market_scan() -> None:
         # Off-hours: throttle to one scan per hour. Each scan runs LLM agents
         # on ~20 symbols; every 5 min all night burns quota for stale signals.
         last = _scan_stats.get("last_scan_at")
-        if last:
+        if last and not force:
             try:
                 age_min = (datetime.utcnow() - datetime.fromisoformat(last)).total_seconds() / 60
                 if age_min < 60:
@@ -1119,7 +1125,8 @@ async def _run_market_scan() -> None:
             except Exception:
                 pass
         _scan_stats["market_closed_skips"] += 1
-        logger.info("Market closed — hourly off-hours scan (#%d today)", _scan_stats["market_closed_skips"])
+        logger.info("Market closed — %s scan (#%d today)",
+                    "manual" if force else "hourly off-hours", _scan_stats["market_closed_skips"])
 
     open_trades = [t for t in _load(TRADES_FILE, []) if t.get("status") == "open"]
     if len(open_trades) >= MAX_OPEN_POSITIONS:
@@ -2665,7 +2672,7 @@ async def execute_trade(body: ExecuteBody):
 
 @app.post("/api/scan", dependencies=[Depends(_verify_bot_secret)])
 async def trigger_scan():
-    asyncio.create_task(_run_market_scan())
+    asyncio.create_task(_run_market_scan(force=True))
     return {"status": "scan_triggered", "timestamp": datetime.utcnow().isoformat()}
 
 

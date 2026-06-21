@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from core import health, llm_adapter
-from core.llm_adapter import LLMAdapter, _is_auth_error
+from core.llm_adapter import LLMAdapter, _is_auth_error, _is_quota_error
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +33,24 @@ def test_auth_errors_detected(msg):
 ])
 def test_non_auth_errors_not_flagged(msg):
     assert _is_auth_error(Exception(msg)) is False
+
+
+def test_quota_429_is_not_auth():
+    # The real bug: a 429 quota error (valid key, throttled) must NOT be treated
+    # as a rejected key — even when a stray "401"/"403" appears inside an ID.
+    msg = ("429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded "
+           "your current quota', 'status': 'RESOURCE_EXHAUSTED', "
+           "'details': [{'project': 'projects/403129955401'}]}}")
+    assert _is_quota_error(Exception(msg)) is True
+    assert _is_auth_error(Exception(msg)) is False
+
+
+def test_quota_error_does_not_disable_provider():
+    a = LLMAdapter(gemini_key="valid-key")
+    a._report_quota("gemini", Exception("429 RESOURCE_EXHAUSTED"))
+    assert a._disabled("gemini") is False          # key still usable once it resets
+    assert a.has_llm is True
+    assert any(i.key == "llm_quota:gemini" for i in health.active_issues())
 
 
 def test_auth_failure_disables_provider_and_reports():

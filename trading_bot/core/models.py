@@ -50,6 +50,10 @@ class AnalysisContext:
     backtest_mode:    bool                   = False  # True → point-in-time-only agents
                                                       # (macro/insider/squeeze/social) return
                                                       # neutral to avoid look-ahead bias
+    enforce_freshness: bool                  = True   # True (live) → RiskAgent vetoes stale
+                                                      # bars. The dashboard sets False: it's
+                                                      # analysis, not execution, so it shows
+                                                      # plans on the last close after hours.
 
     @property
     def last_price(self) -> Optional[float]:
