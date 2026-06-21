@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import statistics
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
@@ -22,6 +23,7 @@ from config.settings import DecisionThresholds, Settings
 from core.enums import AgentRole, Decision, OrderSide
 from core.models import AgentEvaluation, AnalysisContext, TradeDecision
 from core.trade_memory import TradeMemory
+from core.weight_tuner import WeightTuner
 from agents.fundamental_agent import FundamentalAgent
 from agents.liquid_agent import LiquidAgent
 from agents.regime_agent import MarketRegime, RegimeSnapshot
@@ -41,8 +43,9 @@ _ET = ZoneInfo("America/New_York")
 # Audit trail: one JSON line per decision/fill, next to the other debug logs.
 _AUDIT_FILE = Path(__file__).parents[2] / "logs" / "decisions.jsonl"
 
-# Runtime tuning file — written by the self-tuner and the optimizer's Apply action.
+# Runtime tuning file — written by the WeightTuner and the optimizer's Apply action.
 _WEIGHTS_FILE = Path(__file__).parents[1] / "data" / "strategy_weights.json"
+_TUNED_WEIGHTS_TTL = 60.0  # seconds between file re-reads in _live_weight()
 
 # Coarse correlation groups for the concentration cap. A symbol may belong to
 # several groups; the cap trips if ANY of its groups is already at the limit.
@@ -94,6 +97,10 @@ class PortfolioManager:
         self._weights = settings.weights.as_map()
         self._thresholds: DecisionThresholds = settings.thresholds
         self._regime: Optional[RegimeSnapshot] = None
+        # Online learning: tuner re-weights agents from resolved trade outcomes
+        self._tuner = WeightTuner(self._weights)
+        self._tuned_weights: dict = {}
+        self._tuned_weights_ts: float = 0.0
         # Data-derived correlation graph for the concentration cap; None until a
         # runner builds and injects it, in which case the static groups are used.
         self._corr_graph = None
@@ -373,6 +380,7 @@ class PortfolioManager:
                             sym, last_upl, len(self._recent_stops))
             try:
                 self._memory.record_outcome(sym, last_upl)
+                self._tuner.update(self._memory)
             except Exception:
                 logger.debug("memory record_outcome failed", exc_info=True)
 
@@ -489,9 +497,14 @@ class PortfolioManager:
             # its outcome (resolved by _observe_positions when the position exits).
             try:
                 meta = decision.decision_meta or {}
+                agent_scores = {
+                    e.role.value: e.score
+                    for e in decision.evaluations if e is not None
+                }
                 self._memory.record_decision(
                     decision.ticker, decision.decision.value, decision.composite_score,
                     factors=meta.get("key_factors"), concerns=meta.get("concerns"),
+                    agent_scores=agent_scores,
                 )
             except Exception:
                 logger.debug("memory record_decision failed", exc_info=True)
@@ -652,6 +665,21 @@ class PortfolioManager:
             return 0.0
         return float(statistics.pstdev(scores))
 
+    def _live_weight(self, key: str) -> float:
+        """Agent base weight: tuned value from disk (TTL-cached) or settings default."""
+        now = time.monotonic()
+        if now - self._tuned_weights_ts > _TUNED_WEIGHTS_TTL:
+            try:
+                w = json.loads(_WEIGHTS_FILE.read_text())
+                if w.get("live_tuning_active") and isinstance(w.get("agent_weights"), dict):
+                    self._tuned_weights = w["agent_weights"]
+                else:
+                    self._tuned_weights = {}
+            except Exception:
+                self._tuned_weights = {}
+            self._tuned_weights_ts = now
+        return self._tuned_weights.get(key) or self._weights.get(key, 0.0)
+
     def _composite(
         self,
         f: AgentEvaluation,
@@ -684,7 +712,7 @@ class PortfolioManager:
         for key, ev in agents:
             if ev is None:
                 continue
-            base_w = self._weights.get(key, 0.0)
+            base_w = self._live_weight(key)
             regime_mult = multipliers.get(key, 1.0)
             w = base_w * regime_mult * max(ev.confidence, 0.05)
             num += ev.score * w

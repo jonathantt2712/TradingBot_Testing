@@ -59,6 +59,7 @@ class TradeMemory:
         *,
         factors: Optional[list] = None,
         concerns: Optional[list] = None,
+        agent_scores: Optional[dict] = None,
     ) -> None:
         """Append a directional decision (LONG/SHORT). PASS is not remembered."""
         if str(decision).upper() not in ("LONG", "SHORT"):
@@ -71,6 +72,7 @@ class TradeMemory:
             "composite": round(float(composite), 1),
             "factors": (factors or [])[:2],
             "concerns": (concerns or [])[:1],
+            "agent_scores": agent_scores or {},
             "outcome_pnl": None,
         })
         self._save(entries)
