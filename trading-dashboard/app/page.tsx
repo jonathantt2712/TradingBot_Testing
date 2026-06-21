@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic'
 
 import { AccountBar }     from '@/components/dashboard/AccountBar'
+import { HealthBanner, type HealthIssue } from '@/components/dashboard/HealthBanner'
 import { LiveDashboard }  from '@/components/dashboard/LiveDashboard'
 import { RefreshButton }  from '@/components/layout/RefreshButton'
 import {
@@ -21,7 +22,7 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     botGet<PnLPoint[]>('/api/pnl'),
     botGet<RegimeInfo>('/api/regime'),
     botGet<SectorStat[]>('/api/sectors'),
-    botGet<{ trading?: { mode_label?: string; execute_live?: boolean; paper_mode?: boolean } }>('/api/health'),
+    botGet<{ trading?: { mode_label?: string; execute_live?: boolean; paper_mode?: boolean }; issues?: HealthIssue[] }>('/api/health'),
   ])
 
   const accountErrorDetail = account.status === 'rejected'
@@ -51,6 +52,10 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     ? (health.value?.trading?.mode_label ?? 'DRY RUN')
     : 'DRY RUN'
 
+  const issues: HealthIssue[] = health.status === 'fulfilled'
+    ? (health.value?.issues ?? [])
+    : []
+
   return {
     stats:        resolvedStats,
     account:      account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
@@ -61,12 +66,13 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     positions:    positions.status === 'fulfilled' ? positions.value : [],
     live:         account.status === 'fulfilled',
     tradingMode,
+    issues,
   }
 }
 
 export default async function DashboardPage() {
   const creds = await getAlpacaCreds()
-  const { stats, account, accountError, pnl, regime, sectors, positions, live, tradingMode } = await loadDashboard(creds)
+  const { stats, account, accountError, pnl, regime, sectors, positions, live, tradingMode, issues } = await loadDashboard(creds)
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">
@@ -87,6 +93,8 @@ export default async function DashboardPage() {
       </div>
 
       <AccountBar account={account} error={accountError} tradingMode={tradingMode} />
+
+      <HealthBanner issues={issues} />
 
       <LiveDashboard
         initialStats={stats}

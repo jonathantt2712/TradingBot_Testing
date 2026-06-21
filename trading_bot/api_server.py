@@ -136,6 +136,13 @@ try:
 
     _settings = load_settings()
     _pm = build_manager(_settings, broker=None)
+    # Populate the health board with any missing-config issues up front, so the
+    # dashboard can tell the operator what the bot needs (keys, account, etc.).
+    try:
+        from bootstrap import preflight_checks
+        preflight_checks(_settings)
+    except Exception:
+        logger.debug("preflight_checks failed", exc_info=True)
     # Dashboard scans fetch ~100-bar windows (vs 200 live) — keep the lower
     # bar requirement this endpoint has always used.
     _pm.technical.min_bars = 30
@@ -2927,7 +2934,26 @@ def health():
             "anthropic": anthropic_set,
             "vision_ready": gemini_set or anthropic_set,
         },
+        "issues": _health_issues(),
     }
+
+
+def _health_issues() -> list:
+    """Actionable issues the operator needs to fix (rejected key, no equity, …)."""
+    try:
+        from core import health
+        return [
+            {
+                "key":         i.key,
+                "message":     i.message,
+                "remediation": i.remediation,
+                "severity":    i.severity,
+                "count":       i.count,
+            }
+            for i in health.active_issues()
+        ]
+    except Exception:
+        return []
 
 
 @app.get("/api/agent-attribution", dependencies=[Depends(_verify_bot_secret)])

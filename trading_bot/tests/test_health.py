@@ -1,7 +1,12 @@
 """Operator health board: dedup, alert queue, formatting."""
+import asyncio
+
 import pytest
 
 from core import health
+from core.base_agent import BaseAgent
+from core.enums import AgentRole
+from core.models import AnalysisContext
 
 
 @pytest.fixture(autouse=True)
@@ -51,3 +56,33 @@ def test_format_block_lists_issues():
     assert "NEEDS ATTENTION" in block
     assert "Alpaca keys missing" in block
     assert "set them" in block
+
+
+# ── agent degradation surfaces on the board ──────────────────────────────────
+
+class _BoomAgent(BaseAgent):
+    role = AgentRole.TECHNICAL
+
+    async def evaluate(self, ctx):
+        raise RuntimeError("data source down")
+
+
+def test_failing_agent_reports_and_returns_neutral():
+    ev = asyncio.run(_BoomAgent().safe_evaluate(AnalysisContext(ticker="X")))
+    assert ev.score == 50.0                       # neutral fallback (the flat value)
+    issues = {i.key: i for i in health.active_issues()}
+    assert "agent:technical" in issues
+    assert "data source down" in issues["agent:technical"].message
+
+
+def test_risk_no_equity_reports_issue(flat_bars):
+    from agents.risk_agent import RiskAgent
+    from config.settings import RiskConfig
+    from core.enums import Decision
+
+    plan = RiskAgent(RiskConfig()).build_plan(
+        AnalysisContext(ticker="X", bars=flat_bars, account={"equity": 0.0}),
+        intended=Decision.LONG,
+    )
+    assert plan is None                            # fail closed
+    assert any(i.key == "risk:no_equity" for i in health.active_issues())

@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from config.settings import RiskConfig
+from core import health
 from core.base_agent import BaseAgent, clamp_score
 from core.enums import AgentRole, Decision
 from core.freshness import bar_staleness
@@ -171,6 +172,15 @@ class RiskAgent(BaseAgent):
         if equity <= 0:
             # Fail closed: without verified equity we cannot size a position.
             # (A broker API hiccup must never trade against fabricated capital.)
+            # This is why Risk shows a flat veto for every ticker — surface it.
+            if not getattr(ctx, "backtest_mode", False):
+                health.report_issue(
+                    "risk:no_equity",
+                    "RiskAgent can't size positions — no verified account equity.",
+                    remediation="Connect a funded/paper Alpaca account "
+                                "(ALPACA_API_KEY_ID / ALPACA_API_SECRET); until then every "
+                                "trade is vetoed.",
+                )
             logger.error("no account equity in context — refusing to build a plan")
             return None
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 
+from core import health
 from core.enums import AgentRole
 from core.models import AgentEvaluation, AnalysisContext
 
@@ -30,10 +31,22 @@ class BaseAgent(ABC):
         """Run the agent and return a scored evaluation."""
 
     async def safe_evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
-        """Wrapper that catches exceptions and returns neutral score on failure."""
+        """Wrapper that catches exceptions and returns neutral score on failure.
+
+        A crash here is why an agent shows a flat neutral 50 for every ticker, so
+        we surface it on the health board (deduped per agent) — that turns a
+        silent "all 50" into a visible "this agent is failing, here's why".
+        """
         try:
             return await self.evaluate(ctx)
         except Exception as exc:
+            health.report_issue(
+                f"agent:{self.role.value}",
+                f"{self.__class__.__name__} is failing ({str(exc)[:80]}).",
+                remediation="It returns a neutral 50 until fixed — check its data "
+                            "source / network / API key.",
+                severity="warning",
+            )
             logger.warning("%s failed for %s: %s", self.__class__.__name__, ctx.ticker, exc)
             return AgentEvaluation(
                 role=self.role,
