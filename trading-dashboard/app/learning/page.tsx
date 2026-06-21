@@ -42,6 +42,20 @@ export default function LearningPage() {
   const [data,    setData]    = useState<LearningData | null>(null)
   const [live,    setLive]    = useState(false)
   const [loading, setLoading] = useState(true)
+  const [simulating, setSimulating] = useState(false)
+
+  const runSimulation = useCallback(async () => {
+    setSimulating(true)
+    try {
+      const d = await api.simulateLearning()
+      setData(d)
+      setLive(true)
+    } catch {
+      /* leave the empty state in place */
+    } finally {
+      setSimulating(false)
+    }
+  }, [])
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -102,6 +116,7 @@ export default function LearningPage() {
           {data?.active
             ? <span className="rounded-full border border-bull/30 bg-bull/10 px-3 py-0.5 text-xs font-bold text-bull">ADAPTING LIVE</span>
             : <span className="rounded-full border border-bg-border px-3 py-0.5 text-xs font-bold text-muted">WARMING UP</span>}
+          {data?.simulated && <span className="rounded-full border border-caution/40 bg-caution/10 px-3 py-0.5 text-xs font-bold text-caution">SIMULATED</span>}
           {data && <span className="text-xs text-muted">{data.steps} tuning steps · {data.sample_size} trades in window</span>}
         </div>
         <div className="flex items-center gap-2">
@@ -136,6 +151,18 @@ export default function LearningPage() {
           <p className="text-xs text-muted mt-1.5 max-w-md mx-auto">
             The tuner starts adapting after ~10 trades have closed. As trades resolve, agent weights
             begin to drift here automatically — nothing to run, just check back.
+          </p>
+          <button
+            onClick={runSimulation}
+            disabled={simulating}
+            className="btn-ghost text-xs mt-5 mx-auto inline-flex items-center gap-1.5"
+          >
+            <Sparkles className={cn('h-3.5 w-3.5', simulating && 'animate-pulse')} />
+            {simulating ? 'Simulating…' : 'Preview with simulated data'}
+          </button>
+          <p className="text-[11px] text-muted/70 mt-2">
+            Runs the real tuner over a synthetic track record so you can see the charts now.
+            Clearly badged SIMULATED — replaced the moment real scored trades arrive.
           </p>
         </div>
       )}

@@ -3047,7 +3047,22 @@ def get_learning():
         "short_threshold": current.get("short_threshold", latest.get("short_threshold")),
         "sample_size": current.get("sample_size", latest.get("sample_size", 0)),
         "steps":      len(history),
+        "simulated":  bool(current.get("simulated") or latest.get("simulated")),
     }
+
+
+@app.post("/api/learning/simulate", dependencies=[Depends(_verify_bot_secret)])
+def post_learning_simulate(n_trades: int = 140):
+    """Seed the Learning view by driving the real WeightTuner over a simulated
+    track record. Clearly tagged simulated=true; superseded by real tuning steps.
+    """
+    try:
+        from simulate_learning import run_simulation
+        result = run_simulation(n_trades=n_trades)
+    except Exception as exc:
+        logger.exception("learning simulation failed")
+        raise HTTPException(status_code=500, detail=f"simulation failed: {exc}")
+    return {**result, **get_learning()}
 
 
 @app.get("/api/monte-carlo", dependencies=[Depends(_verify_bot_secret)])

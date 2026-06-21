@@ -48,6 +48,7 @@ export const api = {
   snapshots:       (syms: string[])                     => clientGet(`/api/alpaca/snapshots?symbols=${syms.join(',')}`),
   scanResults:     (): Promise<ScanResults>                        => clientGet('/api/bot/scan-results'),
   learning:        (): Promise<LearningData>                       => clientGet('/api/bot/learning'),
+  simulateLearning: (): Promise<LearningData>                      => clientPost('/api/bot/learning/simulate', {}),
   execute:         (req: ExecuteRequest): Promise<ExecuteResponse> => clientPost('/api/bot/execute', req),
 }
 

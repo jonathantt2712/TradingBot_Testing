@@ -150,4 +150,5 @@ export interface LearningData {
   short_threshold: number | null
   sample_size:     number
   steps:           number
+  simulated?:      boolean
 }
