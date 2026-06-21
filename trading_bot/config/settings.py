@@ -137,6 +137,10 @@ class Settings:
     news_base_url:     str  = field(default_factory=lambda: _env("NEWS_BASE_URL", "https://www.polistock.app/"))
     news_api_key:      str  = field(default_factory=lambda: _env("NEWS_API_KEY"))
     gemini_api_key:    str  = field(default_factory=lambda: _env("GEMINI_API_KEY"))
+    # Vision keeps running on the free Gemini-Flash vision model, but its chart
+    # score is cached per ticker for this many minutes so repeat scans don't burn
+    # a fresh request each time (0 disables caching).
+    vision_cache_ttl_min: float = field(default_factory=lambda: _env_float("VISION_CACHE_TTL_MIN", 60.0))
 
     telegram_bot_token:    str   = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
     telegram_chat_id:      str   = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID"))

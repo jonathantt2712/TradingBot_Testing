@@ -112,7 +112,8 @@ def build_manager(
         fundamental=FundamentalAgent(news, weight=settings.weights.fundamental,
                                      gemini_api_key=settings.gemini_api_key),
         vision=VisionAgent(weight=settings.weights.vision,
-                           gemini_api_key=settings.gemini_api_key) if include_vision else None,
+                           gemini_api_key=settings.gemini_api_key,
+                           cache_ttl_min=settings.vision_cache_ttl_min) if include_vision else None,
         technical=TechnicalAgent(weight=settings.weights.technical),
         risk=RiskAgent(settings.risk),
         liquid=LiquidAgent(weight=settings.weights.liquid)
