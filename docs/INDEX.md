@@ -9,10 +9,12 @@
 - `.claude/QUICK_START.md` (~100 tokens)
 - `.claude/ARCHITECTURE_MAP.md` (~150 tokens)
 
-## Task-Specific Topics (Load As Needed)
+## Reference (Load As Needed)
 
-Add topic files in `docs/learnings/` and list them here.
+- `docs/HOW_IT_WORKS.md` — visual walkthrough of the whole system
+- `DEPLOY_VERCEL.md` — deployment runbook (Vercel + Railway)
+- `WORKING_TOGETHER.md` — collaboration workflow
 
 ---
 
-**Last Updated**: 2026-06-10
+**Last Updated**: 2026-06-21

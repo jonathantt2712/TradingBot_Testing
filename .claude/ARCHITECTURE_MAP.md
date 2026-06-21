@@ -1,11 +1,12 @@
 # Architecture Map
 
 ```
-Browser ─> Vercel (Next.js dashboard) ─> Render cloud (api_server.py, 24/7)
+Browser ─> Vercel (Next.js dashboard) ─> Railway cloud (api_server.py)
                                           PC: live_runner.py (the bot — trades)
 ```
-Render service: https://tradingbot-api-ql85.onrender.com (free tier; a GitHub
-Action pings it every 10 min during market hours so it never sleeps mid-session)
+Backend: Railway (from railway.toml; healthcheck /api/health). The keep-awake
+GitHub Action pings /api/health every 10 min during market hours so it never
+sleeps mid-session. Dashboard: https://trading-bot-testing.vercel.app
 
 ## trading_bot/  (Python — the engine)
 - `bootstrap.py`        — ALL composition: env loading, build_broker/build_manager,

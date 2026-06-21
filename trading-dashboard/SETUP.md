@@ -28,13 +28,13 @@ Make sure the `trading-dashboard/` folder is in your GitHub repo.
 
 ### 2. Import on Vercel
 - Go to https://vercel.com/new
-- Import your `tradingbot2026` repository
+- Import your `TradingBot_Testing` repository
 - Set **Root Directory** → `trading-dashboard`
 - Add Environment Variable:
   - `NEXT_PUBLIC_BOT_API_URL` = your bot server URL (e.g. Railway, Render, or ngrok for dev)
 
 ### 3. Deploy
-Click Deploy. Vercel auto-deploys on every push to master.
+Click Deploy. Vercel auto-deploys on every push to `main`.
 
 ---
 

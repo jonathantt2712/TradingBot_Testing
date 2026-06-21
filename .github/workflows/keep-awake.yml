@@ -17,8 +17,8 @@ jobs:
     steps:
       - name: Ping health endpoint
         run: |
-          if [[ "$BACKEND_URL" == *"RENDER-URL-GOES-HERE"* ]]; then
-            echo "Backend URL not configured yet — skipping."
+          if [[ -z "$BACKEND_URL" ]]; then
+            echo "RAILWAY_BACKEND_URL secret not set — skipping."
             exit 0
           fi
           # --max-time 90: allow for cold start if the service did doze off

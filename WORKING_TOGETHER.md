@@ -1,11 +1,11 @@
 # Working together on this project
 
-Repo: https://github.com/itaitoker64/tradingbot2026 (branch `main`)
+Repo: https://github.com/jonathantt2712/TradingBot_Testing (branch `main`)
 
 ## One-time setup
 
-### Owner (itaitoker64): invite your friend
-1. Open https://github.com/itaitoker64/tradingbot2026/settings/access
+### Owner: invite your collaborator
+1. Open https://github.com/jonathantt2712/TradingBot_Testing/settings/access
 2. **Add people** → enter your friend's GitHub username → Invite
 3. (Recommended) Make the repo **private**: Settings → General → Danger Zone
    → Change visibility. It's currently PUBLIC — anyone can read your strategy.
@@ -16,8 +16,8 @@ Repo: https://github.com/itaitoker64/tradingbot2026 (branch `main`)
    [Node.js LTS](https://nodejs.org).
 3. In cmd:
    ```cmd
-   git clone https://github.com/itaitoker64/tradingbot2026.git
-   cd tradingbot2026
+   git clone https://github.com/jonathantt2712/TradingBot_Testing.git
+   cd TradingBot_Testing
    pip install -r trading_bot\requirements.txt
    cd trading-dashboard && npm install && cd ..
    ```
@@ -66,12 +66,6 @@ Then open a PR on GitHub and the other person reviews + merges. Claude Code
 can drive all of this for you — just ask.
 
 ## Who owns the deployment?
-- The Vercel site + ngrok tunnel are tied to the OWNER's accounts/PC.
-- The friend's START.bat will say the tunnel failed — that's fine; their copy
-  works locally at http://localhost:3000. (Or they make their own free ngrok
-  account for a second tunnel.)
-
-## Obsolete files
-`push.bat`, `push_to_git.bat`, `push_helper.py`, `push_helper.ps1` are from the
-pre-git era (overlay-copy-push). Don't use them anymore — plain `git push` does
-the right thing now.
+- The dashboard (Vercel) and backend (Railway) are tied to the OWNER's accounts.
+- A collaborator's local copy works at http://localhost:3000 against the local
+  API (`:8000`); they don't need the cloud deploy to develop.

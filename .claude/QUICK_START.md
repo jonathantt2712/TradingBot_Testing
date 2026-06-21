@@ -26,8 +26,8 @@ cd trading_bot && python -m pytest tests -q
 ```cmd
 cd trading-dashboard && npx vercel --prod --yes
 ```
-Live site: https://trading-dashboard-sandy-seven.vercel.app
-Tunnel: shun-gigolo-grew.ngrok-free.dev → PC :8000 (started by START.bat)
+Live site: https://trading-bot-testing.vercel.app
+Backend: Railway (api_server.py) — auto-deploys on push to main.
 
 ## Git
 Pull before you start, push when you stop. See WORKING_TOGETHER.md.
