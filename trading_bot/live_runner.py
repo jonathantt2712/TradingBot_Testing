@@ -30,8 +30,8 @@ from zoneinfo import ZoneInfo
 
 import bootstrap  # loads .env files on import — keep first
 from bootstrap import (
-    build_broker, build_manager, eod_flatten_loop, eod_report_loop,
-    refresh_market_context,
+    build_broker, build_manager, correlation_refresh_loop, eod_flatten_loop,
+    eod_report_loop, refresh_market_context,
 )
 from config.settings import load_settings
 from core.models import AnalysisContext
@@ -49,6 +49,7 @@ RESCAN_INTERVAL_MIN    = int(os.environ.get("RESCAN_INTERVAL_MIN",    "30"))
 BREAKOUT_INTERVAL_MIN  = int(os.environ.get("BREAKOUT_INTERVAL_MIN",  "5"))
 BREAKOUT_MIN_CHANGE    = float(os.environ.get("BREAKOUT_MIN_CHANGE_PCT", "3.0"))
 STRATEGY_REFRESH_MIN   = int(os.environ.get("STRATEGY_REFRESH_MIN",   "60"))
+CORRELATION_REFRESH_MIN = int(os.environ.get("CORRELATION_REFRESH_MIN", "60"))
 
 # Weights file written by api_server's self-tuner — we read it hourly and
 # apply ATR/threshold updates to the live pm without restarting.
@@ -450,6 +451,10 @@ async def main(tickers: Sequence[str]) -> None:
             ),
             strategy_refresh_loop(pm, interval_min=STRATEGY_REFRESH_MIN),
             eod_report_loop(settings),
+            correlation_refresh_loop(
+                pm, broker, active_tickers,
+                interval_min=CORRELATION_REFRESH_MIN,
+            ),
         ]
         if universe is not None:
             loops.append(

@@ -76,6 +76,9 @@ class RiskConfig:
     # Concentration cap: max simultaneous open positions in one correlation group
     # (e.g. mega-cap tech) so the bot can't stack one undiversified bet.
     max_correlated_positions:   int   = field(default_factory=lambda: int(_env_float("MAX_CORRELATED_POSITIONS", 3)))
+    # Return-correlation at/above which two symbols count as co-moving for the
+    # concentration cap, when the data-derived correlation graph is in use.
+    correlation_threshold:      float = field(default_factory=lambda: _env_float("CORRELATION_THRESHOLD", 0.7))
     # Data-freshness veto: max age of the last bar, in multiples of the series'
     # own cadence, before the RiskAgent treats the feed as stale (halt/gap/weekend
     # snapshot) and refuses to trade. Set to 0 to disable. Live-only (backtests

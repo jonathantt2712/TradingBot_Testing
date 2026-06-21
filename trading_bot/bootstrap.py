@@ -41,6 +41,7 @@ from agents.squeeze_agent import SqueezeAgent  # noqa: E402
 from agents.technical_agent import TechnicalAgent  # noqa: E402
 from agents.vision_agent import VisionAgent  # noqa: E402
 from agents.report_agent import EODReportAgent  # noqa: E402
+from data.correlation_graph import CorrelationGraph  # noqa: E402
 from data.news_sources import AlpacaNewsSource, NewsSource, PoliStockSource  # noqa: E402
 from data.telegram_publisher import TelegramPublisher  # noqa: E402
 from execution.alpaca_broker import AlpacaBroker  # noqa: E402
@@ -171,6 +172,54 @@ async def eod_flatten_loop(broker: BaseBroker, settings: Settings) -> None:
             else:
                 logger.error("EOD flatten failed — will retry next minute")
         await asyncio.sleep(60)
+
+
+async def correlation_refresh_loop(
+    pm: PortfolioManager,
+    broker: BaseBroker,
+    active_tickers: list[str],
+    *,
+    interval_min: int,
+) -> None:
+    """Rebuild the data-derived correlation graph for the concentration cap.
+
+    Periodically fetches daily bars for the active universe plus any open
+    positions and injects a fresh :class:`CorrelationGraph` into the
+    PortfolioManager. Heavy work stays here, off the per-entry hot path, which
+    only reads the cached graph. No-ops when the cap is disabled.
+    """
+    cap = pm.settings.risk.max_correlated_positions
+    if cap <= 0:
+        logger.info("Correlation refresh disabled (MAX_CORRELATED_POSITIONS=0)")
+        return
+
+    threshold = pm.settings.risk.correlation_threshold
+    while True:
+        try:
+            symbols = {t.upper() for t in active_tickers}
+            try:
+                positions = await broker.get_positions()
+                symbols |= {str(p.get("symbol", "")).upper()
+                            for p in positions if p.get("symbol")}
+            except Exception:
+                logger.debug("correlation refresh: positions unavailable", exc_info=True)
+
+            bars_by: dict = {}
+            for sym in symbols:
+                try:
+                    bars = await broker.get_bars(sym, timeframe="1Day", limit=60)
+                    if bars is not None and not bars.empty:
+                        bars_by[sym] = bars
+                except Exception:
+                    continue
+
+            if len(bars_by) >= 2:
+                graph = CorrelationGraph.build_from_bars(bars_by, threshold=threshold)
+                pm.set_correlation_graph(graph)
+                logger.info("Correlation graph refreshed over %d symbols", len(bars_by))
+        except Exception:
+            logger.exception("correlation refresh failed — keeping previous graph")
+        await asyncio.sleep(interval_min * 60)
 
 
 async def eod_report_loop(settings: Settings) -> None:

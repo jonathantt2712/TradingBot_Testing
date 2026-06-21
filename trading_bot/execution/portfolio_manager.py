@@ -94,6 +94,9 @@ class PortfolioManager:
         self._weights = settings.weights.as_map()
         self._thresholds: DecisionThresholds = settings.thresholds
         self._regime: Optional[RegimeSnapshot] = None
+        # Data-derived correlation graph for the concentration cap; None until a
+        # runner builds and injects it, in which case the static groups are used.
+        self._corr_graph = None
 
         # Daily-loss kill switch state (reset each ET trading day)
         self._day_start_equity: Optional[float] = None
@@ -120,6 +123,10 @@ class PortfolioManager:
         self._regime = regime
         logger.info("Regime applied: %s (Dlong=%+.0f Dshort=%+.0f)",
                     regime.regime.value, regime.long_delta, regime.short_delta)
+
+    def set_correlation_graph(self, graph) -> None:
+        """Inject the latest data-derived correlation graph (periodic refresh)."""
+        self._corr_graph = graph
 
     async def decide(self, ctx: AnalysisContext) -> TradeDecision:
         coros = [
@@ -439,19 +446,30 @@ class PortfolioManager:
             )
             return False
 
-        # Concentration cap: limit simultaneous positions in one correlation group.
-        cand_groups = _correlation_groups(symbol)
+        # Concentration cap: limit simultaneous positions that co-move with the
+        # candidate. Prefer the data-derived correlation graph when it covers the
+        # symbol; otherwise fall back to the static correlation groups.
         cap = self.settings.risk.max_correlated_positions
-        if cand_groups and cap > 0:
+        if cap > 0:
             open_syms = [str(p.get("symbol", "")).upper() for p in positions]
-            for g in cand_groups:
-                in_group = sum(1 for s in open_syms if g in _correlation_groups(s))
-                if in_group >= cap:
+            graph = self._corr_graph
+            if graph is not None and graph.has(symbol):
+                correlated_open = [s for s in open_syms if graph.correlated(symbol, s)]
+                if len(correlated_open) >= cap:
                     logger.info(
-                        "%s entry skipped: %d positions already in correlated group '%s' (max %d)",
-                        ticker, in_group, g, cap,
+                        "%s entry skipped: %d open positions correlated (data) >= max %d (%s)",
+                        ticker, len(correlated_open), cap, ", ".join(correlated_open),
                     )
                     return False
+            else:
+                for g in _correlation_groups(symbol):
+                    in_group = sum(1 for s in open_syms if g in _correlation_groups(s))
+                    if in_group >= cap:
+                        logger.info(
+                            "%s entry skipped: %d positions already in correlated group '%s' (max %d)",
+                            ticker, in_group, g, cap,
+                        )
+                        return False
         return True
 
     async def execute(self, decision: TradeDecision) -> Optional[OrderReceipt]:
