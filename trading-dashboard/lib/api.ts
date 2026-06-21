@@ -8,6 +8,7 @@ import type {
   ScanResults,
   ExecuteRequest,
   ExecuteResponse,
+  LearningData,
 } from '@/types/trading'
 
 /**
@@ -46,6 +47,7 @@ export const api = {
   account:         ()                                   => clientGet('/api/alpaca/account'),
   snapshots:       (syms: string[])                     => clientGet(`/api/alpaca/snapshots?symbols=${syms.join(',')}`),
   scanResults:     (): Promise<ScanResults>                        => clientGet('/api/bot/scan-results'),
+  learning:        (): Promise<LearningData>                       => clientGet('/api/bot/learning'),
   execute:         (req: ExecuteRequest): Promise<ExecuteResponse> => clientPost('/api/bot/execute', req),
 }
 

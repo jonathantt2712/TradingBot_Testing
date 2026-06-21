@@ -238,7 +238,28 @@ TRADE_MODE_FILE = DATA_DIR / "trade_mode.json"   # auto-execute toggle (shared w
 REJECT_LOG      = DATA_DIR / "risk_rejections.jsonl"
 SNAPSHOT_LOG    = DATA_DIR / "daily_snapshots.jsonl"
 AGENT_PERF_FILE = DATA_DIR / "agent_attribution.json"
+# WeightTuner output (online learning). These live at the repo-relative data dir
+# because that is where core.weight_tuner / PortfolioManager._live_weight read and
+# write them — keep this in lockstep with weight_tuner._WEIGHTS_FILE/_HISTORY_FILE.
+LEARNING_HISTORY_FILE = _HERE / "data" / "learning_history.jsonl"
+LEARNING_WEIGHTS_FILE = _HERE / "data" / "strategy_weights.json"
 EARNINGS_CACHE: Dict[str, Any] = {"blacklist": set(), "updated_at": None}
+
+
+def _drive_weight_tuner(trades: List[dict]) -> None:
+    """Re-run the online WeightTuner from closed trades (server-side learning).
+
+    Called whenever a trade closes so the agent weights adapt and a snapshot is
+    appended to learning_history.jsonl — the data the /api/learning view renders.
+    No-ops cleanly when the agent pipeline is unavailable.
+    """
+    if not _AGENTS_AVAILABLE or _pm is None:
+        return
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("evaluations")]
+    try:
+        _pm._tuner.update_from_trades(closed)
+    except Exception:
+        logger.debug("weight tuner update failed", exc_info=True)
 
 
 def _load(path: Path, default: Any) -> Any:
@@ -675,6 +696,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
     if modified:
         async with _trades_lock:
             _save(TRADES_FILE, trades)
+        _drive_weight_tuner(trades)
 
 
 # === Strategy weight learning ===
@@ -2982,6 +3004,50 @@ def get_agent_attribution():
             "total_pnl": round(stats.get("total_pnl", 0.0), 2),
         }
     return result
+
+
+@app.get("/api/learning", dependencies=[Depends(_verify_bot_secret)])
+def get_learning():
+    """Online-learning view: how the WeightTuner has adapted agent weights.
+
+    Returns the time series of tuning snapshots (agent weights, multipliers,
+    win rate, thresholds) plus the latest values, so the dashboard can render
+    the bot learning from its own track record. Empty/quiet until the tuner has
+    enough resolved trades (see weight_tuner._MIN_TRADES).
+    """
+    history: List[Dict[str, Any]] = []
+    try:
+        if LEARNING_HISTORY_FILE.exists():
+            for line in LEARNING_HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    history.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        logger.debug("learning history read failed", exc_info=True)
+
+    current = _load(LEARNING_WEIGHTS_FILE, {})
+    if not isinstance(current, dict):
+        current = {}
+
+    latest = history[-1] if history else {}
+    return {
+        "active":     bool(current.get("live_tuning_active")),
+        "history":    history,
+        "weights":    current.get("agent_weights")     or latest.get("weights", {}),
+        "multipliers": current.get("agent_multipliers") or latest.get("multipliers", {}),
+        "win_rate":   current.get("win_rate_30d", latest.get("win_rate")),
+        "long_win_rate":  current.get("long_win_rate",  latest.get("long_win_rate")),
+        "short_win_rate": current.get("short_win_rate", latest.get("short_win_rate")),
+        "bias":       current.get("bias", latest.get("bias", "neutral")),
+        "long_threshold":  current.get("long_threshold",  latest.get("long_threshold")),
+        "short_threshold": current.get("short_threshold", latest.get("short_threshold")),
+        "sample_size": current.get("sample_size", latest.get("sample_size", 0)),
+        "steps":      len(history),
+    }
 
 
 @app.get("/api/monte-carlo", dependencies=[Depends(_verify_bot_secret)])

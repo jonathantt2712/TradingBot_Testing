@@ -64,6 +64,38 @@ class WeightTuner:
         except Exception:
             logger.debug("WeightTuner.update failed", exc_info=True)
 
+    def update_from_trades(self, closed_trades: list[dict]) -> None:
+        """Drive the tuner from api_server-style closed trades.
+
+        Each trade carries ``direction``, ``pnl`` and ``evaluations`` (a list of
+        {role, score, ...} dicts). Adapts them to the internal entry shape so the
+        same learning runs server-side (Railway) — no local process required.
+        """
+        try:
+            entries: list[dict] = []
+            for t in closed_trades:
+                if t.get("pnl") is None:
+                    continue
+                direction = str(t.get("direction", "")).upper()
+                if direction not in ("LONG", "SHORT"):
+                    continue
+                scores: dict[str, float] = {}
+                for ev in (t.get("evaluations") or []):
+                    role = ev.get("role") if isinstance(ev, dict) else None
+                    score = ev.get("score") if isinstance(ev, dict) else None
+                    if role and score is not None:
+                        scores[str(role)] = float(score)
+                if not scores:
+                    continue
+                entries.append({
+                    "decision": direction,
+                    "outcome_pnl": float(t["pnl"]),
+                    "agent_scores": scores,
+                })
+            self._run(entries)
+        except Exception:
+            logger.debug("WeightTuner.update_from_trades failed", exc_info=True)
+
     def _run(self, entries: list[dict]) -> None:
         resolved = [
             e for e in entries

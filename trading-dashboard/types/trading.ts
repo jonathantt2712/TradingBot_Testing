@@ -123,3 +123,31 @@ export interface ExecuteResponse {
   qty:      number
   message:  string
 }
+
+export interface LearningSnapshot {
+  ts:              string
+  win_rate:        number | null
+  long_win_rate:   number | null
+  short_win_rate:  number | null
+  bias:            string
+  long_threshold:  number | null
+  short_threshold: number | null
+  sample_size:     number
+  weights:         Record<string, number>
+  multipliers:     Record<string, number>
+}
+
+export interface LearningData {
+  active:          boolean
+  history:         LearningSnapshot[]
+  weights:         Record<string, number>
+  multipliers:     Record<string, number>
+  win_rate:        number | null
+  long_win_rate:   number | null
+  short_win_rate:  number | null
+  bias:            string
+  long_threshold:  number | null
+  short_threshold: number | null
+  sample_size:     number
+  steps:           number
+}
