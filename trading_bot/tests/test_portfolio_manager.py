@@ -69,6 +69,35 @@ def test_composite_confidence_scales_weight():
     assert composite < 60.0
 
 
+# ── agent disagreement dispersion ────────────────────────────────────────────
+
+def test_dispersion_zero_when_agents_agree():
+    pm = make_pm()
+    evals = [_ev(AgentRole.FUNDAMENTAL, 70), _ev(AgentRole.TECHNICAL, 70),
+             _ev(AgentRole.VISION, 70)]
+    assert pm._directional_dispersion(evals) == pytest.approx(0.0)
+
+
+def test_dispersion_high_when_agents_conflict():
+    pm = make_pm()
+    evals = [_ev(AgentRole.FUNDAMENTAL, 85), _ev(AgentRole.TECHNICAL, 15)]
+    assert pm._directional_dispersion(evals) == pytest.approx(35.0)
+
+
+def test_dispersion_excludes_risk_gate():
+    pm = make_pm()
+    # RISK score (a viability gate, not a direction) must not inflate dispersion.
+    evals = [_ev(AgentRole.FUNDAMENTAL, 60), _ev(AgentRole.TECHNICAL, 60),
+             _ev(AgentRole.RISK, 5)]
+    assert pm._directional_dispersion(evals) == pytest.approx(0.0)
+
+
+def test_dispersion_zero_with_single_directional_agent():
+    pm = make_pm()
+    evals = [_ev(AgentRole.TECHNICAL, 80), _ev(AgentRole.RISK, 90)]
+    assert pm._directional_dispersion(evals) == 0.0
+
+
 # ── direction thresholds ─────────────────────────────────────────────────────
 
 def test_direction_defaults():

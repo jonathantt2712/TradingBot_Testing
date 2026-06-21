@@ -18,6 +18,7 @@ import pandas as pd
 from config.settings import RiskConfig
 from core.base_agent import BaseAgent, clamp_score
 from core.enums import AgentRole, Decision
+from core.freshness import bar_staleness
 from core.models import AgentEvaluation, AnalysisContext, RiskParameters
 
 _STRATEGY_WEIGHTS_FILE = Path(__file__).parent.parent / "data" / "strategy_weights.json"
@@ -34,6 +35,20 @@ class RiskAgent(BaseAgent):
         self.cfg = cfg
 
     async def evaluate(self, ctx: AnalysisContext) -> AgentEvaluation:
+        # Fail closed on stale data: a halt/feed-gap/weekend snapshot would have
+        # us size against a price that no longer exists. Skip in backtests, whose
+        # historical bars are "stale" only by wall-clock definition.
+        if not getattr(ctx, "backtest_mode", False):
+            stale, reason = bar_staleness(ctx.bars, max_age_factor=self.cfg.max_bar_age_factor)
+            if stale:
+                return AgentEvaluation(
+                    role=self.role,
+                    score=1,
+                    veto=True,
+                    rationale=f"stale data — {reason}",
+                    reasoning={"veto": True, "veto_reason": f"stale data — {reason}"},
+                )
+
         # FIX: was hardcoded to LONG; now evaluates the most viable direction
         # by building both plans and picking the one with the better R/R.
         long_plan = self.build_plan(ctx, intended=Decision.LONG)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import statistics
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
@@ -249,6 +250,19 @@ class PortfolioManager:
                         ctx.ticker, composite, conv * 100, plan.qty, new_qty,
                     )
                     plan.qty = new_qty
+
+        # Disagreement haircut: when the directional agents strongly disagree, the
+        # composite is a blend of conflicting views — low conviction — so risk
+        # less on the trade. Dispersion is the population std of the agent scores
+        # on the 1..100 scale (RISK excluded; it is a gate, not a direction).
+        if plan is not None and plan.qty > 0:
+            dispersion = self._directional_dispersion(evaluations)
+            if dispersion >= 25.0:
+                plan.qty = float(int(plan.qty * 0.5))
+                logger.info("%s agent disagreement std=%.1f >= 25: size 50%%", ctx.ticker, dispersion)
+            elif dispersion >= 18.0:
+                plan.qty = float(int(plan.qty * 0.75))
+                logger.info("%s agent disagreement std=%.1f >= 18: size 75%%", ctx.ticker, dispersion)
 
         if plan is None or plan.qty <= 0 or plan.risk_reward < self.settings.risk.min_risk_reward:
             logger.info("%s downgraded to PASS: no viable plan", ctx.ticker)
@@ -604,6 +618,21 @@ class PortfolioManager:
             # Default — no adjustment
         },
     }
+
+    @staticmethod
+    def _directional_dispersion(evaluations: "Sequence[AgentEvaluation]") -> float:
+        """Population std of the directional agent scores (excludes RISK, a gate).
+
+        High dispersion means the agents strongly disagree on direction, so the
+        composite is a low-conviction average of conflicting views.
+        """
+        scores = [
+            e.score for e in evaluations
+            if e is not None and e.role is not AgentRole.RISK
+        ]
+        if len(scores) < 2:
+            return 0.0
+        return float(statistics.pstdev(scores))
 
     def _composite(
         self,

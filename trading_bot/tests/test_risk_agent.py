@@ -77,7 +77,9 @@ def test_rr_full_atr_target_on_breakout():
 def test_evaluate_vetoes_when_no_room(flat_bars):
     # Flat session: price is mid-range with ~0.5 room either way against a
     # ~2.0 stop → R/R ≈ 0.25 for both directions → veto.
+    # backtest_mode skips the freshness veto so this exercises the R/R path.
     agent = RiskAgent(_cfg())
-    ctx = AnalysisContext(ticker="TEST", bars=flat_bars, account={"equity": 100_000.0})
+    ctx = AnalysisContext(ticker="TEST", bars=flat_bars,
+                          account={"equity": 100_000.0}, backtest_mode=True)
     ev = asyncio.run(agent.evaluate(ctx))
     assert ev.veto
