@@ -17,6 +17,8 @@ import os
 import re
 from typing import Optional
 
+from core import health
+
 logger = logging.getLogger(__name__)
 
 _LLM_JSON_RE = re.compile(r'\{[^{}]*"score"\s*:\s*\d+[^{}]*\}', re.DOTALL)
@@ -54,6 +56,28 @@ _GEMINI_MODEL_DEFAULT    = "gemini-2.0-flash"
 _ANTHROPIC_MODEL_DEFAULT = "claude-haiku-4-5-20251001"
 _VISION_MODEL_DEFAULT    = "claude-sonnet-4-6"
 
+# Substrings that mark an authentication/authorization failure — a bad/expired
+# key that retrying can NEVER fix (unlike a timeout or a 429 quota blip).
+_AUTH_MARKERS = (
+    "401", "403", "unauthenticated", "permission_denied", "permission denied",
+    "api key not valid", "invalid api key", "invalid authentication",
+    "access_token_type_unsupported", "api_key_invalid",
+)
+
+# Providers whose key has been rejected this process; keyed by provider+fingerprint
+# so a fixed key (after restart) starts clean. Shared across all LLMAdapter
+# instances so one bad key disables it everywhere instead of every agent retrying.
+_disabled_providers: set[str] = set()
+
+
+def _is_auth_error(exc: object) -> bool:
+    s = str(exc).lower()
+    return any(m in s for m in _AUTH_MARKERS)
+
+
+def _fingerprint(provider: str, key: str) -> str:
+    return f"{provider}:{key[:6]}" if key else provider
+
 
 class LLMAdapter:
     """Provider-agnostic async LLM wrapper.
@@ -79,29 +103,51 @@ class LLMAdapter:
         self.anthropic_model = anthropic_model or os.getenv("LLM_MODEL", _ANTHROPIC_MODEL_DEFAULT)
         self.vision_model    = vision_model    or os.getenv("LLM_VISION_MODEL", _VISION_MODEL_DEFAULT)
 
+    def _disabled(self, provider: str) -> bool:
+        key = self.gemini_key if provider == "gemini" else self.anthropic_key
+        return _fingerprint(provider, key) in _disabled_providers
+
+    def _disable(self, provider: str, exc: object) -> None:
+        """Mark a provider's key rejected (auth failure) and tell the operator."""
+        key = self.gemini_key if provider == "gemini" else self.anthropic_key
+        _disabled_providers.add(_fingerprint(provider, key))
+        env = "GEMINI_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
+        health.report_issue(
+            f"llm_auth:{provider}",
+            f"{env} was rejected by the provider (auth error: {str(exc)[:80]}).",
+            remediation=(f"Set a valid {env} and restart. Until then the LLM agents "
+                         "fall back to keyword/FinBERT scoring."),
+        )
+
     @property
     def has_llm(self) -> bool:
-        return bool(self.gemini_key or self.anthropic_key)
+        return bool((self.gemini_key and not self._disabled("gemini"))
+                    or (self.anthropic_key and not self._disabled("anthropic")))
 
     @property
     def has_vision(self) -> bool:
-        return bool(self.gemini_key or self.anthropic_key)
+        return self.has_llm
 
     @property
     def provider(self) -> str:
-        if self.gemini_key:
+        if self.gemini_key and not self._disabled("gemini"):
             return "gemini"
-        if self.anthropic_key:
+        if self.anthropic_key and not self._disabled("anthropic"):
             return "anthropic"
         return "none"
 
     # ── Text chat ─────────────────────────────────────────────────────────────
 
     async def chat(self, prompt: str, system: str = "") -> Optional[str]:
-        """Send a text prompt and return the response string, or None on failure."""
-        if self.gemini_key:
-            return await self._gemini_chat(prompt, system)
-        if self.anthropic_key:
+        """Send a text prompt and return the response string, or None on failure.
+
+        Tries Gemini, then falls over to Anthropic; skips a provider whose key
+        has already been rejected this run."""
+        if self.gemini_key and not self._disabled("gemini"):
+            out = await self._gemini_chat(prompt, system)
+            if out is not None:
+                return out
+        if self.anthropic_key and not self._disabled("anthropic"):
             return await self._anthropic_chat(prompt, system)
         return None
 
@@ -109,9 +155,11 @@ class LLMAdapter:
 
     async def vision(self, image_bytes: bytes, prompt: str, media_type: str = "image/png") -> Optional[str]:
         """Send an image + prompt and return the response string, or None on failure."""
-        if self.gemini_key:
-            return await self._gemini_vision(image_bytes, prompt, media_type)
-        if self.anthropic_key:
+        if self.gemini_key and not self._disabled("gemini"):
+            out = await self._gemini_vision(image_bytes, prompt, media_type)
+            if out is not None:
+                return out
+        if self.anthropic_key and not self._disabled("anthropic"):
             return await self._anthropic_vision(image_bytes, prompt, media_type)
         return None
 
@@ -134,6 +182,9 @@ class LLMAdapter:
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (attempt + 1))
             except Exception as exc:
+                if _is_auth_error(exc):
+                    self._disable("gemini", exc)   # bad key — retrying can't help
+                    return None
                 logger.warning("Gemini chat attempt %d failed: %s", attempt + 1, exc)
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (attempt + 1))
@@ -157,6 +208,9 @@ class LLMAdapter:
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (attempt + 1))
             except Exception as exc:
+                if _is_auth_error(exc):
+                    self._disable("gemini", exc)
+                    return None
                 logger.warning("Gemini vision attempt %d failed: %s", attempt + 1, exc)
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (attempt + 1))
@@ -178,7 +232,10 @@ class LLMAdapter:
             resp = await client.messages.create(**kwargs)
             return resp.content[0].text.strip()
         except Exception as exc:
-            logger.debug("Anthropic chat failed: %s", exc)
+            if _is_auth_error(exc):
+                self._disable("anthropic", exc)
+            else:
+                logger.debug("Anthropic chat failed: %s", exc)
             return None
 
     async def _anthropic_vision(self, image_bytes: bytes, prompt: str, media_type: str) -> Optional[str]:
@@ -199,5 +256,8 @@ class LLMAdapter:
             )
             return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         except Exception as exc:
-            logger.debug("Anthropic vision failed: %s", exc)
+            if _is_auth_error(exc):
+                self._disable("anthropic", exc)
+            else:
+                logger.debug("Anthropic vision failed: %s", exc)
             return None

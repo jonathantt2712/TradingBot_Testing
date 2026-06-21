@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 import bootstrap  # loads .env files on import — keep first
 from bootstrap import (
     build_broker, build_manager, correlation_refresh_loop, eod_flatten_loop,
-    eod_report_loop, refresh_market_context,
+    eod_report_loop, health_alert_loop, preflight_checks, refresh_market_context,
 )
 from config.settings import load_settings
 from core.models import AnalysisContext
@@ -376,6 +376,9 @@ async def main(tickers: Sequence[str]) -> None:
     if not execute:
         logger.warning("EXECUTE_LIVE!=true -> DRY RUN (analysis only, no orders sent)")
 
+    # Tell the operator up front about anything missing it needs.
+    preflight_checks(settings)
+
     broker = build_broker(settings, force_live=True)
     logger.info("Broker: %s", type(broker).__name__)
 
@@ -451,6 +454,7 @@ async def main(tickers: Sequence[str]) -> None:
             ),
             strategy_refresh_loop(pm, interval_min=STRATEGY_REFRESH_MIN),
             eod_report_loop(settings),
+            health_alert_loop(settings),
             correlation_refresh_loop(
                 pm, broker, active_tickers,
                 interval_min=CORRELATION_REFRESH_MIN,

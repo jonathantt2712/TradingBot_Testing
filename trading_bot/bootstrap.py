@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -29,6 +30,7 @@ def load_env() -> None:
 load_env()  # must run before config.settings is imported by callers
 
 from config.settings import Settings  # noqa: E402
+from core import health  # noqa: E402
 from core.enums import RunMode  # noqa: E402
 from agents.decision_agent import DecisionAgent  # noqa: E402
 from agents.fundamental_agent import FundamentalAgent  # noqa: E402
@@ -219,6 +221,49 @@ async def correlation_refresh_loop(
                 logger.info("Correlation graph refreshed over %d symbols", len(bars_by))
         except Exception:
             logger.exception("correlation refresh failed — keeping previous graph")
+        await asyncio.sleep(interval_min * 60)
+
+
+def preflight_checks(settings: Settings) -> None:
+    """At startup, tell the operator what the bot needs that isn't configured.
+
+    Only reports genuinely missing essentials — these surface in the log, in
+    Telegram (via health_alert_loop), and in the EOD report. Reported through the
+    health board so they dedupe with any runtime failures of the same thing.
+    """
+    if settings.broker == "alpaca" and not (settings.alpaca_key_id and settings.alpaca_secret):
+        health.report_issue(
+            "config:alpaca_keys",
+            "Alpaca API keys are not set.",
+            remediation="Set ALPACA_API_KEY_ID and ALPACA_API_SECRET — without them the "
+                        "bot can't fetch market data, size positions, or trade.",
+        )
+    if not settings.gemini_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+        health.report_issue(
+            "config:llm_key",
+            "No LLM API key set (GEMINI_API_KEY / ANTHROPIC_API_KEY).",
+            remediation="Set one for full Fundamental/Vision/Decision analysis; "
+                        "otherwise the bot uses keyword/FinBERT fallback.",
+            severity="warning",
+        )
+    if not (settings.telegram_bot_token and settings.telegram_chat_id):
+        logger.info("Telegram not configured — alerts/EOD reports will only appear in the log.")
+
+
+async def health_alert_loop(settings: Settings, *, interval_min: int = 10) -> None:
+    """Push newly-reported issues to Telegram so the operator is told promptly.
+
+    Runs the first check immediately (catches startup preflight issues), then
+    every interval_min. No-ops cleanly when Telegram isn't configured.
+    """
+    publisher = TelegramPublisher(settings.telegram_bot_token, settings.telegram_chat_id)
+    while True:
+        try:
+            new = health.take_unsent()
+            if new and publisher.enabled:
+                await publisher.send_alert([i.as_line() for i in new])
+        except Exception:
+            logger.exception("health alert push failed")
         await asyncio.sleep(interval_min * 60)
 
 

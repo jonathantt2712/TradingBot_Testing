@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from core import health
 from core.llm_adapter import LLMAdapter
 from core.trade_memory import TradeMemory
 from core.trade_stats import format_block, load_closed_trades, summarize
@@ -161,16 +162,22 @@ class EODReportAgent:
         """Return the day's desk note (LLM narrative, or deterministic fallback)."""
         now = now or datetime.now(timezone.utc)
         day, audit, stats = self._facts(now)
+        needs = health.format_block()
+        body = None
         if self._llm.has_llm:
             prompt = (
                 "Write a concise (<=120 words) end-of-day desk note from these facts. "
                 "Cover what traded and why the rest did not, slippage, and any win-rate "
                 "trend. Plain prose.\n\n" + self._facts_block(day, audit, stats)
+                + (f"\n\n{needs}" if needs else "")
             )
             try:
                 text = await self._llm.chat(prompt, system=_SYSTEM_PROMPT)
                 if text:
-                    return text.strip()
+                    body = text.strip()
             except Exception:
                 logger.warning("EOD report LLM failed — using deterministic summary", exc_info=True)
-        return self._deterministic(day, audit, stats)
+        if body is None:
+            body = self._deterministic(day, audit, stats)
+        # Always append the explicit needs block so it's never lost to the LLM.
+        return f"{body}\n\n{needs}" if needs else body
