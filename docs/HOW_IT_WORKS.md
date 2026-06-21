@@ -22,7 +22,7 @@ flowchart LR
 
     subgraph cloud["☁️ Cloud"]
         vercel["Vercel<br/>Next.js dashboard"]
-        render["Render<br/>api_server.py (FastAPI, 24/7)<br/>read-only proxy + history"]
+        railway["Railway<br/>api_server.py (FastAPI)<br/>read-only proxy + history<br/>kept awake by a GitHub Action"]
     end
 
     subgraph pc["🖥️ One PC (EXECUTE_LIVE=true)"]
@@ -39,8 +39,8 @@ flowchart LR
     end
 
     user --> vercel
-    vercel -->|"/api/bot proxy"| render
-    render -.->|reads state/signals| bot
+    vercel -->|"/api/bot proxy"| railway
+    railway -.->|reads state/signals| bot
     bot --> alpaca
     bot --> ibkr
     bot --> yahoo
@@ -52,8 +52,10 @@ flowchart LR
 ```
 
 - **Only one PC** runs with `EXECUTE_LIVE=true` (shared Alpaca account).
-- The dashboard never trades directly — it talks to the Render API, which
+- The dashboard never trades directly — it talks to the Railway API, which
   surfaces the bot's signals and history. Live order routing happens on the PC.
+  A GitHub Action pings `/api/health` every 10 min during market hours so the
+  service doesn't doze off mid-session.
 
 ---
 
