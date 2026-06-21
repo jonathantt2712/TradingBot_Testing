@@ -25,6 +25,7 @@ tsconfig.tsbuildinfo
 # ── Runtime data & logs (regenerated while the bot runs) ────────────────────
 bot_data/
 trading_bot/data/*.json
+trading_bot/data/*.jsonl
 *.log
 push_log.txt
 logs/

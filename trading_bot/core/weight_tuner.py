@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _WEIGHTS_FILE = Path(__file__).parent.parent / "data" / "strategy_weights.json"
+# Append-only log of every tuning step, so the learning can be visualised over time.
+_HISTORY_FILE = Path(__file__).parent.parent / "data" / "learning_history.jsonl"
 _MIN_TRADES = 10    # don't tune until we have this many resolved outcomes
 _WINDOW = 30        # rolling window size
 _SKILL_SCALE = 2.0  # accuracy-to-multiplier scale: perfect → 2×, random → 1×, always-wrong → 0.1×
@@ -156,8 +159,31 @@ class WeightTuner:
         }
         _WEIGHTS_FILE.parent.mkdir(exist_ok=True)
         _WEIGHTS_FILE.write_text(json.dumps(out, indent=2), encoding="utf-8")
+        self._append_history(out)
         logger.info(
             "WeightTuner: %d trades win=%.1f%% bias=%s L=%.1f S=%.1f mults=%s",
             n, win_rate, bias, long_thr, short_thr,
             {k: f"{v:.2f}x" for k, v in mults.items()},
         )
+
+    @staticmethod
+    def _append_history(out: dict) -> None:
+        """Append one compact snapshot per tuning step for the learning view."""
+        try:
+            snapshot = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "win_rate": out["win_rate_30d"],
+                "long_win_rate": out["long_win_rate"],
+                "short_win_rate": out["short_win_rate"],
+                "bias": out["bias"],
+                "long_threshold": out["long_threshold"],
+                "short_threshold": out["short_threshold"],
+                "sample_size": out["sample_size"],
+                "weights": out["agent_weights"],
+                "multipliers": out["agent_multipliers"],
+            }
+            _HISTORY_FILE.parent.mkdir(exist_ok=True)
+            with open(_HISTORY_FILE, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(snapshot) + "\n")
+        except Exception:
+            logger.debug("learning history append failed", exc_info=True)
