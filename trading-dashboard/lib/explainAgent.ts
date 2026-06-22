@@ -178,13 +178,14 @@ function humanizeInsider(r: string): string {
 function humanizeSqueeze(r: string): string {
   if (/no FINRA short volume data/i.test(r))      return 'No FINRA RegSHO short volume data found for today.'
   if (/ticker not found/i.test(r))                return 'Ticker not in FINRA short volume report today (OTC/non-exchange).'
-  const ratio = r.match(/short_ratio=([\d.]+)/)
+  // The bot already formats short_ratio as a percentage (e.g. "short_ratio=70.00%"),
+  // so the captured number is the percent value — do NOT multiply by 100 again.
+  const ratio = r.match(/short_ratio=([\d.]+)%?/)
   if (ratio) {
-    const v = parseFloat(ratio[1])
-    const pct = (v * 100).toFixed(1)
-    if (/squeeze/i.test(r))          return `Short ratio is ${pct}% with price moving up — squeeze setup detected.`
-    if (/short pressure/i.test(r))   return `Short ratio is ${pct}% with price falling — heavy short selling pressure.`
-    if (/heavy shorted/i.test(r))    return `Short ratio is ${pct}% — heavily shorted but no clear directional catalyst.`
+    const pct = parseFloat(ratio[1]).toFixed(1)
+    if (/squeeze/i.test(r))            return `Short ratio is ${pct}% with price moving up — squeeze setup detected.`
+    if (/short[_ ]pressure/i.test(r))  return `Short ratio is ${pct}% with price falling — heavy short selling pressure.`
+    if (/high_short|heavy shorted/i.test(r)) return `Short ratio is ${pct}% — heavily shorted but no clear directional catalyst.`
     return `Short ratio is ${pct}%.`
   }
   return r
