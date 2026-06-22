@@ -50,7 +50,7 @@ def test_correlated_is_symmetric_and_self_false():
 # ── PortfolioManager integration ─────────────────────────────────────────────
 
 def _pm_with_graph(graph, **risk):
-    from tests.test_portfolio_manager import FakeBroker, make_pm
+    from test_portfolio_manager import FakeBroker, make_pm
     pm = make_pm(max_correlated_positions=2, **risk)
     pm.set_correlation_graph(graph)
     return pm
@@ -58,7 +58,7 @@ def _pm_with_graph(graph, **risk):
 
 def test_data_graph_blocks_correlated_stack():
     import asyncio
-    from tests.test_portfolio_manager import FakeBroker
+    from test_portfolio_manager import FakeBroker
 
     graph = CorrelationGraph({"NEW": {"AAA", "BBB"}, "AAA": {"NEW"}, "BBB": {"NEW"}})
     pm = _pm_with_graph(graph)
@@ -69,7 +69,7 @@ def test_data_graph_blocks_correlated_stack():
 
 def test_data_graph_allows_uncorrelated_name():
     import asyncio
-    from tests.test_portfolio_manager import FakeBroker
+    from test_portfolio_manager import FakeBroker
 
     graph = CorrelationGraph({"NEW": set(), "AAA": set(), "BBB": set()})
     pm = _pm_with_graph(graph)
@@ -80,7 +80,7 @@ def test_data_graph_allows_uncorrelated_name():
 
 def test_falls_back_to_static_groups_when_symbol_uncovered():
     import asyncio
-    from tests.test_portfolio_manager import FakeBroker
+    from test_portfolio_manager import FakeBroker
 
     # Graph does NOT cover the candidate → static mega_tech groups apply.
     graph = CorrelationGraph({"AAA": set()})
