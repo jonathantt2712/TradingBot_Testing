@@ -59,13 +59,13 @@ from core.enums import Decision
 from core.trade_stats import load_closed_trades, summarize, format_block
 from core.paths import volume_dir
 from backtest_30day import (
-    fetch_bars_range,
+    _fetch_all_bars,
     backtest_ticker,
     calc_summary,
     SLIPPAGE_PCT,
     LOOKBACK_BARS,
 )
-from bootstrap import build_manager
+from bootstrap import active_broker, build_manager
 
 logging.basicConfig(
     level=logging.WARNING,           # suppress agent noise during grid search
@@ -206,29 +206,20 @@ async def _eval_combo(
 # ── Data fetch ─────────────────────────────────────────────────────────────────
 
 async def _fetch_all(
+    settings,
     tickers: list[str],
     days: int,
-    key_id: str,
-    secret: str,
 ) -> tuple[dict[str, pd.DataFrame], Optional[pd.DataFrame]]:
     end_dt   = datetime.now(tz=timezone.utc).replace(hour=23, minute=59, second=59)
     start_dt = end_dt - timedelta(days=days + 5)
 
     all_syms = list(set(tickers + ["SPY"]))
-    logger.info("Fetching bars for: %s  (%d days)", all_syms, days)
+    mode = active_broker(settings)
+    logger.info("Fetching bars for %d syms (%dd) via %s — fetched ONCE, reused across combos",
+                len(all_syms), days, mode.upper())
 
-    tasks = {
-        sym: fetch_bars_range(sym, start_dt, end_dt, key_id, secret)
-        for sym in all_syms
-    }
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-    bars_map: dict[str, pd.DataFrame] = {}
-    for sym, res in zip(tasks.keys(), results):
-        if isinstance(res, Exception):
-            logger.warning("Fetch error %s: %s", sym, res)
-        elif res is not None:
-            bars_map[sym] = res
-
+    # Reuse the backtest's broker-aware loader (IBKR or Alpaca per the toggle).
+    bars_map = await _fetch_all_bars(settings, mode, all_syms, start_dt, end_dt)
     spy_bars = bars_map.pop("SPY", None)
     return bars_map, spy_bars
 
@@ -460,8 +451,10 @@ async def run(
     use_llm: bool = False,
 ) -> None:
     settings = load_settings()
-    if not settings.alpaca_key_id or not settings.alpaca_secret:
-        logger.error("ALPACA_API_KEY_ID and ALPACA_API_SECRET must be set in .env or environment")
+    mode = active_broker(settings)
+    if mode == "alpaca" and (not settings.alpaca_key_id or not settings.alpaca_secret):
+        logger.error("Alpaca data mode needs ALPACA_API_KEY_ID + ALPACA_API_SECRET "
+                     "(or flip the broker toggle to IBKR with TWS running).")
         return
 
     # When no explicit ticker list is provided, pull today's top movers
@@ -496,7 +489,7 @@ async def run(
     print(f"Objective: {objective}  |  Validation: {mode_note}  |  Agents: {agent_note}")
     print(f"Phase: {phase}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%  |  Live bias: {_live_bias}\n")
 
-    bars_cache, spy_bars = await _fetch_all(tickers, days, settings.alpaca_key_id, settings.alpaca_secret)
+    bars_cache, spy_bars = await _fetch_all(settings, tickers, days)
     if not bars_cache:
         logger.error("No bars fetched — check API keys and market hours")
         return

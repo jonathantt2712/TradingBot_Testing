@@ -22,7 +22,6 @@ from typing import Optional
 
 import numpy as np
 
-from core import health
 from core.base_agent import NEUTRAL_SCORE, BaseAgent, clamp_score
 from core.enums import AgentRole
 from core.models import AgentEvaluation, AnalysisContext
@@ -71,19 +70,10 @@ async def _fetch_finra() -> dict[str, float]:
             if data:
                 _CACHE["date"] = str(today)
                 _CACHE["data"] = data
-                health.resolve("data:short_volume")
                 logger.info("FINRA short volume loaded: %d symbols (date=%s)", len(data), d)
                 return data
 
     logger.warning("FINRA short volume unavailable — SqueezeAgent neutral")
-    # No data — tell the operator it's a feed issue, not a bug (free public source).
-    health.report_issue(
-        "data:short_volume",
-        "FINRA short-volume feed is unavailable (file not published yet or unreachable).",
-        remediation="No key/input needed — free public data; FINRA posts after the close, "
-                    "so it's normal pre-market. Squeeze agent stays neutral until then.",
-        severity="warning",
-    )
     return {}
 
 

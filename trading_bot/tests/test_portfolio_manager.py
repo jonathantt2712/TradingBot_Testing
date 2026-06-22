@@ -69,6 +69,25 @@ def test_composite_confidence_scales_weight():
     assert composite < 60.0
 
 
+def test_composite_squeeze_boost_on_confirmed_squeeze():
+    # A confirmed bullish squeeze (setup == "squeeze_long") gets _SQUEEZE_BOOST
+    # extra weight, so it pulls the composite higher than the SAME squeeze score
+    # tagged as a non-squeeze setup — all else equal.
+    pm = make_pm()
+    f = _ev(AgentRole.FUNDAMENTAL, 50)
+    v = _ev(AgentRole.VISION, 50)
+    t = _ev(AgentRole.TECHNICAL, 50)
+    sq_long = AgentEvaluation(
+        role=AgentRole.SQUEEZE, score=85, confidence=1.0, data={"setup": "squeeze_long"}
+    )
+    sq_plain = AgentEvaluation(
+        role=AgentRole.SQUEEZE, score=85, confidence=1.0, data={"setup": "moderate_short"}
+    )
+    boosted = pm._composite(f, v, t, None, None, sq_long)
+    plain   = pm._composite(f, v, t, None, None, sq_plain)
+    assert boosted > plain
+
+
 # ── agent disagreement dispersion ────────────────────────────────────────────
 
 def test_dispersion_zero_when_agents_agree():

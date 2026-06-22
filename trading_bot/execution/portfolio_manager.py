@@ -650,6 +650,14 @@ class PortfolioManager:
         },
     }
 
+    # Extra weight multiplier applied to the SqueezeAgent ONLY when it reports a
+    # confirmed bullish squeeze (setup == "squeeze_long"). A live short squeeze is a
+    # high-conviction, fast-moving setup, so we let it pull the composite harder than
+    # its small base weight would. Normalisation happens inside _composite and the
+    # confidence factor still gates it, so an unconfirmed/low-ratio squeeze stays
+    # muted; neutral/other squeeze setups are unaffected.
+    _SQUEEZE_BOOST: float = 2.0
+
     @staticmethod
     def _directional_dispersion(evaluations: "Sequence[AgentEvaluation]") -> float:
         """Population std of the directional agent scores (excludes RISK, a gate).
@@ -715,6 +723,8 @@ class PortfolioManager:
             base_w = self._live_weight(key)
             regime_mult = multipliers.get(key, 1.0)
             w = base_w * regime_mult * max(ev.confidence, 0.05)
+            if key == "squeeze" and (ev.data or {}).get("setup") == "squeeze_long":
+                w *= self._SQUEEZE_BOOST
             num += ev.score * w
             den += w
 

@@ -73,9 +73,7 @@ MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 
 TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", "0.05"))  # 5% trailing distance
 PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "5.0"))  # max net |beta| across open positions
 
-# Position exit monitor
-EXIT_MONITOR_INTERVAL_MIN = int(os.getenv("EXIT_MONITOR_INTERVAL_MIN", "5"))    # how often to re-score open positions
-EXIT_SCORE_THRESHOLD      = float(os.getenv("EXIT_SCORE_THRESHOLD", "40.0"))    # exit LONG if score < this; exit SHORT if score > (100 - this)
+# End-of-day position review
 ALLOW_OVERNIGHT           = os.getenv("ALLOW_OVERNIGHT", "false").lower() in ("1", "true", "yes")
 EOD_REVIEW_MIN_BEFORE     = int(os.getenv("EOD_REVIEW_MIN_BEFORE", "25"))       # minutes before 16:00 ET to run EOD review
 
@@ -1948,98 +1946,6 @@ async def _do_exit_position(trade: dict, price: float, reason: str,
 
 
 # ---------------------------------------------------------------------------
-# Continuous position exit monitor (every EXIT_MONITOR_INTERVAL_MIN minutes)
-# ---------------------------------------------------------------------------
-
-async def _position_exit_monitor_loop() -> None:
-    """Re-score open positions on a cadence. Exit any whose signal has flipped.
-
-    Uses TechnicalAgent only for speed (no LLM cost per position per cycle).
-    Confidence gate (≥0.50) prevents noise-driven exits on thin signals.
-    """
-    while True:
-        await asyncio.sleep(EXIT_MONITOR_INTERVAL_MIN * 60)
-
-        if not _is_market_open() or not _AGENTS_AVAILABLE or _pm is None:
-            continue
-
-        try:
-            async with aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
-            ) as session:
-                trades = _load(TRADES_FILE, [])
-                open_trades = [t for t in trades if t.get("status") == "open"]
-                if not open_trades:
-                    continue
-
-                # Batch-fetch current prices
-                tickers = list({t["ticker"] for t in open_trades})
-                try:
-                    async with session.get(
-                        f"{_DATA_BASE}/v2/stocks/snapshots?symbols={','.join(tickers)}",
-                        headers=_ALPACA_HEADERS,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as r:
-                        snaps: Dict[str, Any] = await r.json() if r.status == 200 else {}
-                except Exception:
-                    snaps = {}
-
-                modified = False
-                for trade in open_trades:
-                    ticker    = trade.get("ticker", "")
-                    direction = trade.get("direction", "LONG")
-                    snap      = snaps.get(ticker, {})
-                    price     = float(
-                        (snap.get("latestTrade") or {}).get("p") or
-                        (snap.get("dailyBar")    or {}).get("c") or 0
-                    )
-
-                    bars = await _fetch_bars_for_exit(session, ticker)
-                    if bars is None:
-                        continue
-
-                    try:
-                        ctx = AnalysisContext(ticker=ticker, bars=bars)
-                        ev  = await asyncio.wait_for(_pm.technical.evaluate(ctx), timeout=10.0)
-                    except Exception:
-                        continue
-
-                    score      = ev.score
-                    confidence = ev.confidence
-                    exit_threshold_long  = EXIT_SCORE_THRESHOLD
-                    exit_threshold_short = 100.0 - EXIT_SCORE_THRESHOLD
-
-                    should_exit = (
-                        (direction == "LONG"  and score < exit_threshold_long  and confidence >= 0.50) or
-                        (direction == "SHORT" and score > exit_threshold_short and confidence >= 0.50)
-                    )
-
-                    if should_exit:
-                        reason = (
-                            f"exit_monitor: technical score {score:.0f} "
-                            f"({'< ' + str(exit_threshold_long) if direction == 'LONG' else '> ' + str(exit_threshold_short)}) "
-                            f"flipped against {direction} (conf {confidence:.0%}) — {ev.rationale}"
-                        )
-                        p = price if price > 0 else float(trade.get("entry", 0))
-                        ok = await _do_exit_position(trade, p, reason, session, score=score)
-                        if ok:
-                            modified = True
-                    else:
-                        _log_exit_decision(
-                            ticker, direction, "hold",
-                            f"exit_monitor: score {score:.0f} still supports {direction} (conf {confidence:.0%})",
-                            score=score, price=price,
-                        )
-
-                if modified:
-                    async with _trades_lock:
-                        _save(TRADES_FILE, trades)
-
-        except Exception as exc:
-            logger.warning("Position exit monitor error: %s", exc)
-
-
-# ---------------------------------------------------------------------------
 # EOD position review (fires EOD_REVIEW_MIN_BEFORE minutes before 16:00 ET)
 # ---------------------------------------------------------------------------
 
@@ -2290,14 +2196,12 @@ async def lifespan(app: FastAPI):
 
     task     = asyncio.create_task(_background_loop())
     trail    = asyncio.create_task(_trailing_stop_loop())
-    exit_mon = asyncio.create_task(_position_exit_monitor_loop())
     eod_rev  = asyncio.create_task(_eod_position_review_loop())
     yield
     task.cancel()
     trail.cancel()
-    exit_mon.cancel()
     eod_rev.cancel()
-    for t in [task, trail, exit_mon, eod_rev]:
+    for t in [task, trail, eod_rev]:
         try:
             await t
         except asyncio.CancelledError:

@@ -248,6 +248,13 @@ export default function TradesPage() {
     .filter(t => !executedIds.has(tradeKey(t)))
     .filter(t => filter === 'all' || t.direction === filter)
 
+  // For the empty state: explain why nothing qualified and surface the nearest
+  // miss — the highest-scoring ticker the scanner rejected this cycle.
+  const scannedCount = scanLog ? scanLog.picked.length + scanLog.rejected.length : 0
+  const closestMiss = (scanLog?.rejected ?? [])
+    .filter(r => r.score != null)
+    .sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity))[0] ?? null
+
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">
 
@@ -313,9 +320,35 @@ export default function TradesPage() {
           {active.length === 0 ? (
             <div className="col-span-full card flex flex-col items-center justify-center py-16 text-center">
               <Filter className="h-8 w-8 text-muted mb-3" />
-              <p className="text-sm text-muted">
-                {trades.length === 0 ? 'No available data' : 'No signals match the current filter.'}
-              </p>
+              {trades.length === 0 ? (
+                <div className="max-w-md space-y-3">
+                  <p className="text-sm font-medium text-subtle">No trade recommendations right now</p>
+                  <p className="text-xs text-muted leading-relaxed">
+                    {scannedCount > 0
+                      ? `The scanner evaluated ${scannedCount} ticker${scannedCount === 1 ? '' : 's'}, but none cleared the entry gate — a directional score past the long/short threshold, an acceptable risk/reward, and fresh (non-stale) data.`
+                      : 'Waiting for the next scan — no candidates evaluated yet.'}
+                  </p>
+                  {closestMiss && (
+                    <div className="rounded-lg border border-bg-border bg-bg-hover px-3 py-2 text-left">
+                      <p className="mb-1 text-[11px] font-semibold text-subtle">Closest candidate</p>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="font-bold text-primary">{closestMiss.ticker}</span>
+                        {closestMiss.score != null && (
+                          <span className="font-mono text-brand-cyan">score {closestMiss.score.toFixed(1)}</span>
+                        )}
+                        {closestMiss.price > 0 && (
+                          <span className="font-mono text-muted">${closestMiss.price.toFixed(2)}</span>
+                        )}
+                      </div>
+                      {closestMiss.skip_reason && (
+                        <p className="mt-1 text-[11px] italic text-muted">{closestMiss.skip_reason}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-muted">No signals match the current filter.</p>
+              )}
             </div>
           ) : (
             active.map((t, i) => (

@@ -190,6 +190,67 @@ class IBKRBroker(BaseBroker):
             logger.warning("get_bars(%s) failed: %s", symbol, exc)
             return pd.DataFrame()
 
+    async def get_bars_range(
+        self,
+        symbol:    str,
+        start:     "datetime",
+        end:       "datetime",
+        timeframe: str = "5Min",
+    ) -> pd.DataFrame:
+        """Historical bars covering roughly [start, end] — for backtests.
+
+        Unlike get_bars (a short recent window tailed to a limit), this requests
+        a multi-week span in one call. IBKR caps a single intraday request at
+        ~30 days, so the duration is clamped; a longer window would need chunked
+        endDateTime walk-back, which is not needed for the default 30-day run.
+        """
+        self._require()
+        from ib_insync import Stock
+        try:
+            contract  = Stock(symbol, "SMART", "USD")
+            bar_size  = _BAR_SIZE_MAP.get(timeframe, "5 mins")
+            span_days = max(1, (end - start).days)
+            if span_days > 30:
+                logger.warning(
+                    "get_bars_range(%s): %d-day span clamped to IBKR's 30-day "
+                    "single-request limit for intraday bars", symbol, span_days,
+                )
+                span_days = 30
+
+            bars = await self._ib.reqHistoricalDataAsync(
+                contract,
+                endDateTime=end,
+                durationStr=f"{span_days} D",
+                barSizeSetting=bar_size,
+                whatToShow="TRADES",
+                useRTH=True,
+                formatDate=1,
+                keepUpToDate=False,
+            )
+
+            if not bars:
+                logger.warning("get_bars_range(%s): no data returned", symbol)
+                return pd.DataFrame()
+
+            df = pd.DataFrame([
+                {
+                    "timestamp": b.date,
+                    "open":      b.open,
+                    "high":      b.high,
+                    "low":       b.low,
+                    "close":     b.close,
+                    "volume":    b.volume,
+                }
+                for b in bars
+            ])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+            df = df.set_index("timestamp").sort_index()
+            return df[["open", "high", "low", "close", "volume"]]
+
+        except Exception as exc:
+            logger.warning("get_bars_range(%s) failed: %s", symbol, exc)
+            return pd.DataFrame()
+
     # ── Account info ──────────────────────────────────────────────────────────
 
     async def get_account(self) -> dict:

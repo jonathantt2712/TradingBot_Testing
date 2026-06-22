@@ -1144,7 +1144,13 @@ class TechnicalAgent(BaseAgent):
     def _macd_hist(self, close: pd.Series) -> float:
         if _HAS_PANDAS_TA:
             macd = ta.macd(close)
-            return float(macd.iloc[-1, -1])
+            # ta.macd returns None when the frame is too short for its 26+9 windows;
+            # the histogram is the last column. Treat missing/NaN as flat (0.0) so the
+            # agent stays neutral instead of crashing into the safe_evaluate fallback.
+            if macd is None or macd.empty:
+                return 0.0
+            hist = float(macd.iloc[-1, -1])
+            return 0.0 if np.isnan(hist) else hist
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         signal = (ema12 - ema26).ewm(span=9, adjust=False).mean()

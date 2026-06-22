@@ -52,7 +52,7 @@ from core.enums import Decision
 from core.models import AnalysisContext, RiskParameters
 from core.trade_stats import load_closed_trades, summarize, format_block
 from core.paths import volume_dir
-from bootstrap import build_manager, build_news
+from bootstrap import active_broker, build_manager, build_news
 
 logging.basicConfig(
     level=logging.INFO,
@@ -161,6 +161,62 @@ async def fetch_bars_range(
                 symbol, len(df),
                 df.index[0].date(), df.index[-1].date())
     return df
+
+
+def _store_bars(all_bars: dict, ticker: str, df: Optional[pd.DataFrame]) -> None:
+    """Keep a ticker's bars only if there's enough history for the walk-forward."""
+    if df is not None and not df.empty and len(df) >= LOOKBACK_BARS + 10:
+        all_bars[ticker] = df
+    else:
+        n = 0 if df is None else len(df)
+        logger.warning("Skipping %s -- not enough data (%d bars)", ticker, n)
+
+
+async def _fetch_all_bars(
+    settings,
+    mode: str,
+    fetch_list: list[str],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> dict[str, pd.DataFrame]:
+    """Fetch historical bars for every ticker via the ACTIVE broker.
+
+    IBKR mode: one TWS connection on a distinct clientId (so it won't clash with
+    a running live bot), fetched sequentially to respect IBKR historical pacing.
+    Alpaca mode: parallel REST, as before.
+    """
+    all_bars: dict[str, pd.DataFrame] = {}
+
+    if mode == "ibkr":
+        from execution.ibkr_broker import IBKRBroker
+        bt_client_id = int(os.getenv("BACKTEST_IBKR_CLIENT_ID",
+                                     str(settings.ibkr_client_id + 20)))
+        logger.info("Fetching bars from IBKR/TWS %s:%s (clientId=%d), sequentially...",
+                    settings.ibkr_host, settings.ibkr_port, bt_client_id)
+        broker = IBKRBroker(settings.ibkr_host, settings.ibkr_port, bt_client_id)
+        async with broker:
+            for ticker in fetch_list:
+                try:
+                    df = await broker.get_bars_range(ticker, start_dt, end_dt, "5Min")
+                except Exception as exc:
+                    logger.warning("IBKR history fetch failed for %s: %s", ticker, exc)
+                    df = None
+                _store_bars(all_bars, ticker, df)
+    else:
+        logger.info("Fetching bars for %d tickers in parallel (Alpaca)...", len(fetch_list))
+        results = await asyncio.gather(
+            *[fetch_bars_range(t, start_dt, end_dt,
+                               settings.alpaca_key_id, settings.alpaca_secret)
+              for t in fetch_list],
+            return_exceptions=True,
+        )
+        for ticker, result in zip(fetch_list, results):
+            if isinstance(result, Exception):
+                logger.warning("Failed to fetch bars for %s: %s", ticker, result)
+                continue
+            _store_bars(all_bars, ticker, result)
+
+    return all_bars
 
 
 # -- Fill simulator (day-trade: forced close at 15:55 ET) ----------------------
@@ -606,8 +662,12 @@ async def run(tickers: list[str], days: int) -> None:
             logger.warning("Universe scanner failed (%s) — using fallback list", exc)
             tickers = _FALLBACK_TICKERS
 
-    if not settings.alpaca_key_id or not settings.alpaca_secret:
-        logger.error("Set ALPACA_API_KEY_ID and ALPACA_API_SECRET in .env")
+    mode = active_broker(settings)
+    logger.info("Backtest data source: %s (follows the dashboard broker toggle)", mode.upper())
+
+    if mode == "alpaca" and (not settings.alpaca_key_id or not settings.alpaca_secret):
+        logger.error("Alpaca data mode needs ALPACA_API_KEY_ID + ALPACA_API_SECRET in .env "
+                     "(or flip the broker toggle to IBKR with TWS running).")
         return
 
     # Log real trade history so the run learns from the history tab.
@@ -623,20 +683,7 @@ async def run(tickers: list[str], days: int) -> None:
     fetch_list = list(dict.fromkeys(tickers + ["SPY"]))
     logger.info("Tickers: %s (+ SPY for RS signal)", " ".join(tickers))
 
-    logger.info("Fetching bars for %d tickers in parallel...", len(fetch_list))
-    results = await asyncio.gather(
-        *[fetch_bars_range(t, start_dt, end_dt, settings.alpaca_key_id, settings.alpaca_secret)
-          for t in fetch_list],
-        return_exceptions=True,
-    )
-    all_bars: dict[str, pd.DataFrame] = {}
-    for ticker, result in zip(fetch_list, results):
-        if isinstance(result, Exception):
-            logger.warning("Failed to fetch bars for %s: %s", ticker, result)
-        elif result is not None and len(result) >= LOOKBACK_BARS + 10:
-            all_bars[ticker] = result
-        else:
-            logger.warning("Skipping %s -- not enough data", ticker)
+    all_bars = await _fetch_all_bars(settings, mode, fetch_list, start_dt, end_dt)
 
     # Apply self-tuned parameters (overrides any hardcoded defaults)
     cur_w = _load_current_weights()
