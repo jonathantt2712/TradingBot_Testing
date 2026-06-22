@@ -26,6 +26,8 @@ tsconfig.tsbuildinfo
 bot_data/
 trading_bot/data/*.json
 trading_bot/data/*.jsonl
+backtest_results.json
+optimization_results.json
 *.log
 push_log.txt
 logs/
