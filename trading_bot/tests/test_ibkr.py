@@ -114,6 +114,136 @@ def test_preflight_silent_when_ibkr_ready(monkeypatch):
 def test_preflight_skips_ibkr_when_broker_is_alpaca(monkeypatch):
     monkeypatch.setattr(bootstrap, "_tcp_reachable", lambda *a, **k: False)
     monkeypatch.setenv("BROKER", "alpaca")
+    monkeypatch.setattr(bootstrap, "active_broker", lambda s: "alpaca")
     bootstrap.preflight_checks(load_settings())
     keys = {i.key for i in health.active_issues()}
     assert not (keys & {"config:ibkr_lib", "config:ibkr_conn"})
+
+
+# ── order management parity (breakeven lock) ──────────────────────────────────
+
+def test_cancel_order_cancels_matching_open_trade():
+    cancelled = []
+    trade = _trade(55, "Submitted", 0.0, 0)
+    b = IBKRBroker()
+    b._ib = SimpleNamespace(
+        isConnected=lambda: True,
+        openTrades=lambda: [trade],
+        cancelOrder=lambda o: cancelled.append(o),
+    )
+    assert asyncio.run(b.cancel_order("55")) is True
+    assert cancelled == [trade.order]
+
+
+def test_cancel_order_missing_returns_false():
+    b = IBKRBroker()
+    b._ib = SimpleNamespace(
+        isConnected=lambda: True,
+        openTrades=lambda: [],
+        cancelOrder=lambda o: None,
+    )
+    assert asyncio.run(b.cancel_order("999")) is False
+    assert asyncio.run(b.cancel_order("nope")) is False
+
+
+def test_get_positions_enriched_with_pnl():
+    pos = SimpleNamespace(contract=SimpleNamespace(symbol="NVDA"), position=10.0)
+    item = SimpleNamespace(contract=SimpleNamespace(symbol="NVDA"),
+                           marketValue=1010.0, unrealizedPNL=10.0)
+
+    async def _req():
+        return [pos]
+
+    b = IBKRBroker()
+    b._ib = SimpleNamespace(
+        isConnected=lambda: True,
+        reqPositionsAsync=_req,
+        portfolio=lambda: [item],
+    )
+    out = asyncio.run(b.get_positions())
+    assert out == [{
+        "symbol": "NVDA", "qty": 10.0, "side": "long",
+        "market_value": 1010.0, "unrealized_pl": 10.0,
+    }]
+
+
+def test_get_positions_degrades_without_portfolio():
+    pos = SimpleNamespace(contract=SimpleNamespace(symbol="AMD"), position=-5.0)
+
+    async def _req():
+        return [pos]
+
+    b = IBKRBroker()
+    b._ib = SimpleNamespace(
+        isConnected=lambda: True,
+        reqPositionsAsync=_req,
+        portfolio=lambda: [],            # no live P&L available
+    )
+    out = asyncio.run(b.get_positions())
+    assert out[0]["side"] == "short"
+    assert out[0]["market_value"] == 0.0 and out[0]["unrealized_pl"] == 0.0
+
+
+def test_get_open_orders_maps_order_type():
+    def _ot(sym, oid, action, otype):
+        return SimpleNamespace(
+            contract=SimpleNamespace(symbol=sym),
+            order=SimpleNamespace(orderId=oid, action=action, orderType=otype),
+        )
+    b = IBKRBroker()
+    b._ib = SimpleNamespace(
+        isConnected=lambda: True,
+        openTrades=lambda: [_ot("NVDA", 1, "SELL", "STP"), _ot("AMD", 2, "BUY", "LMT")],
+    )
+    out = asyncio.run(b.get_open_orders())
+    assert out[0] == {"symbol": "NVDA", "id": "1", "side": "sell", "type": "stop"}
+    assert out[1]["type"] == "limit"
+
+
+# ── broker toggle: active_broker precedence + build_broker routing ────────────
+
+def test_active_broker_file_overrides_env(tmp_path, monkeypatch):
+    f = tmp_path / "broker_mode.json"
+    f.write_text('{"broker": "ibkr"}', encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "_BROKER_MODE_FILE", f)
+    monkeypatch.setenv("BROKER", "alpaca")
+    assert bootstrap.active_broker(load_settings()) == "ibkr"
+
+
+def test_active_broker_falls_back_to_env(tmp_path, monkeypatch):
+    f = tmp_path / "broker_mode.json"
+    monkeypatch.setattr(bootstrap, "_BROKER_MODE_FILE", f)   # file does not exist
+    monkeypatch.setenv("BROKER", "ibkr")
+    assert bootstrap.active_broker(load_settings()) == "ibkr"
+
+
+def test_active_broker_ignores_garbage_value(tmp_path, monkeypatch):
+    f = tmp_path / "broker_mode.json"
+    f.write_text('{"broker": "robinhood"}', encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "_BROKER_MODE_FILE", f)
+    monkeypatch.setenv("BROKER", "alpaca")
+    assert bootstrap.active_broker(load_settings()) == "alpaca"
+
+
+def test_build_broker_routes_to_ibkr_when_toggled(tmp_path, monkeypatch):
+    from execution.alpaca_broker import AlpacaBroker
+    f = tmp_path / "broker_mode.json"
+    f.write_text('{"broker": "ibkr"}', encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "_BROKER_MODE_FILE", f)
+    broker = bootstrap.build_broker(load_settings(), force_live=True)
+    assert isinstance(broker, IBKRBroker)
+
+    f.write_text('{"broker": "alpaca"}', encoding="utf-8")
+    broker = bootstrap.build_broker(load_settings(), force_live=True)
+    assert isinstance(broker, AlpacaBroker)
+
+
+# ── live switch watcher ───────────────────────────────────────────────────────
+
+def test_broker_switch_watch_returns_on_change(monkeypatch):
+    import live_runner
+    monkeypatch.setattr(live_runner, "BROKER_SWITCH_POLL_S", 0.01)
+    monkeypatch.setattr(live_runner, "active_broker", lambda s: "ibkr")
+    # current_mode is alpaca; the watcher sees ibkr -> returns promptly.
+    asyncio.run(asyncio.wait_for(
+        live_runner._broker_switch_watch(load_settings(), "alpaca"), timeout=2.0))

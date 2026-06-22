@@ -235,6 +235,7 @@ CONTEXT_FILE = DATA_DIR / "context.json"
 WEIGHTS_FILE = DATA_DIR / "strategy_weights.json"
 REGIME_FILE  = DATA_DIR / "regime.json"
 TRADE_MODE_FILE = DATA_DIR / "trade_mode.json"   # auto-execute toggle (shared with live_runner)
+BROKER_MODE_FILE = DATA_DIR / "broker_mode.json" # alpaca/ibkr toggle (shared with live_runner)
 REJECT_LOG      = DATA_DIR / "risk_rejections.jsonl"
 SNAPSHOT_LOG    = DATA_DIR / "daily_snapshots.jsonl"
 AGENT_PERF_FILE = DATA_DIR / "agent_attribution.json"
@@ -287,6 +288,24 @@ def _load_trade_mode() -> Dict[str, Any]:
     if not isinstance(data, dict):
         return {"auto_execute": False}
     return {"auto_execute": bool(data.get("auto_execute", False))}
+
+
+def _load_broker_mode() -> Dict[str, Any]:
+    """Read the runtime broker selection (alpaca vs ibkr).
+
+    The dashboard toggle (broker_mode.json) wins; otherwise the BROKER env
+    default applies. live_runner reads the same file and restarts its trading
+    session on the newly-selected broker when it changes.
+    """
+    default = os.getenv("BROKER", "alpaca").lower()
+    if default not in ("alpaca", "ibkr"):
+        default = "alpaca"
+    data = _load(BROKER_MODE_FILE, {})
+    if isinstance(data, dict):
+        choice = str(data.get("broker", "")).lower()
+        if choice in ("alpaca", "ibkr"):
+            return {"broker": choice}
+    return {"broker": default}
 
 
 def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
@@ -2933,6 +2952,35 @@ def set_trade_mode(body: TradeModeBody):
     return {"status": "ok", "auto_execute": body.auto_execute}
 
 
+class BrokerModeBody(BaseModel):
+    broker: str
+
+
+@app.get("/api/broker-mode", dependencies=[Depends(_verify_bot_secret)])
+def get_broker_mode():
+    """Return the currently-selected execution broker (alpaca | ibkr)."""
+    return _load_broker_mode()
+
+
+@app.post("/api/broker-mode", dependencies=[Depends(_verify_bot_secret)])
+def set_broker_mode(body: BrokerModeBody):
+    """Switch the execution broker between Alpaca and IBKR.
+
+    Written to data/broker_mode.json; live_runner polls it and restarts its
+    trading session on the new broker (flattening open positions first when
+    auto-execute is live, so positions are never orphaned across venues).
+    """
+    choice = (body.broker or "").lower()
+    if choice not in ("alpaca", "ibkr"):
+        raise HTTPException(status_code=400, detail="broker must be 'alpaca' or 'ibkr'")
+    _save(BROKER_MODE_FILE, {
+        "broker":     choice,
+        "updated_at": datetime.utcnow().isoformat(),
+    })
+    logger.info("Broker mode set: %s", choice)
+    return {"status": "ok", "broker": choice}
+
+
 @app.get("/api/scorecard", dependencies=[Depends(_verify_bot_secret)])
 def get_scorecard():
     """Edge metrics + an honest confidence flag over the live paper track record."""
@@ -2962,7 +3010,7 @@ def health():
             "execute_live": execute_live,
             "auto_execute": auto_execute,
             "paper_mode":   alpaca_paper,
-            "broker":       os.getenv("BROKER", "alpaca"),
+            "broker":       _load_broker_mode()["broker"],
             "mode_label":   (
                 "DRY RUN"                                    if not execute_live else
                 ("AUTO · PAPER" if alpaca_paper else "AUTO · LIVE") if auto_execute else

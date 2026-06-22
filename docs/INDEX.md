@@ -12,6 +12,7 @@
 ## Reference (Load As Needed)
 
 - `docs/HOW_IT_WORKS.md` — visual walkthrough of the whole system
+- `docs/IBKR_MODE.md` — running against Interactive Brokers + the broker toggle
 - `DEPLOY_VERCEL.md` — deployment runbook (Vercel + Railway)
 - `WORKING_TOGETHER.md` — collaboration workflow
 

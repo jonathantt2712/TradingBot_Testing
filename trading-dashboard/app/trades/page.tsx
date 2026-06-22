@@ -4,6 +4,7 @@ import { TradeCard }       from '@/components/trades/TradeCard'
 import { ConfirmModal }    from '@/components/trades/ConfirmModal'
 import { RationaleModal }  from '@/components/trades/RationaleModal'
 import { ExecutionModeToggle } from '@/components/trades/ExecutionModeToggle'
+import { BrokerModeToggle } from '@/components/trades/BrokerModeToggle'
 import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
 import { demoRegime, api } from '@/lib/api'
 import type { TradeRecommendation, RegimeInfo, ScanResults } from '@/types/trading'
@@ -264,6 +265,8 @@ export default function TradesPage() {
             ? <span className="flex items-center gap-1.5 text-xs text-bull"><Wifi className="h-3 w-3" /> Live</span>
             : <span className="flex items-center gap-1.5 text-xs text-caution"><WifiOff className="h-3 w-3" /> Demo</span>
           }
+          {/* Execution venue: Alpaca vs IBKR */}
+          <BrokerModeToggle />
           {/* Execution mode: manual approval vs auto-execute */}
           <ExecutionModeToggle />
           {/* Filter pills */}

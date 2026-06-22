@@ -34,6 +34,14 @@ _DURATION_MAP: dict[str, str] = {
     "1Day":  "200 D",
 }
 
+# TWS order-type strings -> the lowercase types the rest of the bot uses.
+_ORDER_TYPE_MAP: dict[str, str] = {
+    "STP":     "stop",
+    "STP LMT": "stop_limit",
+    "LMT":     "limit",
+    "MKT":     "market",
+}
+
 
 class IBKRBroker(BaseBroker):
     """Interactive Brokers broker via ib_insync / TWS API.
@@ -224,15 +232,30 @@ class IBKRBroker(BaseBroker):
     async def get_positions(self) -> list[dict]:
         self._require()
         positions = await self._ib.reqPositionsAsync()
-        return [
-            {
+        # Best-effort enrichment with live P&L from the account's portfolio feed,
+        # so the breakeven-lock loop can derive per-share P&L the same way it does
+        # for Alpaca. Missing data degrades to 0.0 (loop then safely skips).
+        pnl_by: dict[str, tuple[float, float]] = {}
+        try:
+            for item in self._ib.portfolio():
+                pnl_by[item.contract.symbol] = (
+                    float(item.marketValue), float(item.unrealizedPNL),
+                )
+        except Exception:
+            logger.debug("portfolio() enrichment unavailable", exc_info=True)
+        out: list[dict] = []
+        for p in positions:
+            if p.position == 0:
+                continue
+            mv, upnl = pnl_by.get(p.contract.symbol, (0.0, 0.0))
+            out.append({
                 "symbol": p.contract.symbol,
                 "qty":    float(p.position),
                 "side":   "long" if p.position > 0 else "short",
-            }
-            for p in positions
-            if p.position != 0
-        ]
+                "market_value":  mv,
+                "unrealized_pl": upnl,
+            })
+        return out
 
     async def get_open_orders(self) -> list[dict]:
         self._require()
@@ -242,6 +265,8 @@ class IBKRBroker(BaseBroker):
                 "symbol": t.contract.symbol,
                 "id":     str(t.order.orderId),
                 "side":   t.order.action.lower(),
+                "type":   _ORDER_TYPE_MAP.get(
+                    t.order.orderType, str(t.order.orderType).lower()),
             }
             for t in trades
         ]
@@ -292,6 +317,46 @@ class IBKRBroker(BaseBroker):
         except Exception as exc:
             logger.error("close_all_positions failed: %s", exc)
             return False
+
+    # ── Order management (breakeven lock) ─────────────────────────────────────
+
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel a single working order by ID. Returns True on success."""
+        self._require()
+        try:
+            oid = int(order_id)
+        except (TypeError, ValueError):
+            return False
+        for trade in self._ib.openTrades():
+            if trade.order.orderId == oid:
+                self._ib.cancelOrder(trade.order)
+                logger.info("IBKR cancel_order: %s", oid)
+                return True
+        return False
+
+    async def submit_stop(
+        self, symbol: str, qty: int, side: str, stop_price: float
+    ) -> Optional[str]:
+        """Submit a standalone stop order (replaces the bracket stop after a
+        breakeven lock). ``side``: 'sell' for LONG positions, 'buy' for SHORT.
+        Returns the new order id, or None on failure.
+        """
+        self._require()
+        from ib_insync import Stock, StopOrder
+        action = "SELL" if side.lower() == "sell" else "BUY"
+        try:
+            contract = Stock(symbol, "SMART", "USD")
+            self._ib.qualifyContracts(contract)
+            order = StopOrder(action, int(qty), round(stop_price, 2))
+            trade = self._ib.placeOrder(contract, order)
+            await asyncio.sleep(0.5)
+            oid = str(trade.order.orderId)
+            logger.info("IBKR stop submitted %s %s ×%d @ %.2f → id=%s",
+                        action, symbol, qty, stop_price, oid)
+            return oid
+        except Exception as exc:
+            logger.error("submit_stop(%s) failed: %s", symbol, exc)
+            return None
 
     # ── Order execution ───────────────────────────────────────────────────────
 

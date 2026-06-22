@@ -6,6 +6,7 @@ construction in one place so the one-shot and live runners cannot drift apart.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import socket
@@ -54,16 +55,39 @@ from execution.liquid_broker import LiquidBroker  # noqa: E402
 from execution.portfolio_manager import PortfolioManager  # noqa: E402
 
 
+# Runtime broker selection written by the dashboard (/api/broker-mode). Read on
+# every session (re)start so the toggle takes effect without editing .env.
+_BROKER_MODE_FILE = Path(__file__).parent / "data" / "broker_mode.json"
+
+
+def active_broker(settings: Settings) -> str:
+    """The selected execution broker: 'alpaca' or 'ibkr'.
+
+    The dashboard toggle (broker_mode.json) wins when present and valid; otherwise
+    the BROKER env default applies. Liquid is a separate flag (USE_LIQUID_BROKER)
+    and is not part of this toggle.
+    """
+    try:
+        if _BROKER_MODE_FILE.exists():
+            data = json.loads(_BROKER_MODE_FILE.read_text(encoding="utf-8"))
+            choice = str(data.get("broker", "")).lower()
+            if choice in ("alpaca", "ibkr"):
+                return choice
+    except Exception:
+        logger.debug("broker_mode.json unreadable — falling back to BROKER env", exc_info=True)
+    return settings.broker
+
+
 def build_broker(settings: Settings, *, force_live: bool = False) -> BaseBroker:
     """Select the execution broker.
 
-    ``force_live=True`` (live_runner) honours BROKER/USE_LIQUID_BROKER even when
-    RUN_MODE is left at its backtest default.
+    ``force_live=True`` (live_runner) honours the broker toggle / BROKER /
+    USE_LIQUID_BROKER even when RUN_MODE is left at its backtest default.
     """
     live = force_live or settings.run_mode is RunMode.LIVE
     if live and settings.use_liquid_broker:
         return LiquidBroker(settings.liquid_api_key)
-    if live and settings.broker == "ibkr":
+    if live and active_broker(settings) == "ibkr":
         return IBKRBroker(settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id)
     return AlpacaBroker(
         settings.alpaca_key_id, settings.alpaca_secret,
@@ -242,14 +266,27 @@ def preflight_checks(settings: Settings) -> None:
     Telegram (via health_alert_loop), and in the EOD report. Reported through the
     health board so they dedupe with any runtime failures of the same thing.
     """
-    if settings.broker == "alpaca" and not (settings.alpaca_key_id and settings.alpaca_secret):
-        health.report_issue(
-            "config:alpaca_keys",
-            "Alpaca API keys are not set.",
-            remediation="Set ALPACA_API_KEY_ID and ALPACA_API_SECRET — without them the "
-                        "bot can't fetch market data, size positions, or trade.",
-        )
-    if settings.broker == "ibkr" and not settings.use_liquid_broker:
+    active = active_broker(settings)
+    # Alpaca keys are needed for execution when Alpaca is selected, and ALWAYS for
+    # the universe scanner / news feed — so warn whenever they're missing.
+    if not (settings.alpaca_key_id and settings.alpaca_secret):
+        if active == "alpaca" and not settings.use_liquid_broker:
+            health.report_issue(
+                "config:alpaca_keys",
+                "Alpaca API keys are not set.",
+                remediation="Set ALPACA_API_KEY_ID and ALPACA_API_SECRET — without them the "
+                            "bot can't fetch market data, size positions, or trade.",
+            )
+        else:
+            health.report_issue(
+                "config:alpaca_keys",
+                "Alpaca API keys are not set (needed for the market scanner / news feed).",
+                remediation="Set ALPACA_API_KEY_ID and ALPACA_API_SECRET so the universe "
+                            "scanner can find candidates; otherwise the bot trades only the "
+                            "fallback watchlist.",
+                severity="warning",
+            )
+    if active == "ibkr" and not settings.use_liquid_broker:
         try:
             import ib_insync  # noqa: F401
         except Exception:

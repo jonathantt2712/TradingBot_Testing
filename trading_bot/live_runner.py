@@ -30,8 +30,9 @@ from zoneinfo import ZoneInfo
 
 import bootstrap  # loads .env files on import — keep first
 from bootstrap import (
-    build_broker, build_manager, correlation_refresh_loop, eod_flatten_loop,
-    eod_report_loop, health_alert_loop, preflight_checks, refresh_market_context,
+    active_broker, build_broker, build_manager, correlation_refresh_loop,
+    eod_flatten_loop, eod_report_loop, health_alert_loop, preflight_checks,
+    refresh_market_context,
 )
 from config.settings import load_settings
 from core.models import AnalysisContext
@@ -50,6 +51,8 @@ BREAKOUT_INTERVAL_MIN  = int(os.environ.get("BREAKOUT_INTERVAL_MIN",  "5"))
 BREAKOUT_MIN_CHANGE    = float(os.environ.get("BREAKOUT_MIN_CHANGE_PCT", "3.0"))
 STRATEGY_REFRESH_MIN   = int(os.environ.get("STRATEGY_REFRESH_MIN",   "60"))
 CORRELATION_REFRESH_MIN = int(os.environ.get("CORRELATION_REFRESH_MIN", "60"))
+# How often to check the dashboard's broker toggle (data/broker_mode.json).
+BROKER_SWITCH_POLL_S   = int(os.environ.get("BROKER_SWITCH_POLL_S",   "10"))
 
 # Weights file written by api_server's self-tuner — we read it hourly and
 # apply ATR/threshold updates to the live pm without restarting.
@@ -365,22 +368,33 @@ async def breakeven_lock_loop(broker: BaseBroker, pm: PortfolioManager) -> None:
             logger.exception("breakeven_lock_loop error")
 
 
-async def main(tickers: Sequence[str]) -> None:
-    global _ticker_lock, _EVAL_SEMAPHORE
-    _ticker_lock = asyncio.Lock()
-    _EVAL_SEMAPHORE = asyncio.Semaphore(10)
+async def _broker_switch_watch(settings, current_mode: str) -> None:
+    """Return once the dashboard selects a broker different from the running one.
 
-    settings = load_settings()
-    execute = os.environ.get("EXECUTE_LIVE", "false").lower() == "true"
+    Polls data/broker_mode.json (via bootstrap.active_broker) every
+    BROKER_SWITCH_POLL_S seconds. Completing this coroutine signals the session
+    supervisor to tear down and rebuild with the newly-selected broker.
+    """
+    while True:
+        await asyncio.sleep(BROKER_SWITCH_POLL_S)
+        if active_broker(settings) != current_mode:
+            logger.warning("Broker toggle: %s -> %s requested", current_mode,
+                           active_broker(settings))
+            return
 
-    if not execute:
-        logger.warning("EXECUTE_LIVE!=true -> DRY RUN (analysis only, no orders sent)")
 
-    # Tell the operator up front about anything missing it needs.
+async def _run_session(settings, tickers: Sequence[str], *, execute: bool) -> bool:
+    """Run one trading session bound to the currently-selected broker.
+
+    Returns True if a broker switch was requested mid-session (the supervisor
+    then rebuilds and reruns), False if the session ended on its own.
+    """
+    active_mode = active_broker(settings)
+    # Tell the operator up front about anything missing for the active broker.
     preflight_checks(settings)
 
     broker = build_broker(settings, force_live=True)
-    logger.info("Broker: %s", type(broker).__name__)
+    logger.info("Broker: %s (selected=%s)", type(broker).__name__, active_mode)
 
     universe: UniverseScanner | None = None
     active_tickers: list[str] = list(tickers)
@@ -429,7 +443,7 @@ async def main(tickers: Sequence[str]) -> None:
             logger.info("Auto-selected %d tickers (core+scanner): %s", len(active_tickers), active_tickers)
     elif not active_tickers:
         logger.error("No tickers provided and SCANNER_ENABLED=false -- nothing to do")
-        return
+        return False
 
     pm = build_manager(settings, broker)
 
@@ -473,7 +487,59 @@ async def main(tickers: Sequence[str]) -> None:
         if execute:
             loops.append(eod_flatten_loop(broker, settings))
             loops.append(breakeven_lock_loop(broker, pm))
-        await asyncio.gather(*loops)
+
+        # Run the loops alongside a watcher for the dashboard broker toggle. The
+        # loops run forever; the watcher returns only when the operator flips the
+        # broker, at which point we cancel the loops and rebuild the session.
+        tasks = [asyncio.create_task(c) for c in loops]
+        switch = asyncio.create_task(_broker_switch_watch(settings, active_mode))
+        done, pending = await asyncio.wait(set(tasks) | {switch},
+                                           return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        if switch in done and not switch.cancelled():
+            # Don't orphan positions across execution venues: flatten on the
+            # outgoing broker before switching (day-trade bot — safe + expected).
+            if execute:
+                try:
+                    positions = await broker.get_positions()
+                except Exception:
+                    positions = []
+                if positions:
+                    logger.warning(
+                        "Flattening %d open position(s) on %s before switching brokers",
+                        len(positions), active_mode,
+                    )
+                    await broker.close_all_positions()
+            return True
+
+        # A session loop exited unexpectedly — surface its error.
+        for t in done:
+            if t is not switch and t.exception() is not None:
+                raise t.exception()
+        return False
+
+
+async def main(tickers: Sequence[str]) -> None:
+    global _ticker_lock, _EVAL_SEMAPHORE
+    _ticker_lock = asyncio.Lock()
+    _EVAL_SEMAPHORE = asyncio.Semaphore(10)
+
+    settings = load_settings()
+    execute = os.environ.get("EXECUTE_LIVE", "false").lower() == "true"
+
+    if not execute:
+        logger.warning("EXECUTE_LIVE!=true -> DRY RUN (analysis only, no orders sent)")
+
+    # Session supervisor: each session is bound to one broker. Flipping the
+    # dashboard broker toggle ends the session and restarts it on the new broker.
+    while True:
+        switched = await _run_session(settings, tickers, execute=execute)
+        if not switched:
+            break
+        logger.info("Broker switch — restarting trading session with the newly selected broker")
 
 
 if __name__ == "__main__":
