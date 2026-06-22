@@ -2933,6 +2933,17 @@ def set_trade_mode(body: TradeModeBody):
     return {"status": "ok", "auto_execute": body.auto_execute}
 
 
+@app.get("/api/scorecard", dependencies=[Depends(_verify_bot_secret)])
+def get_scorecard():
+    """Edge metrics + an honest confidence flag over the live paper track record."""
+    try:
+        from core.scorecard import build_scorecard
+        return build_scorecard().as_dict()
+    except Exception as exc:
+        logger.warning("scorecard failed: %s", exc)
+        return {"trades": 0, "confidence": "insufficient", "verdict": "scorecard unavailable"}
+
+
 @app.get("/api/health")
 def health():
     gemini_set    = bool(os.getenv("GEMINI_API_KEY"))

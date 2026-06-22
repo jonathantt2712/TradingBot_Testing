@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from core import health
 from core.llm_adapter import LLMAdapter
+from core.scorecard import build_scorecard, one_line
 from core.trade_memory import TradeMemory
 from core.trade_stats import format_block, load_closed_trades, summarize
 
@@ -163,12 +164,14 @@ class EODReportAgent:
         now = now or datetime.now(timezone.utc)
         day, audit, stats = self._facts(now)
         needs = health.format_block()
+        card = one_line(build_scorecard())
         body = None
         if self._llm.has_llm:
             prompt = (
                 "Write a concise (<=120 words) end-of-day desk note from these facts. "
                 "Cover what traded and why the rest did not, slippage, and any win-rate "
                 "trend. Plain prose.\n\n" + self._facts_block(day, audit, stats)
+                + f"\n\n{card}"
                 + (f"\n\n{needs}" if needs else "")
             )
             try:
@@ -179,5 +182,6 @@ class EODReportAgent:
                 logger.warning("EOD report LLM failed — using deterministic summary", exc_info=True)
         if body is None:
             body = self._deterministic(day, audit, stats)
-        # Always append the explicit needs block so it's never lost to the LLM.
-        return f"{body}\n\n{needs}" if needs else body
+        # Always append the scorecard + needs block so they're never lost to the LLM.
+        tail = "\n\n".join(x for x in (card, needs) if x)
+        return f"{body}\n\n{tail}" if tail else body
