@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -225,6 +226,15 @@ async def correlation_refresh_loop(
         await asyncio.sleep(interval_min * 60)
 
 
+def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
+    """True if a TCP connection to host:port opens within ``timeout`` seconds."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def preflight_checks(settings: Settings) -> None:
     """At startup, tell the operator what the bot needs that isn't configured.
 
@@ -239,6 +249,26 @@ def preflight_checks(settings: Settings) -> None:
             remediation="Set ALPACA_API_KEY_ID and ALPACA_API_SECRET — without them the "
                         "bot can't fetch market data, size positions, or trade.",
         )
+    if settings.broker == "ibkr" and not settings.use_liquid_broker:
+        try:
+            import ib_insync  # noqa: F401
+        except Exception:
+            health.report_issue(
+                "config:ibkr_lib",
+                "BROKER=ibkr but the ib_insync library isn't installed.",
+                remediation="Run `pip install -r requirements.txt` in trading_bot/ to "
+                            "install ib-insync.",
+            )
+        else:
+            if not _tcp_reachable(settings.ibkr_host, settings.ibkr_port):
+                health.report_issue(
+                    "config:ibkr_conn",
+                    f"Can't reach IBKR TWS/Gateway at {settings.ibkr_host}:{settings.ibkr_port}.",
+                    remediation="Start TWS or IB Gateway and enable the API: Global Config → "
+                                "API → Settings → check 'Enable ActiveX and Socket Clients', "
+                                "uncheck 'Read-Only API', and confirm the socket port "
+                                "(7497 = TWS paper, 4002 = IB Gateway paper) matches IBKR_PORT.",
+                )
     if not settings.gemini_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
         health.report_issue(
             "config:llm_key",

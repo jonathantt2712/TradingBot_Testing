@@ -246,6 +246,30 @@ class IBKRBroker(BaseBroker):
             for t in trades
         ]
 
+    async def get_order(self, symbol_or_id: str) -> Optional[dict]:
+        """Return entry-order state for fill/slippage tracking.
+
+        Matches the bracket parent by orderId and maps ib_insync's order status
+        to the {status, filled_avg_price, filled_qty} shape the PortfolioManager
+        expects. Returns None when the order isn't found — callers then skip
+        slippage tracking rather than fabricate a fill.
+        """
+        self._require()
+        try:
+            oid = int(symbol_or_id)
+        except (TypeError, ValueError):
+            return None
+        for trade in self._ib.trades():
+            if trade.order.orderId != oid:
+                continue
+            st = trade.orderStatus
+            return {
+                "status":           (st.status or "").lower(),   # "Filled" -> "filled"
+                "filled_avg_price": st.avgFillPrice or None,
+                "filled_qty":       st.filled or None,
+            }
+        return None
+
     async def close_all_positions(self) -> bool:
         """Cancel all open orders and flatten every position with market orders."""
         self._require()
