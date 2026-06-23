@@ -53,6 +53,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config.settings import load_settings
+from agents.regime_agent import classify_regime, _VIX_THRESHOLDS
 from core.enums import Decision
 from core.models import AnalysisContext, RiskParameters
 from core.trade_stats import load_closed_trades, summarize, format_block
@@ -101,6 +102,7 @@ class TradeResult:
     pnl_usd:     float
     pnl_pct:     float
     score:       float
+    regime:      str = "unknown"   # risk_on | neutral | risk_off at entry (VIX-reconstructed)
 
 
 # -- Alpaca historical bars ----------------------------------------------------
@@ -307,6 +309,76 @@ def _spy_regime_at(spy_bars: "pd.DataFrame | None", entry_ts: "pd.Timestamp") ->
     return "neutral"
 
 
+# -- VIX-reconstructed regime (matches the live regime_agent rule) -------------
+
+async def fetch_vix_daily(start: datetime, end: datetime) -> dict:
+    """Daily CBOE VIX (^VIX) closes from Yahoo, keyed by date. {} on failure.
+
+    Lets the backtest rebuild the SAME risk_on/neutral/risk_off labels the live
+    regime agent uses, so per-regime tuning is measured on matching regimes."""
+    import aiohttp
+    rng_days = max(7, (end - start).days + 5)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX",
+                params={"interval": "1d", "range": f"{rng_days}d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as r:
+                if r.status != 200:
+                    logger.warning("VIX history fetch returned %s", r.status)
+                    return {}
+                payload = await r.json()
+        res    = payload["chart"]["result"][0]
+        stamps = res["timestamp"]
+        closes = res["indicators"]["quote"][0]["close"]
+        out: dict = {}
+        for ts, c in zip(stamps, closes):
+            if c is not None:
+                out[datetime.fromtimestamp(ts, tz=timezone.utc).date()] = round(float(c), 2)
+        return out
+    except Exception as exc:
+        logger.warning("VIX history fetch failed: %s", exc)
+        return {}
+
+
+def _prior_vix(vix_by_date: dict, d) -> Optional[float]:
+    """Most recent VIX close STRICTLY before date d (no same-day look-ahead)."""
+    prior = [x for x in vix_by_date if x < d]
+    return vix_by_date[max(prior)] if prior else None
+
+
+def _session_vwap_chg(bars: "pd.DataFrame | None", entry_ts: "pd.Timestamp") -> tuple:
+    """(price-vs-session-VWAP %, day-change %) using only bars up to entry_ts."""
+    if bars is None or bars.empty:
+        return None, None
+    day = entry_ts.astimezone(_ET).date()
+    sess = bars[bars.index <= entry_ts]
+    sess = sess[sess.index.map(lambda t: t.astimezone(_ET).date()) == day]
+    if sess.empty:
+        return None, None
+    typical = (sess["high"] + sess["low"] + sess["close"]) / 3
+    cumvol  = float(sess["volume"].sum())
+    vwap    = float((typical * sess["volume"]).sum() / cumvol) if cumvol > 0 else float(sess["close"].iloc[-1])
+    last    = float(sess["close"].iloc[-1])
+    open_   = float(sess["open"].iloc[0])
+    return (last - vwap) / vwap * 100, (last - open_) / open_ * 100
+
+
+def regime_at(entry_ts: "pd.Timestamp", spy_bars, qqq_bars, vix_by_date: dict) -> str:
+    """Reconstruct the live risk_on/neutral/risk_off label at entry_ts, point-in-time."""
+    spy_vw, spy_ch = _session_vwap_chg(spy_bars, entry_ts)
+    qqq_vw, qqq_ch = _session_vwap_chg(qqq_bars, entry_ts)
+    vix = _prior_vix(vix_by_date, entry_ts.astimezone(_ET).date()) if vix_by_date else None
+    regime, _ = classify_regime(
+        vix_level=vix, vix_thresholds=_VIX_THRESHOLDS,
+        spy_vs_vwap=spy_vw, spy_day_chg=spy_ch,
+        qqq_vs_vwap=qqq_vw, qqq_day_chg=qqq_ch,
+    )
+    return regime.value
+
+
 # -- Walk-forward for one ticker -----------------------------------------------
 
 LOOKBACK_BARS = 200   # bars fed to agents
@@ -330,6 +402,8 @@ async def backtest_ticker(
     ticker: str,
     bars: pd.DataFrame,
     spy_bars: "pd.DataFrame | None" = None,
+    qqq_bars: "pd.DataFrame | None" = None,
+    vix_by_date: "dict | None" = None,
 ) -> list[TradeResult]:
     results: list[TradeResult] = []
     n = len(bars)
@@ -451,6 +525,7 @@ async def backtest_ticker(
             pnl_usd     = round(pnl, 2),
             pnl_pct     = round(pnl_pct, 4),
             score       = round(float(decision.composite_score), 1),
+            regime      = regime_at(entry_ts, spy_bars, qqq_bars, vix_by_date or {}),
         ))
 
         if outcome == "SL_HIT":
@@ -500,6 +575,16 @@ def calc_summary(all_trades: list[TradeResult]) -> dict:
         win_rate=("outcome", lambda x: (x == "TP_HIT").mean() * 100),
     ).sort_values("pnl", ascending=False)
 
+    by_regime = []
+    if "regime" in df.columns:
+        rg = df.groupby("regime").agg(
+            trades=("pnl_usd", "count"),
+            pnl=("pnl_usd", "sum"),
+            win_rate=("outcome", lambda x: (x == "TP_HIT").mean() * 100),
+            ev_per_trade=("pnl_usd", "mean"),
+        ).round(2)
+        by_regime = rg.reset_index().to_dict(orient="records")
+
     return {
         "total_trades":   total,
         "wins":           wins,
@@ -514,6 +599,7 @@ def calc_summary(all_trades: list[TradeResult]) -> dict:
         "max_drawdown":   round(max_dd, 2),
         "ev_per_trade":   round(ev_per_trade, 2),
         "by_ticker":      by_tk.reset_index().to_dict(orient="records"),
+        "by_regime":      by_regime,
         "trades":         [asdict(t) for t in all_trades],
     }
 
@@ -742,7 +828,8 @@ async def run(tickers: list[str], days="auto") -> None:
                 start_dt.date(), end_dt.date(), fetch_days,
                 ", auto-sizing" if dynamic else "")
 
-    fetch_list = list(dict.fromkeys(tickers + ["SPY"]))
+    fetch_list = list(dict.fromkeys(tickers + ["SPY", "QQQ"]))
+    vix_by_date = await fetch_vix_daily(start_dt, end_dt)
     logger.info("Tickers: %s (+ SPY for RS signal)", " ".join(tickers))
 
     all_bars = await _fetch_all_bars(settings, mode, fetch_list, start_dt, end_dt)
@@ -780,7 +867,8 @@ async def run(tickers: list[str], days="auto") -> None:
             continue
         bars = all_bars[ticker]
         logger.info("Running walk-forward for %s (%d bars)...", ticker, len(bars))
-        trades = await backtest_ticker(pm, ticker, bars, spy_bars=all_bars.get("SPY"))
+        trades = await backtest_ticker(pm, ticker, bars, spy_bars=all_bars.get("SPY"),
+                                       qqq_bars=all_bars.get("QQQ"), vix_by_date=vix_by_date)
         all_trades.extend(trades)
         _bt_done += 1
         elapsed = _time_mod.monotonic() - _bt_start

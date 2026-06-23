@@ -130,6 +130,52 @@ def _day_change_pct(df: pd.DataFrame) -> float:
     return (last_price - open_price) / open_price * 100
 
 
+def classify_regime(
+    *,
+    vix_level: Optional[float],
+    vix_thresholds: tuple = _VIX_THRESHOLDS,
+    spy_vs_vwap: Optional[float],
+    spy_day_chg: Optional[float],
+    qqq_vs_vwap: Optional[float],
+    qqq_day_chg: Optional[float],
+) -> tuple["MarketRegime", str]:
+    """Pure regime decision from the macro inputs. Shared by the live agent and
+    the backtest's historical reconstruction so the two can never drift.
+
+    RISK_OFF if any defensive trigger fires (VIX spike, or an index below VWAP
+    AND down >0.8% on the day); RISK_ON only when >=2 risk-on signals confirm;
+    NEUTRAL otherwise.
+    """
+    risk_off_triggers: list[str] = []
+    risk_on_signals:   list[str] = []
+
+    if vix_level is not None:
+        risk_on_cut, risk_off_cut = vix_thresholds
+        label = "VIX" if vix_thresholds is _VIX_THRESHOLDS else "VIXY"
+        if vix_level > risk_off_cut:
+            risk_off_triggers.append(f"{label}={vix_level:.1f} (>{risk_off_cut:.0f})")
+        elif vix_level < risk_on_cut:
+            risk_on_signals.append(f"{label}={vix_level:.1f} (<{risk_on_cut:.0f})")
+
+    if spy_vs_vwap is not None:
+        if spy_vs_vwap < 0 and spy_day_chg is not None and spy_day_chg < -0.8:
+            risk_off_triggers.append(f"SPY below VWAP {spy_vs_vwap:.2f}% / day {spy_day_chg:.2f}%")
+        elif spy_vs_vwap > 0 and spy_day_chg is not None and spy_day_chg >= 0.1:
+            risk_on_signals.append(f"SPY above VWAP {spy_vs_vwap:.2f}%")
+
+    if qqq_vs_vwap is not None:
+        if qqq_vs_vwap < 0 and qqq_day_chg is not None and qqq_day_chg < -0.8:
+            risk_off_triggers.append(f"QQQ below VWAP {qqq_vs_vwap:.2f}% / day {qqq_day_chg:.2f}%")
+        elif qqq_vs_vwap > 0 and qqq_day_chg is not None and qqq_day_chg >= 0.1:
+            risk_on_signals.append(f"QQQ above VWAP {qqq_vs_vwap:.2f}%")
+
+    if risk_off_triggers:
+        return MarketRegime.RISK_OFF, "RISK-OFF: " + "; ".join(risk_off_triggers)
+    if len(risk_on_signals) >= 2:
+        return MarketRegime.RISK_ON, "RISK-ON: " + "; ".join(risk_on_signals)
+    return MarketRegime.NEUTRAL, "NEUTRAL: mixed signals"
+
+
 async def _fetch_vix_index() -> float:
     """Fetch the real CBOE VIX index level from Yahoo Finance.
 
@@ -206,39 +252,12 @@ async def detect_regime(broker) -> RegimeSnapshot:
         qqq_vs_vwap = (last - vwap) / vwap * 100
         qqq_day_chg = _day_change_pct(qqq_bars)
 
-    # ── Classify regime ────────────────────────────────────────────────────
-    risk_off_triggers = []
-    risk_on_signals  = []
-
-    if vix_level is not None:
-        risk_on_cut, risk_off_cut = vix_thresholds
-        label = "VIX" if vix_thresholds is _VIX_THRESHOLDS else "VIXY"
-        if vix_level > risk_off_cut:
-            risk_off_triggers.append(f"{label}={vix_level:.1f} (>{risk_off_cut:.0f})")
-        elif vix_level < risk_on_cut:
-            risk_on_signals.append(f"{label}={vix_level:.1f} (<{risk_on_cut:.0f})")
-
-    if spy_vs_vwap is not None:
-        if spy_vs_vwap < 0 and spy_day_chg is not None and spy_day_chg < -0.8:
-            risk_off_triggers.append(f"SPY below VWAP {spy_vs_vwap:.2f}% / day {spy_day_chg:.2f}%")
-        elif spy_vs_vwap > 0 and spy_day_chg is not None and spy_day_chg >= 0.1:
-            risk_on_signals.append(f"SPY above VWAP {spy_vs_vwap:.2f}%")
-
-    if qqq_vs_vwap is not None:
-        if qqq_vs_vwap < 0 and qqq_day_chg is not None and qqq_day_chg < -0.8:
-            risk_off_triggers.append(f"QQQ below VWAP {qqq_vs_vwap:.2f}% / day {qqq_day_chg:.2f}%")
-        elif qqq_vs_vwap > 0 and qqq_day_chg is not None and qqq_day_chg >= 0.1:
-            risk_on_signals.append(f"QQQ above VWAP {qqq_vs_vwap:.2f}%")
-
-    if risk_off_triggers:
-        regime = MarketRegime.RISK_OFF
-        rationale = "RISK-OFF: " + "; ".join(risk_off_triggers)
-    elif len(risk_on_signals) >= 2:
-        regime = MarketRegime.RISK_ON
-        rationale = "RISK-ON: " + "; ".join(risk_on_signals)
-    else:
-        regime = MarketRegime.NEUTRAL
-        rationale = "NEUTRAL: mixed signals"
+    # ── Classify regime (shared pure rule) ──────────────────────────────────
+    regime, rationale = classify_regime(
+        vix_level=vix_level, vix_thresholds=vix_thresholds,
+        spy_vs_vwap=spy_vs_vwap, spy_day_chg=spy_day_chg,
+        qqq_vs_vwap=qqq_vs_vwap, qqq_day_chg=qqq_day_chg,
+    )
 
     snap = RegimeSnapshot(
         regime=regime, vix_level=vix_level,
