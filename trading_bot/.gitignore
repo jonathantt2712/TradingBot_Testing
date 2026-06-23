@@ -5,3 +5,4 @@ __pycache__/
 # Runtime data files only — Python source files in data/ ARE committed
 data/*.json
 data/__pycache__/
+validation/out/

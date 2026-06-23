@@ -89,18 +89,84 @@ def run_backtest() -> None:
           "pass a ticker's OHLC bars + its trades.)")
 
 
+def run_proxy(bars_csv: str) -> None:
+    """Strong tests on the vectorised composite proxy over a real OHLC series.
+
+    Runs the 1,000× in-sample price-permutation and the walk-forward permutation
+    (these need a cheap signal — hence the proxy), then renders equity/underwater
+    and a candlestick with the proxy's entry/exit markers."""
+    from validation.proxy_signal import momentum_signal, fit_momentum
+    from validation.permutation import price_permutation_test, walk_forward_permutation_test
+
+    df = pd.read_csv(bars_csv, index_col=0, parse_dates=True)
+    df.columns = [c.lower() for c in df.columns]
+    close = df["close"]
+    print("\n=== Mode: PROXY (vectorised composite backbone) ===")
+    print(f"  bars={len(df)} from {bars_csv}")
+
+    sig = fit_momentum(close)(close)
+    rets = M.bar_returns(sig, close)
+    print(f"  in-sample stats: {M.summarize(rets)}")
+
+    n_is = 1000 if len(df) >= 200 else 200
+    isp = price_permutation_test(close, lambda c: fit_momentum(close)(c), n=n_is, seed=11)
+    print(f"  in-sample MC permutation (n={isp['n']}): real Sharpe={isp['real_stat']} "
+          f"p={isp['p_value']} → {_verdict(isp['p_value'])}")
+
+    train = max(60, int(len(df) * 0.6))
+    if len(df) > train + 40:
+        wfp = walk_forward_permutation_test(close, fit_momentum, train=train,
+                                            test=max(20, (len(df) - train) // 5), n=200, seed=13)
+        print(f"  walk-forward permutation (n={wfp['n']}): real Sharpe={wfp['real_stat']} "
+              f"p={wfp['p_value']} → {_verdict(wfp['p_value'])}")
+    else:
+        print("  walk-forward permutation: not enough bars (need >~train+40).")
+
+    try:
+        from validation.plots import plot_equity_and_drawdown, plot_trades_on_candles
+        _OUT.mkdir(exist_ok=True)
+        eq = M.equity_curve(rets)
+        print("  chart  → " + plot_equity_and_drawdown(eq.tolist(), M.drawdown(eq).tolist(),
+                                                        _OUT / "proxy_equity.png", "Proxy"))
+        trades = _proxy_trades(sig, df)
+        print("  chart  → " + plot_trades_on_candles(df.tail(300), trades, _OUT / "proxy_candles.png",
+                                                      "Proxy entries/exits"))
+    except ImportError as exc:
+        print(f"  (charts skipped: {exc})")
+
+
+def _proxy_trades(position: pd.Series, bars: pd.DataFrame) -> list[dict]:
+    """Turn a position series into (entry,exit) trades at every change of stance."""
+    trades, cur = [], None
+    for ts, p in position.items():
+        if cur is None and p != 0:
+            cur = {"entry_time": ts, "entry": float(bars.loc[ts, "close"]),
+                   "direction": "LONG" if p > 0 else "SHORT"}
+        elif cur is not None and p != (1.0 if cur["direction"] == "LONG" else -1.0):
+            cur["exit_time"] = ts
+            cur["exit"] = float(bars.loc[ts, "close"])
+            trades.append(cur)
+            cur = ({"entry_time": ts, "entry": float(bars.loc[ts, "close"]),
+                    "direction": "LONG" if p > 0 else "SHORT"} if p != 0 else None)
+    return trades
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Strategy validation gauntlet")
     ap.add_argument("--mode", choices=["trades", "backtest", "both"], default="both")
+    ap.add_argument("--bars", help="OHLC CSV (DatetimeIndex) → run the strong proxy "
+                                    "permutation tests + candlestick markers")
     args = ap.parse_args()
     if args.mode in ("trades", "both"):
         run_trades()
     if args.mode in ("backtest", "both"):
         run_backtest()
-    print("\nNote: the strong in-sample/walk-forward PRICE-permutation tests "
-          "(validation.permutation) apply to a VECTORISED signal. Re-running the "
-          "async multi-agent pipeline 1000× is impractical, so the realised-returns "
-          "randomization above is the feasible significance screen for this bot.\n")
+    if args.bars:
+        run_proxy(args.bars)
+    print("\nNote: the strong in-sample/walk-forward PRICE-permutation tests run on the "
+          "VECTORISED proxy (validation.proxy_signal) — re-running the async multi-agent "
+          "pipeline 1000× is impractical. The realised-returns randomization is the screen "
+          "for the full bot; the proxy screens its momentum backbone.\n")
 
 
 if __name__ == "__main__":

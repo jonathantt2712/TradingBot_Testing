@@ -95,6 +95,25 @@ def test_walk_forward_oos_returns_length():
 
 # ── trade-history analyser ────────────────────────────────────────────────────
 
+def test_proxy_momentum_signal_and_fit():
+    from validation.proxy_signal import momentum_signal, fit_momentum
+    close = pd.Series(np.linspace(100, 200, 200))          # clean uptrend
+    sig = momentum_signal(close, 10, 30)
+    assert set(np.unique(sig.values)) <= {-1.0, 0.0, 1.0}
+    assert sig.iloc[-1] == 1.0                              # long in an uptrend
+    fitted = fit_momentum(close)
+    assert callable(fitted) and fitted(close).iloc[-1] == 1.0
+
+
+def test_proxy_price_permutation_real_beats_noise():
+    rng = np.random.default_rng(2)
+    rets = 0.0015 + 0.01 * rng.standard_normal(500)
+    close = pd.Series(100 * np.exp(np.cumsum(rets)))
+    from validation.proxy_signal import fit_momentum
+    res = P.price_permutation_test(close, lambda c: fit_momentum(close)(c), n=120, seed=9)
+    assert res["real_stat"] > res["perm_mean"]             # edge tops the noise mean
+
+
 def test_trade_history_analyze(tmp_path):
     trades = [
         {"status": "closed", "pnl": 100, "pnl_pct": 2.0, "closed_at": "2026-06-01"},
