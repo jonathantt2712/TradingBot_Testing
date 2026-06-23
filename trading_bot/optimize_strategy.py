@@ -62,6 +62,11 @@ from backtest_intraday import (
     _fetch_all_bars,
     backtest_ticker,
     calc_summary,
+    choose_window_days,
+    data_span_days,
+    trim_bars,
+    WINDOW_FLOOR,
+    WINDOW_CAP,
     SLIPPAGE_PCT,
     LOOKBACK_BARS,
 )
@@ -483,16 +488,39 @@ async def run(
     # strong directional bias (≥20% win-rate gap), skip combos that contradict it.
     _live_bias = _hist_stats.get("bias", "neutral")
 
+    dynamic    = isinstance(days, str) and str(days).lower() == "auto"
+    fetch_days = WINDOW_CAP if dynamic else int(days)
+
     agent_note = "ALL agents (Vision LLM ON)" if use_llm else "all non-LLM agents (Vision/Decision off)"
     mode_note  = f"walk-forward {int(SPLIT_FRAC*100)}/{int((1-SPLIT_FRAC)*100)} OOS" if validate else "full-window (NO validation)"
-    print(f"\nOptimizer — {days}d window, {len(tickers)} tickers: {tickers}")
+    print(f"\nOptimizer — {'auto' if dynamic else fetch_days}d window, {len(tickers)} tickers: {tickers}")
     print(f"Objective: {objective}  |  Validation: {mode_note}  |  Agents: {agent_note}")
     print(f"Phase: {phase}  |  Slippage: {SLIPPAGE_PCT*100:.3f}%  |  Live bias: {_live_bias}\n")
 
-    bars_cache, spy_bars = await _fetch_all(settings, tickers, days)
+    bars_cache, spy_bars = await _fetch_all(settings, tickers, fetch_days)
     if not bars_cache:
         logger.error("No bars fetched — check API keys and market hours")
         return
+
+    if dynamic:
+        # One baseline backtest over the full fetched history to read the trade
+        # density, then size the tuning window to clear the 70/30 split minimums.
+        span        = data_span_days({**bars_cache, **({"SPY": spy_bars} if spy_bars is not None else {})})
+        base        = await _eval_combo({}, tickers, bars_cache, spy_bars, use_llm)
+        trades_full = int(base.get("total_trades", 0) or 0)
+        days = choose_window_days(
+            trades_full, span,
+            floor=WINDOW_FLOOR, cap=min(WINDOW_CAP, span or WINDOW_CAP),
+            min_is=MIN_TRADES, min_oos=MIN_OOS_TRADES, split_frac=SPLIT_FRAC,
+        )
+        bars_cache = trim_bars(bars_cache, days, datetime.now(tz=timezone.utc))
+        logger.info("Dynamic window: baseline %d trades over ~%dd → tuning on last %dd",
+                    trades_full, span, days)
+        if not bars_cache:
+            logger.error("Auto-sizing left no usable tickers — widen BACKTEST_WINDOW_CAP")
+            return
+    else:
+        days = int(days)
 
     if validate:
         is_cache, oos_cache = _split_caches(bars_cache, SPLIT_FRAC)
@@ -556,8 +584,9 @@ async def run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Trading strategy optimizer — maximises live trading profit")
-    parser.add_argument("--days",    type=int, default=60,
-                        help="Lookback window in days (default 60 — needs enough for a 70/30 split)")
+    parser.add_argument("--days",    default="auto",
+                        help="Lookback window in days, or 'auto' to size it dynamically to "
+                             "whatever yields enough trades for a 70/30 split (default: auto)")
     parser.add_argument("--tickers", nargs="+", default=[],
                         help="Explicit ticker list (default: auto from universe scanner)")
     parser.add_argument("--phase",   choices=["thresholds", "atr", "both"],

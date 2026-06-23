@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import sys
 import time as _time_mod
@@ -636,6 +637,60 @@ def _update_weights_from_backtest(backtest_trades: list) -> None:
     )
 
 
+# -- Dynamic lookback window ---------------------------------------------------
+# A fixed 30/60-day window is arbitrary. These bound a window that is sized per
+# run to the data + signal density, never below the floor or above the cap (also
+# capped by however much intraday history the data feed actually returns).
+WINDOW_FLOOR = int(os.getenv("BACKTEST_WINDOW_FLOOR", "30"))
+WINDOW_CAP   = int(os.getenv("BACKTEST_WINDOW_CAP",  "120"))
+# Minimum trades for a single backtest to be statistically meaningful.
+MIN_TRADES_FOR_SIGNIFICANCE = int(os.getenv("BACKTEST_MIN_TRADES", "20"))
+
+
+def choose_window_days(trades_in_full: int, full_days: int, *, floor: int, cap: int,
+                       min_is: int, min_oos: int, split_frac: float,
+                       margin: float = 1.3) -> int:
+    """Smallest lookback in [floor, cap] projected to yield enough trades.
+
+    Smart, case-by-case: from the trade *density* observed over the full fetched
+    window, pick the shortest window that still clears the statistical minimums —
+    dense signals → short, recent window; sparse signals → longer window. For a
+    walk-forward split BOTH the in-sample (split_frac) and OOS (1-split_frac)
+    slices must clear their minimum; for a single run pass split_frac=1.0,
+    min_oos=0. `margin` is a safety cushion since trades aren't perfectly linear.
+    """
+    floor = max(1, min(floor, cap))
+    if full_days <= 0 or trades_in_full <= 0:
+        return cap  # no signal/data read — fall back to all the history we have
+    density = trades_in_full / full_days
+    need_is = (min_is * margin) / (density * split_frac) if split_frac > 0 else 0.0
+    need_oos = ((min_oos * margin) / (density * (1.0 - split_frac))
+                if (min_oos > 0 and split_frac < 1.0) else 0.0)
+    needed = max(need_is, need_oos)
+    return max(floor, min(cap, int(math.ceil(needed))))
+
+
+def data_span_days(bars_map: dict) -> int:
+    """Calendar-day span of the longest series in the fetched bars (0 if none)."""
+    span = 0
+    for df in bars_map.values():
+        if df is not None and len(df) > 1:
+            span = max(span, int((df.index[-1] - df.index[0]).days))
+    return span
+
+
+def trim_bars(bars_map: dict, days: int, end_dt: datetime) -> dict:
+    """Keep only the last `days` of each series, dropping any left too short to
+    run a walk-forward (fewer than one full lookback + a margin of bars)."""
+    cutoff = pd.Timestamp(end_dt - timedelta(days=days))
+    out: dict = {}
+    for tk, df in bars_map.items():
+        trimmed = df[df.index >= cutoff]
+        if len(trimmed) >= LOOKBACK_BARS + 10:
+            out[tk] = trimmed
+    return out
+
+
 # -- Main ----------------------------------------------------------------------
 
 # Fallback only — used when the universe scanner fails and no --tickers given.
@@ -645,8 +700,9 @@ _FALLBACK_TICKERS = [
 ]
 
 
-async def run(tickers: list[str], days: int) -> None:
+async def run(tickers: list[str], days="auto") -> None:
     settings = load_settings()
+    dynamic = isinstance(days, str) and str(days).lower() == "auto"
 
     # When no explicit ticker list is provided, pull today's top movers from
     # Alpaca's universe scanner instead of the hardcoded fallback list.
@@ -678,11 +734,13 @@ async def run(tickers: list[str], days: int) -> None:
     _hist_stats = summarize(load_closed_trades())
     logger.info(format_block(_hist_stats))
 
+    fetch_days = WINDOW_CAP if dynamic else int(days)
     end_dt   = datetime.now(tz=timezone.utc).replace(hour=23, minute=59, second=59)
-    start_dt = end_dt - timedelta(days=days + 5)   # buffer for weekends
+    start_dt = end_dt - timedelta(days=fetch_days + 5)   # buffer for weekends
 
-    logger.info("Backtest window: %s -> %s  (%d days)",
-                start_dt.date(), end_dt.date(), days)
+    logger.info("Backtest window: %s -> %s  (fetch %d days%s)",
+                start_dt.date(), end_dt.date(), fetch_days,
+                ", auto-sizing" if dynamic else "")
 
     fetch_list = list(dict.fromkeys(tickers + ["SPY"]))
     logger.info("Tickers: %s (+ SPY for RS signal)", " ".join(tickers))
@@ -731,6 +789,22 @@ async def run(tickers: list[str], days: int) -> None:
                     _bt_done, _bt_total, 100 * _bt_done / _bt_total, eta,
                     ticker, len(trades), sum(t.pnl_usd for t in trades))
 
+    # Smart window: size to the last N days that hold enough trades to matter,
+    # from the density observed over the full fetched history. Reported metrics
+    # then reflect that recent, statistically-meaningful window.
+    if dynamic:
+        span   = data_span_days(all_bars)
+        chosen = choose_window_days(
+            len(all_trades), span,
+            floor=WINDOW_FLOOR, cap=min(WINDOW_CAP, span or WINDOW_CAP),
+            min_is=MIN_TRADES_FOR_SIGNIFICANCE, min_oos=0, split_frac=1.0,
+        )
+        cutoff = pd.Timestamp(end_dt - timedelta(days=chosen))
+        kept = [t for t in all_trades if pd.Timestamp(t.entry_time) >= cutoff]
+        logger.info("Dynamic window: %d trades over ~%dd → reporting last %dd (%d trades)",
+                    len(all_trades), span, chosen, len(kept))
+        all_trades = kept
+
     summary = print_summary(all_trades)
 
     # Always write results so the dashboard shows something (even "0 trades").
@@ -751,7 +825,8 @@ async def run(tickers: list[str], days: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Intraday day-trade backtest (window set by --days)")
-    parser.add_argument("--days",    type=int, default=30, help="Lookback days (default 30)")
+    parser.add_argument("--days",    default="auto",
+                        help="Lookback days, or 'auto' to size dynamically (default: auto)")
     parser.add_argument("--tickers", nargs="+", default=[],
                         help="Explicit ticker list (default: auto from universe scanner)")
     parser.add_argument("--top",     type=int, default=0,
