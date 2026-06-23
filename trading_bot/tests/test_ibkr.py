@@ -102,6 +102,12 @@ def test_preflight_reports_ibkr_when_not_ready(monkeypatch):
 
 
 def test_preflight_silent_when_ibkr_ready(monkeypatch):
+    # ib_insync -> eventkit imports asyncio.get_event_loop() at import time;
+    # earlier asyncio.run() calls in the suite leave no current loop on 3.13.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     pytest.importorskip("ib_insync")
     monkeypatch.setattr(bootstrap, "_tcp_reachable", lambda *a, **k: True)
     monkeypatch.setenv("BROKER", "ibkr")
