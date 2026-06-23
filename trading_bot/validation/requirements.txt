@@ -1,0 +1,6 @@
+# Validation suite extras (the stats core needs only numpy + pandas, already in
+# the bot's requirements). Install these for the charts:
+matplotlib>=3.7
+mplfinance>=0.12.10b0
+# plotly is optional — only if you want interactive HTML instead of PNG:
+# plotly>=5.18
