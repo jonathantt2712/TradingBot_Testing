@@ -1,12 +1,16 @@
-"""30-day walk-forward backtest — day-trade focused.
+"""Intraday walk-forward backtest — day-trade focused.
+
+The lookback window is set by --days (default 30 for a standalone run; the
+optimizer drives this same engine at 60). The filename is deliberately
+window-agnostic — don't bake a day count into it.
 
 Usage (from trading_bot/ directory):
-    python backtest_30day.py
-    python backtest_30day.py --days 30 --tickers NVDA TSLA AAPL MSFT
-    python backtest_30day.py --days 14 --top 15
+    python backtest_intraday.py
+    python backtest_intraday.py --days 30 --tickers NVDA TSLA AAPL MSFT
+    python backtest_intraday.py --days 14 --top 15
 
 What it does:
-  1. Fetches 30 days of 5-min bars for each ticker via Alpaca REST.
+  1. Fetches --days of 5-min bars for each ticker via Alpaca REST.
   2. Every ~half-trading-day, runs the full agent pipeline (Technical + Fundamental + Risk).
   3. Simulates bracket orders: TP / SL / intraday-close (forces exit at 15:55 ET).
   4. Prints a summary table + writes backtest_results.json.
@@ -746,7 +750,7 @@ async def run(tickers: list[str], days: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="30-day intraday backtest")
+    parser = argparse.ArgumentParser(description="Intraday day-trade backtest (window set by --days)")
     parser.add_argument("--days",    type=int, default=30, help="Lookback days (default 30)")
     parser.add_argument("--tickers", nargs="+", default=[],
                         help="Explicit ticker list (default: auto from universe scanner)")

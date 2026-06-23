@@ -1609,15 +1609,15 @@ async def _run_market_scan(force: bool = False) -> None:
 
 # === Background loop ===
 
-_BACKTEST_SCRIPT  = _HERE / "backtest_30day.py"
+_BACKTEST_SCRIPT  = _HERE / "backtest_intraday.py"
 _RESULTS_FILE     = (_VOLUME or _HERE.parent) / "backtest_results.json"
 _BACKTEST_INTERVAL_H = int(os.getenv("BACKTEST_INTERVAL_H", "24"))
 
 
 async def _run_backtest() -> None:
-    """Run backtest_30day.py as a subprocess (non-blocking)."""
+    """Run backtest_intraday.py as a subprocess (non-blocking)."""
     if not _BACKTEST_SCRIPT.exists():
-        logger.warning("backtest_30day.py not found — skipping auto-backtest")
+        logger.warning("backtest_intraday.py not found — skipping auto-backtest")
         return
     logger.info("Auto-backtest starting (interval=%dh)…", _BACKTEST_INTERVAL_H)
     proc = None

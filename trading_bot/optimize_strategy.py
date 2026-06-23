@@ -58,7 +58,7 @@ from config.settings import load_settings, Settings, AgentWeights, RiskConfig, D
 from core.enums import Decision
 from core.trade_stats import load_closed_trades, summarize, format_block
 from core.paths import volume_dir
-from backtest_30day import (
+from backtest_intraday import (
     _fetch_all_bars,
     backtest_ticker,
     calc_summary,
