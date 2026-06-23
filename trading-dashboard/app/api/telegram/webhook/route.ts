@@ -45,7 +45,20 @@ export async function POST(req: Request) {
   const token = parts[1] ?? ''
 
   if (!token) {
-    await tgSend(chatId, '👋 <b>TradingBot</b>\n\nUse the profile page to connect your account and enable alerts.')
+    await tgSend(chatId, [
+      '👋 <b>Hey! I\'m TradingBot.</b>',
+      '',
+      "I'm an AI-powered trading assistant that monitors the US stock market and executes trades automatically based on real-time signals from multiple analysis agents — technical, fundamental, sentiment, and more.",
+      '',
+      "Here's what I'll keep you updated on once you connect your account:",
+      '',
+      '📥 <b>Trade Entry</b> — every time I enter a position: ticker, direction, entry price, target, stop loss, risk/reward, and my reasoning.',
+      '📤 <b>Trade Exit</b> — when I close a position: exit price, profit or loss, and why I got out.',
+      '📡 <b>Market Events</b> — notable regime shifts, unusual volatility, or anything worth knowing.',
+      '📊 <b>Weekly Summary</b> — every Monday: a full recap of the week\'s trades, P&amp;L, and win rate.',
+      '',
+      '🔗 To connect your account and start receiving alerts, go to your <b>Profile page</b> on the dashboard and click <b>Connect Telegram</b>.',
+    ].join('\n'))
     return NextResponse.json({ ok: true })
   }
 
