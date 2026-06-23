@@ -56,6 +56,10 @@ _GEMINI_MODEL_DEFAULT    = "gemini-2.0-flash"
 _ANTHROPIC_MODEL_DEFAULT = "claude-haiku-4-5-20251001"
 _VISION_MODEL_DEFAULT    = "claude-sonnet-4-6"
 
+# Hard cap on any single LLM call so a hung provider can't stall the decision
+# pipeline; on timeout we fall back to keyword scoring like any other failure.
+_LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "30"))
+
 # Substrings that mark an authentication/authorization failure — a bad/expired
 # key that retrying can NEVER fix (unlike a timeout or a 429 quota blip).
 # NOTE: do NOT use bare "401"/"403" — they false-match digit runs inside project
@@ -198,10 +202,13 @@ class LLMAdapter:
                 from google import genai  # type: ignore
                 client = genai.Client(api_key=self.gemini_key)
                 contents = (system + "\n\n" + prompt).strip() if system else prompt
-                resp = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=self.gemini_model,
-                    contents=contents,
+                resp = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.models.generate_content,
+                        model=self.gemini_model,
+                        contents=contents,
+                    ),
+                    timeout=_LLM_TIMEOUT_S,
                 )
                 text = (resp.text or "").strip()
                 if text:
@@ -227,10 +234,13 @@ class LLMAdapter:
                 from google.genai import types as genai_types  # type: ignore
                 client = genai.Client(api_key=self.gemini_key)
                 image_part = genai_types.Part.from_bytes(data=image_bytes, mime_type=media_type)
-                resp = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=self.gemini_model,
-                    contents=[prompt, image_part],
+                resp = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.models.generate_content,
+                        model=self.gemini_model,
+                        contents=[prompt, image_part],
+                    ),
+                    timeout=_LLM_TIMEOUT_S,
                 )
                 text = (resp.text or "").strip()
                 if text:
@@ -254,7 +264,7 @@ class LLMAdapter:
     async def _anthropic_chat(self, prompt: str, system: str) -> Optional[str]:
         try:
             import anthropic  # type: ignore
-            client = anthropic.AsyncAnthropic(api_key=self.anthropic_key)
+            client = anthropic.AsyncAnthropic(api_key=self.anthropic_key, timeout=_LLM_TIMEOUT_S)
             kwargs: dict = dict(
                 model=self.anthropic_model,
                 max_tokens=512,
@@ -277,7 +287,7 @@ class LLMAdapter:
         try:
             import anthropic  # type: ignore
             b64 = base64.standard_b64encode(image_bytes).decode()
-            client = anthropic.AsyncAnthropic(api_key=self.anthropic_key)
+            client = anthropic.AsyncAnthropic(api_key=self.anthropic_key, timeout=_LLM_TIMEOUT_S)
             resp = await client.messages.create(
                 model=self.vision_model,
                 max_tokens=300,
