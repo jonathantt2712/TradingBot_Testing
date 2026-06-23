@@ -100,6 +100,7 @@ class PortfolioManager:
         # Online learning: tuner re-weights agents from resolved trade outcomes
         self._tuner = WeightTuner(self._weights)
         self._tuned_weights: dict = {}
+        self._tuned_file: dict = {}       # full strategy_weights.json, TTL-cached
         self._tuned_weights_ts: float = 0.0
         # Data-derived correlation graph for the concentration cap; None until a
         # runner builds and injects it, in which case the static groups are used.
@@ -673,20 +674,40 @@ class PortfolioManager:
             return 0.0
         return float(statistics.pstdev(scores))
 
-    def _live_weight(self, key: str) -> float:
-        """Agent base weight: tuned value from disk (TTL-cached) or settings default."""
+    def _tuned(self) -> dict:
+        """The full strategy_weights.json (TTL-cached), or {} when tuning is off."""
         now = time.monotonic()
         if now - self._tuned_weights_ts > _TUNED_WEIGHTS_TTL:
             try:
                 w = json.loads(_WEIGHTS_FILE.read_text())
-                if w.get("live_tuning_active") and isinstance(w.get("agent_weights"), dict):
-                    self._tuned_weights = w["agent_weights"]
-                else:
-                    self._tuned_weights = {}
+                self._tuned_file = w if (isinstance(w, dict) and w.get("live_tuning_active")) else {}
             except Exception:
-                self._tuned_weights = {}
+                self._tuned_file = {}
+            self._tuned_weights = self._tuned_file.get("agent_weights") if isinstance(
+                self._tuned_file.get("agent_weights"), dict) else {}
             self._tuned_weights_ts = now
-        return self._tuned_weights.get(key) or self._weights.get(key, 0.0)
+        return self._tuned_file
+
+    def _regime_block(self) -> dict:
+        """Learned params for the CURRENT regime, if present & non-empty; else {}.
+
+        When this is non-empty the bot runs that regime's own learned strategy
+        (weights + thresholds); otherwise it falls back to the global tuned params
+        plus the hardcoded _REGIME_MULTIPLIERS heuristics. Returns {} when no
+        regime is injected (e.g. backtests), leaving that path untouched."""
+        if self._regime is None:
+            return {}
+        blk = (self._tuned().get("regime_params") or {}).get(self._regime.regime.value)
+        return blk if isinstance(blk, dict) and blk.get("agent_weights") else {}
+
+    def _live_weight(self, key: str) -> float:
+        """Agent base weight: current regime's learned value, else global tuned,
+        else the settings default."""
+        blk = self._regime_block()
+        if blk and blk.get("agent_weights", {}).get(key):
+            return blk["agent_weights"][key]
+        tuned = self._tuned().get("agent_weights") or {}
+        return tuned.get(key) or self._weights.get(key, 0.0)
 
     def _composite(
         self,
@@ -712,9 +733,12 @@ class PortfolioManager:
         if macro is not None:
             agents.append(("macro", macro))
 
-        # Look up regime multipliers (default = no adjustment)
+        # Regime weighting: prefer the regime's LEARNED weights (already in
+        # base_w via _live_weight) and skip the hardcoded multipliers so the
+        # adjustment isn't double-counted. Fall back to the heuristic multipliers
+        # only when that regime hasn't been learned yet.
         regime_val = self._regime.regime.value if self._regime is not None else "neutral"
-        multipliers = self._REGIME_MULTIPLIERS.get(regime_val, {})
+        multipliers = {} if self._regime_block() else self._REGIME_MULTIPLIERS.get(regime_val, {})
 
         num = den = 0.0
         for key, ev in agents:
@@ -743,14 +767,15 @@ class PortfolioManager:
         short_t = self._thresholds.short_below
         if backtest_mode:
             return long_t, short_t
-        try:
-            w = json.loads(_WEIGHTS_FILE.read_text())
-            # Only honor the file when tuning is deliberately active (see RiskAgent).
-            if w.get("live_tuning_active"):
-                long_t  = float(w.get("long_threshold",  long_t))
-                short_t = float(w.get("short_threshold", short_t))
-        except Exception:
-            pass
+        # Prefer the current regime's learned thresholds, then the global tuned
+        # values, then the configured defaults.
+        blk = self._regime_block()
+        if blk and blk.get("long_threshold") is not None:
+            return float(blk["long_threshold"]), float(blk.get("short_threshold", short_t))
+        w = self._tuned()
+        if w.get("live_tuning_active"):
+            long_t  = float(w.get("long_threshold",  long_t))
+            short_t = float(w.get("short_threshold", short_t))
         return long_t, short_t
 
     def _direction(
