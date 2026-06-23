@@ -699,7 +699,7 @@ def _update_weights_from_backtest(backtest_trades: list) -> None:
     cur["win_rate_30d"]       = round(win_rate * 100, 1)
     cur["bt_trades"]          = len(bt_dicts)
     cur["live_trades_used"]   = len(live_closed)
-    cur["last_bt_update"]     = datetime.utcnow().isoformat()
+    cur["last_bt_update"]     = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     cur["update_count"]       = cur.get("update_count", 0) + 1
 
     avg_win  = float(np.mean(wins))   if wins   else 0.0

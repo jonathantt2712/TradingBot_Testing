@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Any
 
 import aiohttp
@@ -27,7 +27,7 @@ def _regime_to_dict(regime) -> Optional[dict]:
         "spy_day_chg": regime.spy_day_chg or 0.0,
         "qqq_day_chg": regime.qqq_day_chg or 0.0,
         "rationale":   regime.rationale,
-        "timestamp":   datetime.utcnow().isoformat(),
+        "timestamp":   datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -46,7 +46,7 @@ def _decision_to_rec(decision, scan_report=None) -> Optional[dict]:
             hot    = stat.sector_rank == 1
 
     return {
-        "id":              f"{decision.ticker}-{int(datetime.utcnow().timestamp())}",
+        "id":              f"{decision.ticker}-{int(datetime.now(timezone.utc).replace(tzinfo=None).timestamp())}",
         "ticker":          decision.ticker,
         "direction":       decision.decision.value,
         "composite_score": decision.composite_score,
@@ -70,7 +70,7 @@ def _decision_to_rec(decision, scan_report=None) -> Optional[dict]:
             }
             for ev in decision.evaluations
         ],
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
