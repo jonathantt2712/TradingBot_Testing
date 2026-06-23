@@ -1,5 +1,6 @@
 'use client'
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo } from 'react'
+import { usePolling } from '@/lib/usePolling'
 import {
   LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine,
@@ -70,11 +71,7 @@ export default function LearningPage() {
     }
   }, [])
 
-  useEffect(() => {
-    fetchData()
-    const id = setInterval(fetchData, REFRESH_MS)
-    return () => clearInterval(id)
-  }, [fetchData])
+  usePolling(fetchData, REFRESH_MS)
 
   const agents = useMemo(() => {
     const set = new Set<string>()

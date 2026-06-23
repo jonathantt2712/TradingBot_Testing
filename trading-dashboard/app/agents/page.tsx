@@ -1,7 +1,8 @@
 'use client'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import { RefreshCw, Wifi, WifiOff, Clock } from 'lucide-react'
 import { api } from '@/lib/api'
+import { usePolling } from '@/lib/usePolling'
 import { AGENT_ORDER } from '@/lib/agents'
 import { AgentOverviewCard } from '@/components/agents/AgentOverviewCard'
 import { cn, regimeLabel, regimeColor } from '@/lib/utils'
@@ -38,11 +39,7 @@ export default function AgentsPage() {
     }
   }, [])
 
-  useEffect(() => {
-    fetchData()
-    const id = setInterval(fetchData, REFRESH_MS)
-    return () => clearInterval(id)
-  }, [fetchData])
+  usePolling(fetchData, REFRESH_MS)
 
   const lastUpdated = [regime?.timestamp, ...recommendations.map(r => r.timestamp)]
     .filter(Boolean)

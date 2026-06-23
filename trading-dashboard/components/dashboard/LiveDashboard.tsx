@@ -1,14 +1,21 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
+import dynamic from 'next/dynamic'
 import { StatsCards }      from './StatsCards'
-import { PnLChart }        from './PnLChart'
 import { RegimeIndicator } from './RegimeIndicator'
 import { SectorHeatmap }   from './SectorHeatmap'
 import { PositionsTable }  from './PositionsTable'
 import { cn } from '@/lib/utils'
 import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/trading'
 import type { AlpacaPosition } from '@/lib/alpaca'
+
+// Charts pull in recharts (~115 kB). Defer it so the dashboard shell (stats,
+// regime, positions) paints first and the chart hydrates client-side after.
+const PnLChart = dynamic(() => import('./PnLChart').then(m => m.PnLChart), {
+  ssr: false,
+  loading: () => <div className="h-64 w-full animate-pulse rounded-lg bg-bg-elev" />,
+})
 
 // Positions and recommendations: refresh every 30s
 const FAST_MS = 30_000

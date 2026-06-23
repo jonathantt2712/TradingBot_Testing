@@ -7,6 +7,7 @@ import { ExecutionModeToggle } from '@/components/trades/ExecutionModeToggle'
 import { BrokerModeToggle } from '@/components/trades/BrokerModeToggle'
 import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
 import { demoRegime, api } from '@/lib/api'
+import { usePolling } from '@/lib/usePolling'
 import type { TradeRecommendation, RegimeInfo, ScanResults } from '@/types/trading'
 import { RefreshCw, Filter, Wifi, WifiOff, ChevronDown, ChevronUp, CheckCircle2, ShoppingCart, Loader2, ScanSearch, TrendingUp, TrendingDown } from 'lucide-react'
 
@@ -147,12 +148,8 @@ export default function TradesPage() {
     }
   }, [fetchPrices])
 
-  useEffect(() => {
-    fetchData()
-    const recId   = setInterval(fetchData, REFRESH_MS)
-    const priceId = setInterval(() => fetchPrices(tradesRef.current), PRICE_MS)
-    return () => { clearInterval(recId); clearInterval(priceId) }
-  }, [fetchData, fetchPrices])
+  usePolling(fetchData, REFRESH_MS)
+  usePolling(() => fetchPrices(tradesRef.current), PRICE_MS)
 
   async function handleBuyAll() {
     if (!active.length || buyingAll) return

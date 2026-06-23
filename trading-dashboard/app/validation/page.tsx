@@ -6,6 +6,7 @@ import {
 } from 'recharts'
 import { RefreshCw, Wifi, WifiOff, ShieldCheck, AlertTriangle } from 'lucide-react'
 import { api } from '@/lib/api'
+import { usePolling } from '@/lib/usePolling'
 import { cn } from '@/lib/utils'
 import type { ValidationData, TradeRecord, OhlcBar } from '@/types/trading'
 import CandleChart, { type TradeMarker } from '@/components/validation/CandleChart'
@@ -61,11 +62,8 @@ export default function ValidationPage() {
     } catch { /* keep empty */ }
   }, [])
 
-  useEffect(() => {
-    fetchData(); fetchHistory()
-    const id = setInterval(fetchData, REFRESH_MS)
-    return () => clearInterval(id)
-  }, [fetchData, fetchHistory])
+  usePolling(fetchData, REFRESH_MS)
+  useEffect(() => { fetchHistory() }, [fetchHistory])   // one-time: ticker list + markers
 
   // Load bars whenever the selected ticker changes.
   useEffect(() => {
