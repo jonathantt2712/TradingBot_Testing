@@ -57,7 +57,7 @@ def _is_market_open() -> bool:
 def _next_market_open() -> datetime:
     """Return the next US equities market open (09:30 ET Mon–Fri) as a naive UTC datetime."""
     if _ET is None:
-        return datetime.utcnow() + timedelta(hours=1)
+        return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
     now = datetime.now(_ET)
     candidate = now.replace(hour=9, minute=30, second=0, microsecond=0)
     if now >= candidate:
@@ -375,7 +375,7 @@ def _load_broker_mode() -> Dict[str, Any]:
 def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
     """Append a trade rejection record to risk_rejections.jsonl."""
     entry = {
-        "ts":              datetime.utcnow().isoformat(),
+        "ts":              datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "ticker":          ticker,
         "reason":          reason,
         "composite_score": round(score, 1),
@@ -449,7 +449,7 @@ def _load_weights() -> Dict[str, Any]:
 def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
     """Append a trade rejection record to risk_rejections.jsonl."""
     entry = {
-        "ts":              datetime.utcnow().isoformat(),
+        "ts":              datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "ticker":          ticker,
         "reason":          reason,
         "composite_score": round(score, 1),
@@ -478,7 +478,7 @@ def _close_simulated_trade(trade: dict, exit_price: float, reason: str) -> None:
     trade["exit_reason"] = reason
     trade["pnl"]         = round(pnl, 2)
     trade["pnl_pct"]     = round(pnl_pct, 2)
-    trade["closed_at"]   = datetime.utcnow().isoformat()
+    trade["closed_at"]   = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
 
 def _save_weights(w: Dict[str, Any]) -> None:
@@ -520,7 +520,7 @@ async def _fetch_earnings_blacklist(session: aiohttp.ClientSession) -> set:
     so the scanner keeps running even if this call fails.
     """
     global EARNINGS_CACHE
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     cached_at = EARNINGS_CACHE.get("updated_at")
     if cached_at and (now - cached_at).total_seconds() < 3600:
         return EARNINGS_CACHE["blacklist"]
@@ -580,7 +580,7 @@ async def _fetch_multi_bars(
     """
     if not _AGENTS_AVAILABLE or not symbols:
         return {}
-    start = (datetime.utcnow() - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     async def _fetch_one(sym: str):
         try:
@@ -707,7 +707,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
                 trade["exit_reason"] = exit_reason
                 trade["pnl"]         = round(pnl, 2)
                 trade["pnl_pct"]     = round(pnl_pct, 2)
-                trade["closed_at"]   = datetime.utcnow().isoformat()
+                trade["closed_at"]   = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 changed_ids.add(_trade_key(trade))
                 _update_agent_attribution(trade)
                 logger.info(
@@ -745,7 +745,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
 
             elif parent_status in ("canceled", "expired", "done_for_day"):
                 trade["status"]    = "cancelled"
-                trade["closed_at"] = datetime.utcnow().isoformat()
+                trade["closed_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 changed_ids.add(_trade_key(trade))
                 continue
             else:
@@ -767,7 +767,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             trade["exit_reason"] = exit_reason
             trade["pnl"]         = round(pnl, 2)
             trade["pnl_pct"]     = round(pnl_pct, 2)
-            trade["closed_at"]   = datetime.utcnow().isoformat()
+            trade["closed_at"]   = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
             changed_ids.add(_trade_key(trade))
             _update_agent_attribution(trade)
             logger.info("Closed %s %s via %s: exit=%.2f PnL=$%.2f (%.2f%%)",
@@ -806,7 +806,7 @@ def _update_strategy_weights() -> None:
     weights["long_win_rate"]  = round(long_win_rate * 100, 1)
     weights["short_win_rate"] = round(short_win_rate * 100, 1)
     weights["update_count"]   = weights.get("update_count", 0) + 1
-    weights["last_updated"]   = datetime.utcnow().isoformat()
+    weights["last_updated"]   = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
     # NOTE: the self-tuner refines ATR/score params but does NOT activate live
     # tuning on its own — only a deliberate, OOS-validated optimizer Apply flips
@@ -871,7 +871,7 @@ async def _revalidate_expired_recs(session: aiohttp.ClientSession) -> None:
     if not recs:
         return
 
-    now     = datetime.utcnow()
+    now     = datetime.now(timezone.utc).replace(tzinfo=None)
     expired = [r for r in recs if r.get("expires_at") and
                datetime.fromisoformat(r["expires_at"]) <= now]
     if not expired:
@@ -1030,7 +1030,7 @@ def _check_circuit_breaker() -> Optional[str]:
     if consec >= MAX_CONSECUTIVE_LOSSES:
         reason = f"{consec} consecutive losses — trading halted until manual reset"
         _circuit_breaker.update({"halted": True, "reason": "consecutive_losses",
-                                  "halted_at": datetime.utcnow().isoformat()})
+                                  "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()})
         return reason
 
     # Daily P&L check
@@ -1039,7 +1039,7 @@ def _check_circuit_breaker() -> Optional[str]:
     if daily_loss <= -DAILY_LOSS_LIMIT_PCT:
         reason = f"Daily loss limit hit ({daily_loss*100:.1f}%) — trading halted for today"
         _circuit_breaker.update({"halted": True, "reason": "daily_loss",
-                                  "halted_at": datetime.utcnow().isoformat()})
+                                  "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()})
         return reason
 
     _circuit_breaker["halted"] = False
@@ -1050,7 +1050,7 @@ def _check_circuit_breaker() -> Optional[str]:
 async def _fetch_news_catalyst(session: aiohttp.ClientSession, sym: str) -> str:
     """Return the most recent Benzinga news headline for sym from last 24h, or ''."""
     try:
-        since = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        since = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
         async with session.get(
             f"{_DATA_BASE}/v1beta1/news?symbols={sym}&limit=1&start={since}",
             headers=_ALPACA_HEADERS,
@@ -1162,7 +1162,7 @@ async def _run_premarket_scan() -> None:
                         rationale += f" | {catalyst[:80]}"
 
                     recs.append({
-                        "id":              f"{sym}-pm-{int(datetime.utcnow().timestamp())}",
+                        "id":              f"{sym}-pm-{int(datetime.now(timezone.utc).replace(tzinfo=None).timestamp())}",
                         "ticker":          sym,
                         "direction":       direction,
                         "composite_score": round(min(max(50.0 + abs(gap_pct) * 3, 55.0), 90.0), 1),
@@ -1173,12 +1173,12 @@ async def _run_premarket_scan() -> None:
                                            "risk_reward": rr, "dollar_risk": dollar_rsk},
                         "regime":          "neutral",
                         "sector":          _SECTOR_MAP.get(sym, "Other"),
-                        "scanned_at":      datetime.utcnow().isoformat(),
+                        "scanned_at":      datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                         "expires_at":      expires_at,
                         "reeval_count":    0,
                         "hot_sector":      False,
                         "evaluations":     [],
-                        "timestamp":       datetime.utcnow().isoformat(),
+                        "timestamp":       datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                         "chg_pct":         round(gap_pct, 2),
                         "premarket":       True,
                         "gap_pct":         round(gap_pct, 2),
@@ -1223,7 +1223,7 @@ async def _run_market_scan(force: bool = False) -> None:
         last = _scan_stats.get("last_scan_at")
         if last and not force:
             try:
-                age_min = (datetime.utcnow() - datetime.fromisoformat(last)).total_seconds() / 60
+                age_min = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.fromisoformat(last)).total_seconds() / 60
                 if age_min < 60:
                     return
             except Exception:
@@ -1367,7 +1367,7 @@ async def _run_market_scan(force: bool = False) -> None:
             "spy_day_chg": spy_chg,
             "qqq_day_chg": qqq_chg,
             "rationale":   regime_rationale,
-            "timestamp":   datetime.utcnow().isoformat(),
+            "timestamp":   datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "reasoning": {
                 "regime": regime_label,
                 "rationale": regime_rationale,
@@ -1396,7 +1396,7 @@ async def _run_market_scan(force: bool = False) -> None:
                 "chg_pct":     round(chg_pct, 2),
                 "score":       round(score, 1) if score else None,
                 "skip_reason": reason,
-                "scanned_at":  datetime.utcnow().isoformat(),
+                "scanned_at":  datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             })
 
         for sym in symbols_raw:
@@ -1527,11 +1527,11 @@ async def _run_market_scan(force: bool = False) -> None:
             # Off-hours recs stay valid until the next market open (+ the usual
             # window) so they're still fresh for Monday instead of showing as
             # "expired" all weekend.
-            expires_base = datetime.utcnow() if _is_market_open() else _next_market_open()
+            expires_base = datetime.now(timezone.utc).replace(tzinfo=None) if _is_market_open() else _next_market_open()
             expires_iso  = (expires_base + timedelta(minutes=win_mins)).isoformat()
 
             recs.append({
-                "id":              f"{sym}-{int(datetime.utcnow().timestamp())}",
+                "id":              f"{sym}-{int(datetime.now(timezone.utc).replace(tzinfo=None).timestamp())}",
                 "ticker":          sym,
                 "direction":       direction,
                 "composite_score": round(score, 1),
@@ -1547,12 +1547,12 @@ async def _run_market_scan(force: bool = False) -> None:
                 },
                 "regime":       "neutral",
                 "sector":       _SECTOR_MAP.get(sym, "Other"),
-                "scanned_at":   datetime.utcnow().isoformat(),
+                "scanned_at":   datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 "expires_at":   expires_iso,
                 "reeval_count": 0,
                 "hot_sector":   False,
                 "evaluations":  evaluations_out,
-                "timestamp":    datetime.utcnow().isoformat(),
+                "timestamp":    datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 "chg_pct":      round(chg_pct, 2),
                 "beta":         ticker_beta.get(sym, 1.0),
             })
@@ -1577,7 +1577,7 @@ async def _run_market_scan(force: bool = False) -> None:
         _save(SCAN_LOG_FILE, {
             "picked":     recs,
             "rejected":   rejected,
-            "scanned_at": datetime.utcnow().isoformat(),
+            "scanned_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         })
 
         # Push high-conviction signals to Telegram
@@ -1592,7 +1592,7 @@ async def _run_market_scan(force: bool = False) -> None:
         _scan_stats["tickers_scanned"] += scanned_n
         _scan_stats["recs_generated"]  += len(recs)
         _scan_stats["recs_skipped"]    += skipped_n
-        _scan_stats["last_scan_at"]     = datetime.utcnow().isoformat()
+        _scan_stats["last_scan_at"]     = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         logger.info(
             "Scan complete: %d recs from %d symbols — skipped=%d agents=%s",
             len(recs), scanned_n, skipped_n, _AGENTS_AVAILABLE,
@@ -1647,7 +1647,7 @@ async def _run_backtest() -> None:
         if proc.returncode == 0:
             logger.info("Auto-backtest complete — results written to %s", _RESULTS_FILE)
             _backtest_stats.update({
-                "last_run_at": datetime.utcnow().isoformat(),
+                "last_run_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 "last_status": "ok",
                 "last_error":  None,
                 "last_log":    decoded,
@@ -1655,7 +1655,7 @@ async def _run_backtest() -> None:
         else:
             logger.error("Auto-backtest failed (rc=%d): %s", proc.returncode, decoded[-500:])
             _backtest_stats.update({
-                "last_run_at": datetime.utcnow().isoformat(),
+                "last_run_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 "last_status": "failed",
                 "error_count": _backtest_stats["error_count"] + 1,
                 "last_error":  decoded[-500:],
@@ -1666,7 +1666,7 @@ async def _run_backtest() -> None:
         if proc is not None:
             proc.kill()
         _backtest_stats.update({
-            "last_run_at": datetime.utcnow().isoformat(),
+            "last_run_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "last_status": "timeout",
             "error_count": _backtest_stats["error_count"] + 1,
             "last_error":  "timed out after 30 min",
@@ -1675,7 +1675,7 @@ async def _run_backtest() -> None:
     except Exception:
         logger.exception("Auto-backtest subprocess error")
         _backtest_stats.update({
-            "last_run_at": datetime.utcnow().isoformat(),
+            "last_run_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "last_status": "failed",
             "error_count": _backtest_stats["error_count"] + 1,
         })
@@ -1729,7 +1729,7 @@ async def _run_optimizer() -> None:
         if proc.returncode == 0:
             logger.info("Optimizer complete — wrote backtest_optimal.json + OPTIMAL_CONFIG.txt")
             _optimizer_stats.update({
-                "last_run_at": datetime.utcnow().isoformat(),
+                "last_run_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 "last_status": "ok",
                 "last_error":  None,
                 "last_log":    full_log,
@@ -1737,7 +1737,7 @@ async def _run_optimizer() -> None:
         else:
             logger.error("Optimizer failed (rc=%d): %s", proc.returncode, full_log[-500:])
             _optimizer_stats.update({
-                "last_run_at": datetime.utcnow().isoformat(),
+                "last_run_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 "last_status": "failed",
                 "error_count": _optimizer_stats["error_count"] + 1,
                 "last_error":  full_log[-500:],
@@ -1748,7 +1748,7 @@ async def _run_optimizer() -> None:
         if proc is not None:
             proc.kill()
         _optimizer_stats.update({
-            "last_run_at": datetime.utcnow().isoformat(),
+            "last_run_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "last_status": "timeout",
             "error_count": _optimizer_stats["error_count"] + 1,
             "last_error":  "timed out after 50 min",
@@ -1756,7 +1756,7 @@ async def _run_optimizer() -> None:
     except Exception:
         logger.exception("Optimizer subprocess error")
         _optimizer_stats.update({
-            "last_run_at": datetime.utcnow().isoformat(),
+            "last_run_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "last_status": "failed",
             "error_count": _optimizer_stats["error_count"] + 1,
         })
@@ -1974,7 +1974,7 @@ def _log_exit_decision(ticker: str, direction: str, action: str,
                        reason: str, score: Optional[float] = None,
                        price: Optional[float] = None) -> None:
     entry: Dict[str, Any] = {
-        "ts":        datetime.utcnow().isoformat(),
+        "ts":        datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "ticker":    ticker,
         "direction": direction,
         "action":    action,   # "exit" | "hold" | "hold_overnight"
@@ -2160,7 +2160,7 @@ def _refresh_agent_scorecards() -> List[dict]:
     weights = _load(LEARNING_WEIGHTS_FILE, {})
     cards = compute_agent_scorecards(closed, weights if isinstance(weights, dict) else {})
     _save(AGENT_SCORECARDS_FILE, {
-        "updated_at":    datetime.utcnow().isoformat(),
+        "updated_at":    datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "sample_trades": len(closed),
         "agents":        cards,
     })
@@ -2577,7 +2577,7 @@ def get_regime():
         "spy_day_chg": 0.0,
         "qqq_day_chg": 0.0,
         "rationale":   "no data yet",
-        "timestamp":   datetime.utcnow().isoformat(),
+        "timestamp":   datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -2715,7 +2715,7 @@ async def _record_executed_trade(body: ExecuteBody) -> tuple[Optional[str], Opti
             "take_profit":     body.take_profit,
             "composite_score": body.composite_score or body.score,
             "risk_reward":     round(abs(body.take_profit - body.entry) / max(abs(body.entry - body.stop_loss), 0.01), 2),
-            "executed_at":     datetime.utcnow().isoformat(),
+            "executed_at":     datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "status":          "open",
             "pnl":             None,
             "evaluations":     body.evaluations or [],
@@ -2834,7 +2834,7 @@ async def _run_auto_executor() -> int:
     recs = _load(RECS_FILE, [])
     if not isinstance(recs, list):
         return 0
-    candidates = _auto_exec_candidates(recs, datetime.utcnow().isoformat())
+    candidates = _auto_exec_candidates(recs, datetime.now(timezone.utc).replace(tzinfo=None).isoformat())
     if not candidates:
         return 0
 
@@ -2922,7 +2922,7 @@ async def _auto_execute_loop() -> None:
 @app.post("/api/scan", dependencies=[Depends(_verify_bot_secret)])
 async def trigger_scan():
     asyncio.create_task(_run_market_scan(force=True))
-    return {"status": "scan_triggered", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "scan_triggered", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
 
 @app.post("/api/reset-circuit-breaker", dependencies=[Depends(_verify_bot_secret)])
@@ -2934,7 +2934,7 @@ async def reset_circuit_breaker():
         "halted_at": None,
     })
     logger.info("Circuit breaker manually reset")
-    return {"status": "reset", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "reset", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
 
 @app.get("/api/rejections", dependencies=[Depends(_verify_bot_secret)])
@@ -3005,16 +3005,16 @@ def get_backtest():
 @app.post("/api/backtest/run", dependencies=[Depends(_verify_bot_secret)])
 async def run_backtest_now():
     asyncio.create_task(_run_backtest())
-    return {"status": "backtest_triggered", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "backtest_triggered", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
 
 @app.post("/api/optimize/run", dependencies=[Depends(_verify_bot_secret)])
 async def run_optimizer_now():
     """Trigger the walk-forward profit optimizer (writes backtest_optimal.json)."""
     if _optimizer_stats.get("running"):
-        return {"status": "already_running", "timestamp": datetime.utcnow().isoformat()}
+        return {"status": "already_running", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
     asyncio.create_task(_run_optimizer())
-    return {"status": "optimizer_triggered", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "optimizer_triggered", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
 
 @app.get("/api/backtest/log", dependencies=[Depends(_verify_bot_secret)])
@@ -3089,7 +3089,7 @@ def apply_optimal_params():
         if src in params:
             weights[dst] = float(params[src])
             applied[dst] = float(params[src])
-    weights["applied_from_optimizer_at"] = datetime.utcnow().isoformat()
+    weights["applied_from_optimizer_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     weights["applied_oos_pnl"]           = round(float(oos_pnl), 2)
     weights["live_tuning_active"]        = True   # let the live bot honor these params
     _save_weights(weights)
@@ -3100,7 +3100,7 @@ def apply_optimal_params():
         "applied":   applied,
         "oos_pnl":   round(float(oos_pnl), 2),
         "validated": validated,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -3154,7 +3154,7 @@ def set_trade_mode(body: TradeModeBody):
     """
     _save(TRADE_MODE_FILE, {
         "auto_execute": body.auto_execute,
-        "updated_at":   datetime.utcnow().isoformat(),
+        "updated_at":   datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     })
     logger.info("Trade mode set: auto_execute=%s", body.auto_execute)
     return {"status": "ok", "auto_execute": body.auto_execute}
@@ -3183,7 +3183,7 @@ def set_broker_mode(body: BrokerModeBody):
         raise HTTPException(status_code=400, detail="broker must be 'alpaca' or 'ibkr'")
     _save(BROKER_MODE_FILE, {
         "broker":     choice,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     })
     logger.info("Broker mode set: %s", choice)
     return {"status": "ok", "broker": choice}
@@ -3210,7 +3210,7 @@ def health():
     return {
         "status":    "ok",
         "agents":    _AGENTS_AVAILABLE,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "backtest":  _backtest_stats,
         "optimizer": _optimizer_stats,
         "circuit_breaker": _circuit_breaker,
@@ -3328,7 +3328,7 @@ def get_agent_scorecards():
     data = _load(AGENT_SCORECARDS_FILE, None)
     if not isinstance(data, dict):
         return {
-            "updated_at":    datetime.utcnow().isoformat(),
+            "updated_at":    datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "sample_trades": 0,
             "agents":        _refresh_agent_scorecards(),
         }
