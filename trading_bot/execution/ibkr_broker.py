@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Optional
 
 import pandas as pd
@@ -193,8 +194,8 @@ class IBKRBroker(BaseBroker):
     async def get_bars_range(
         self,
         symbol:    str,
-        start:     "datetime",
-        end:       "datetime",
+        start:     datetime,
+        end:       datetime,
         timeframe: str = "5Min",
     ) -> pd.DataFrame:
         """Historical bars covering roughly [start, end] — for backtests.
