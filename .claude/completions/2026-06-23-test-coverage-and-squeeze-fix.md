@@ -39,18 +39,24 @@ Dashboard:
 api_server tests are guarded with `pytest.importorskip("fastapi")` so minimal
 environments skip them cleanly.
 
-## ⚠️ Flagged follow-up (NOT fixed — needs review)
-**Systemic read-modify-write race on `data/trades.json`.** Every writer
-(`_check_and_close_trades`, `_trailing_stop_loop`, `_eod_position_review_loop`,
-the `/api/execute` endpoint) does `trades = _load(TRADES_FILE)` *outside*
-`_trades_lock`, mutates a stale snapshot, then `async with _trades_lock:
-_save(...)`. These run as separate concurrent asyncio tasks, so the last save
-clobbers the others — which can **drop a newly-opened trade** (→ untracked open
-position) or **resurrect a closed one**. The lock only serialises the write, not
-the read-modify-write as a unit.
+## Concurrency fix — trades.json race (FIXED)
+**Systemic read-modify-write race on `data/trades.json`.** The background loops
+(`_check_and_close_trades`, `_trailing_stop_loop`, `_eod_position_review_loop`)
+each did `trades = _load(TRADES_FILE)` *outside* `_trades_lock`, mutated a stale
+snapshot, then saved the whole snapshot under the lock. As separate concurrent
+asyncio tasks against the same file, the last save clobbered the others — which
+could **drop a newly-opened trade** (→ untracked open position) or **resurrect a
+closed one**. (`/api/execute` was already correct: load+save both under the lock.)
 
-Recommended fix: move the `_load` inside the lock and merge by a stable trade id
-(reload under lock, apply this task's changes by `order_id`, then save), at all
-four sites. Left unfixed because it's a cross-cutting rewrite of the money-path
-persistence layer that can't be integration-tested in this environment without
-risking the very data loss it aims to prevent.
+Fix: each loop now records the ids of the trades it actually changed and persists
+via `_save_trade_changes`, which under the lock reloads the latest file and
+overlays *only* those records by id (`_merge_trade_changes`). Every other on-disk
+trade — including ones added concurrently — is preserved. Pure merge logic is
+covered by `test_trades_merge.py` (10 tests), including the exact race regression:
+closing A from a stale 2-trade snapshot must not drop a concurrently-appended C.
+Full suite: 227 passed, 1 skipped.
+
+Note: when two tasks change the *same* trade concurrently it stays last-write-wins
+for that one record (acceptable; field-level merge would need each writer to
+declare intended field changes). The fix eliminates cross-trade clobbering, which
+was the data-loss path.
