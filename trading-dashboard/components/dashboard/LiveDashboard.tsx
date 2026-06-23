@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback } from 'react'
+import { AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react'
 import { StatsCards }      from './StatsCards'
 import { PnLChart }        from './PnLChart'
 import { RegimeIndicator } from './RegimeIndicator'
@@ -57,7 +58,8 @@ export function LiveDashboard({
 
   // Symbols the user closed this session — shown with "pending close" badge
   // until Alpaca confirms they're gone on next refresh.
-  const [pendingClose, setPendingClose] = useState<Set<string>>(new Set())
+  const [pendingClose,   setPendingClose]   = useState<Set<string>>(new Set())
+  const [alertsOpen,     setAlertsOpen]     = useState(false)
 
   // Fast: positions + stats (30s)
   const refreshFast = useCallback(async () => {
@@ -118,42 +120,94 @@ export function LiveDashboard({
     setPendingClose(prev => new Set([...prev, symbol]))
   }
 
+  // Build issues list from scan stats + circuit breaker
+  const issues: { id: string; label: string; detail?: string; action?: React.ReactNode }[] = []
+  if (circuitBreaker?.halted) {
+    issues.push({
+      id: 'cb',
+      label: 'Circuit Breaker Active',
+      detail: circuitBreaker.reason?.replace(/_/g, ' '),
+      action: (
+        <button
+          onClick={async () => {
+            await fetch('/api/bot/reset-circuit-breaker', { method: 'POST' })
+            setCircuitBreaker(null)
+          }}
+          className="rounded-md border border-bear/30 px-2 py-0.5 text-[10px] text-bear hover:bg-bear/10 transition-colors"
+        >
+          Reset
+        </button>
+      ),
+    })
+  }
+  if ((scanStats?.scan_errors ?? 0) > 0) {
+    issues.push({
+      id: 'scan-err',
+      label: `${scanStats!.scan_errors} scan error${(scanStats!.scan_errors ?? 0) > 1 ? 's' : ''}`,
+      detail: scanStats?.last_scan_at ? `Last scan: ${relativeTime(scanStats.last_scan_at)}` : undefined,
+    })
+  }
+  if (scanStats && !scanStats.market_open && (scanStats.scans_today ?? 0) === 0) {
+    issues.push({ id: 'no-scans', label: 'No scans today', detail: 'Market may be closed or bot offline' })
+  }
+
   return (
     <>
-      {/* Scan stats strip */}
-      {scanStats && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-bg-border bg-bg-card px-4 py-2 text-xs text-muted">
-          <span className="flex items-center gap-1.5 font-medium">
-            <span className={cn('h-2 w-2 rounded-full', scanStats.market_open ? 'bg-bull' : 'bg-bear')} />
-            {scanStats.market_open ? 'Market Open' : 'Market Closed'}
-          </span>
-          {scanStats.last_scan_at && (
-            <span>Last scan: <span className="text-subtle">{relativeTime(scanStats.last_scan_at)}</span></span>
-          )}
-          <span>Scans today: <span className="text-subtle">{scanStats.scans_today ?? '—'}</span></span>
-          <span>Tickers scanned: <span className="text-subtle">{scanStats.tickers_scanned ?? '—'}</span></span>
-          {(scanStats.scan_errors ?? 0) > 0 && (
-            <span className="text-bear font-semibold">Errors: {scanStats.scan_errors}</span>
-          )}
-        </div>
-      )}
-
-      {circuitBreaker?.halted && (
-        <div className="rounded-xl border border-bear/40 bg-bear/10 px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-bear animate-pulse" />
-            <span className="text-sm font-semibold text-bear">Circuit Breaker Active</span>
-            <span className="text-xs text-muted">{circuitBreaker.reason?.replace(/_/g, ' ')}</span>
-          </div>
+      {/* Compact alerts bar — only shown when there are issues */}
+      {issues.length > 0 && (
+        <div className={cn(
+          'rounded-lg border transition-colors',
+          issues.some(i => i.id === 'cb') ? 'border-bear/40 bg-bear/5' : 'border-caution/40 bg-caution/5',
+        )}>
+          {/* Header — always visible */}
           <button
-            onClick={async () => {
-              await fetch('/api/bot/reset-circuit-breaker', { method: 'POST' })
-              setCircuitBreaker(null)
-            }}
-            className="text-xs text-muted hover:text-primary transition-colors"
+            onClick={() => setAlertsOpen(v => !v)}
+            className="flex w-full items-center gap-2 px-4 py-2 text-left"
           >
-            Reset
+            <AlertTriangle className={cn(
+              'h-3.5 w-3.5 shrink-0',
+              issues.some(i => i.id === 'cb') ? 'text-bear' : 'text-caution',
+            )} />
+            <span className={cn(
+              'text-xs font-semibold',
+              issues.some(i => i.id === 'cb') ? 'text-bear' : 'text-caution',
+            )}>
+              {issues.length === 1 ? issues[0].label : `${issues.length} התראות`}
+            </span>
+            {alertsOpen
+              ? <ChevronUp className="ml-auto h-3.5 w-3.5 text-muted" />
+              : <ChevronDown className="ml-auto h-3.5 w-3.5 text-muted" />
+            }
           </button>
+
+          {/* Expanded detail */}
+          {alertsOpen && (
+            <div className="border-t border-bg-border px-4 py-3 space-y-2">
+              {issues.map(issue => (
+                <div key={issue.id} className="flex items-start justify-between gap-3">
+                  <div>
+                    <span className="text-xs font-semibold text-primary">{issue.label}</span>
+                    {issue.detail && (
+                      <p className="text-[11px] text-muted mt-0.5">{issue.detail}</p>
+                    )}
+                  </div>
+                  {issue.action}
+                </div>
+              ))}
+              {scanStats && (
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-bg-border pt-3 text-[11px] text-muted">
+                  <span className="flex items-center gap-1.5">
+                    <span className={cn('h-1.5 w-1.5 rounded-full', scanStats.market_open ? 'bg-bull' : 'bg-muted')} />
+                    {scanStats.market_open ? 'Market Open' : 'Market Closed'}
+                  </span>
+                  {scanStats.last_scan_at && <span>Last scan: {relativeTime(scanStats.last_scan_at)}</span>}
+                  <span>Scans today: {scanStats.scans_today ?? '—'}</span>
+                  <span>Tickers: {scanStats.tickers_scanned ?? '—'}</span>
+                  <span>Signals generated: {scanStats.recs_generated ?? '—'}</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
