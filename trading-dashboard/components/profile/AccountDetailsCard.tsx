@@ -40,7 +40,7 @@ export function AccountDetailsCard({ initialPhone }: Props) {
           type="text" placeholder="+972501234567" value={phone} onChange={e => setPhone(e.target.value)}
           className="w-full rounded-lg border border-bg-border bg-bg-base px-3 py-2 text-sm text-primary font-mono"
         />
-        <button onClick={save} disabled={saving} className="btn-primary text-xs disabled:opacity-50">
+        <button onClick={save} disabled={saving} className="btn-ghost text-xs w-full disabled:opacity-50">
           {saving ? 'Saving…' : 'Save'}
         </button>
       </div>

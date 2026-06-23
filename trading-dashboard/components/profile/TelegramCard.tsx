@@ -102,7 +102,7 @@ export function TelegramCard() {
           <button
             onClick={unlink}
             disabled={working}
-            className="flex items-center gap-1.5 text-xs text-bear hover:text-bear/80 transition-colors disabled:opacity-50"
+            className="btn-ghost text-xs w-full text-bear hover:text-bear disabled:opacity-50"
           >
             <Link2Off className="h-3.5 w-3.5" />
             Disconnect Telegram
@@ -119,10 +119,9 @@ export function TelegramCard() {
             target="_blank"
             rel="noopener noreferrer"
             onClick={() => setPolling(true)}
-            className="inline-flex items-center gap-2 rounded-lg bg-brand-cyan/10 border border-brand-cyan/30
-                       px-4 py-2 text-sm font-semibold text-brand-cyan hover:bg-brand-cyan/20 transition-colors"
+            className="btn-ghost text-xs w-full"
           >
-            <ExternalLink className="h-4 w-4" />
+            <ExternalLink className="h-3.5 w-3.5" />
             Open Telegram &amp; press Start
           </a>
           <div className="flex items-center gap-1.5 text-[11px] text-muted">
@@ -140,9 +139,7 @@ export function TelegramCard() {
           <button
             onClick={connect}
             disabled={working}
-            className="flex items-center gap-2 rounded-lg bg-brand-cyan/10 border border-brand-cyan/30
-                       px-4 py-2 text-sm font-semibold text-brand-cyan hover:bg-brand-cyan/20
-                       transition-colors disabled:opacity-50"
+            className="btn-ghost text-xs w-full disabled:opacity-50"
           >
             {working
               ? <Loader2 className="h-4 w-4 animate-spin" />

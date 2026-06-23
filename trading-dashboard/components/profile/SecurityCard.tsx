@@ -9,7 +9,7 @@ export function SecurityCard() {
 
   return (
     <ProfileCard title="Security" icon={Lock} iconColor="text-brand-purple">
-      <button onClick={() => setOpen(true)} className="btn-primary text-xs">
+      <button onClick={() => setOpen(true)} className="btn-ghost text-xs w-full">
         Change Password
       </button>
       {open && <ChangePasswordModal onClose={() => setOpen(false)} />}
