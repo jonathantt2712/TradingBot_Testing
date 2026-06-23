@@ -77,6 +77,11 @@ PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "5.0"))  # max net |b
 ALLOW_OVERNIGHT           = os.getenv("ALLOW_OVERNIGHT", "false").lower() in ("1", "true", "yes")
 EOD_REVIEW_MIN_BEFORE     = int(os.getenv("EOD_REVIEW_MIN_BEFORE", "25"))       # minutes before 16:00 ET to run EOD review
 
+# Strategy-improvement loop: periodically re-tune agent weights and refresh the
+# per-agent scorecard, so learning keeps adapting on a cadence (not only the
+# instant a trade closes).
+STRATEGY_LOOP_INTERVAL_MIN = int(os.getenv("STRATEGY_LOOP_INTERVAL_MIN", "60"))
+
 # Daily scan stats (reset at midnight by _background_loop)
 _scan_stats: Dict[str, Any] = {
     "date":             "",
@@ -242,6 +247,8 @@ AGENT_PERF_FILE = DATA_DIR / "agent_attribution.json"
 # write them — keep this in lockstep with weight_tuner._WEIGHTS_FILE/_HISTORY_FILE.
 LEARNING_HISTORY_FILE = _HERE / "data" / "learning_history.jsonl"
 LEARNING_WEIGHTS_FILE = _HERE / "data" / "strategy_weights.json"
+# Per-agent scorecard written by the strategy-improvement loop (served at /api/agent-scorecards).
+AGENT_SCORECARDS_FILE = _HERE / "data" / "agent_scorecards.json"
 EARNINGS_CACHE: Dict[str, Any] = {"blacklist": set(), "updated_at": None}
 
 
@@ -2129,6 +2136,50 @@ async def _eod_position_review_loop() -> None:
             logger.warning("EOD position review error: %s", exc)
 
 
+def _refresh_agent_scorecards() -> List[dict]:
+    """Recompute each agent's track record from closed trades and persist it.
+
+    Reads the live strategy_weights.json so the surfaced weight/multiplier is the
+    one actually in force. Fail-soft: returns [] and writes nothing on error.
+    """
+    from core.agent_scorecard import compute_agent_scorecards
+
+    trades = _load(TRADES_FILE, [])
+    closed = [
+        t for t in trades
+        if isinstance(t, dict) and t.get("status") == "closed" and t.get("pnl") is not None
+    ] if isinstance(trades, list) else []
+    weights = _load(LEARNING_WEIGHTS_FILE, {})
+    cards = compute_agent_scorecards(closed, weights if isinstance(weights, dict) else {})
+    _save(AGENT_SCORECARDS_FILE, {
+        "updated_at":    datetime.utcnow().isoformat(),
+        "sample_trades": len(closed),
+        "agents":        cards,
+    })
+    return cards
+
+
+async def _strategy_improvement_loop() -> None:
+    """Periodically improve each agent: re-tune weights, refresh the scorecard.
+
+    The WeightTuner otherwise runs only the instant a trade closes. This loop
+    re-runs it on a cadence so the live weights/thresholds keep adapting during
+    quiet periods (write-through to strategy_weights.json, which PortfolioManager
+    reads), and refreshes the per-agent scorecard served at /api/agent-scorecards.
+    """
+    interval = max(60, STRATEGY_LOOP_INTERVAL_MIN * 60)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            trades = _load(TRADES_FILE, [])
+            if isinstance(trades, list):
+                _drive_weight_tuner(trades)          # write-through: adapts live weights
+            cards = _refresh_agent_scorecards()
+            logger.info("Strategy loop: re-tuned weights; scored %d agents", len(cards))
+        except Exception as exc:
+            logger.warning("Strategy improvement loop error: %s", exc)
+
+
 async def _background_loop() -> None:
     await asyncio.sleep(5)
     await _run_market_scan()
@@ -2245,11 +2296,13 @@ async def lifespan(app: FastAPI):
     task     = asyncio.create_task(_background_loop())
     trail    = asyncio.create_task(_trailing_stop_loop())
     eod_rev  = asyncio.create_task(_eod_position_review_loop())
+    strat    = asyncio.create_task(_strategy_improvement_loop())
     yield
     task.cancel()
     trail.cancel()
     eod_rev.cancel()
-    for t in [task, trail, eod_rev]:
+    strat.cancel()
+    for t in [task, trail, eod_rev, strat]:
         try:
             await t
         except asyncio.CancelledError:
@@ -3060,6 +3113,23 @@ def get_learning():
         "steps":      len(history),
         "simulated":  bool(current.get("simulated") or latest.get("simulated")),
     }
+
+
+@app.get("/api/agent-scorecards", dependencies=[Depends(_verify_bot_secret)])
+def get_agent_scorecards():
+    """Per-agent track record maintained by the strategy-improvement loop.
+
+    Each entry carries the agent's directional hit rate and sample size over the
+    tuner's rolling window, plus the live weight/multiplier in force. Recomputes
+    on demand if the loop hasn't written the file yet (e.g. fresh process)."""
+    data = _load(AGENT_SCORECARDS_FILE, None)
+    if not isinstance(data, dict):
+        return {
+            "updated_at":    datetime.utcnow().isoformat(),
+            "sample_trades": 0,
+            "agents":        _refresh_agent_scorecards(),
+        }
+    return data
 
 
 @app.post("/api/learning/simulate", dependencies=[Depends(_verify_bot_secret)])
