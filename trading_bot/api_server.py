@@ -2331,17 +2331,6 @@ async def _background_loop() -> None:
 # === FastAPI app ===
 
 @asynccontextmanager
-async def _telegram_polling_loop() -> None:
-    """Poll Telegram for /start messages every 3 seconds to link new users."""
-    await asyncio.sleep(10)  # wait for startup
-    while True:
-        try:
-            if _telegram is not None and _telegram.enabled:
-                await _telegram.poll_once()
-        except Exception as exc:
-            logger.debug("Telegram poll error: %s", exc)
-        await asyncio.sleep(3)
-
 
 async def lifespan(app: FastAPI):
     global _trades_lock
@@ -2352,15 +2341,13 @@ async def lifespan(app: FastAPI):
     eod_rev  = asyncio.create_task(_eod_position_review_loop())
     strat    = asyncio.create_task(_strategy_improvement_loop())
     autox    = asyncio.create_task(_auto_execute_loop())
-    tg_poll  = asyncio.create_task(_telegram_polling_loop())
     yield
     task.cancel()
     trail.cancel()
     eod_rev.cancel()
     strat.cancel()
     autox.cancel()
-    tg_poll.cancel()
-    for t in [task, trail, eod_rev, strat, autox, tg_poll]:
+    for t in [task, trail, eod_rev, strat, autox]:
         try:
             await t
         except asyncio.CancelledError:
@@ -3490,40 +3477,6 @@ def get_exit_decisions():
     """Rolling log of exit-monitor and EOD review decisions (newest first)."""
     return list(reversed(_EXIT_DECISIONS))
 
-
-# ---------------------------------------------------------------------------
-# Telegram endpoints
-# ---------------------------------------------------------------------------
-
-class _TelegramRegisterBody(BaseModel):
-    email: str
-
-class _TelegramUnlinkBody(BaseModel):
-    email: str
-
-@app.post("/api/telegram/register", dependencies=[Depends(_verify_bot_secret)])
-async def telegram_register(body: _TelegramRegisterBody):
-    """Generate a one-time link token for the given user email.
-    Returns the token and bot username for the deep link."""
-    if _telegram is None or not _telegram.enabled:
-        raise HTTPException(status_code=503, detail="Telegram not configured")
-    token    = _telegram.create_link_token(body.email)
-    username = await _telegram.fetch_bot_username()
-    return {"token": token, "bot_username": username}
-
-@app.get("/api/telegram/status", dependencies=[Depends(_verify_bot_secret)])
-def telegram_status(email: str):
-    """Check if a user has linked their Telegram account."""
-    if _telegram is None:
-        return {"linked": False}
-    return _telegram.link_status(email)
-
-@app.post("/api/telegram/unlink", dependencies=[Depends(_verify_bot_secret)])
-def telegram_unlink(body: _TelegramUnlinkBody):
-    """Remove a user's Telegram subscription."""
-    if _telegram is not None:
-        _telegram.unlink(body.email)
-    return {"ok": True}
 
 
 if __name__ == "__main__":
