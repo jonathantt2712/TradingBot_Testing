@@ -1,5 +1,6 @@
 """TechnicalAgent: ORB scoring and day-change helper."""
 import numpy as np
+import pandas as pd
 import pytest
 
 from agents.technical_agent import TechnicalAgent, _day_change_pct
@@ -66,3 +67,15 @@ def test_macd_hist_positive_on_rising_trend():
 def test_macd_hist_negative_on_falling_trend():
     falling = make_session_bars([100.0 - i for i in range(40)])["close"]
     assert make_agent()._macd_hist(falling) < 0
+
+
+def test_macd_hist_nan_last_value_returns_zero(monkeypatch):
+    # When ta.macd returns a non-empty frame whose final histogram cell is NaN,
+    # _macd_hist must treat it as flat (0.0) rather than propagate NaN.
+    import agents.technical_agent as ta_mod
+    if not ta_mod._HAS_PANDAS_TA:
+        pytest.skip("pandas_ta not installed")
+    nan_frame = pd.DataFrame({"MACDh_12_26_9": [1.0, np.nan]})
+    monkeypatch.setattr(ta_mod.ta, "macd", lambda *a, **k: nan_frame)
+    close = make_session_bars([100.0 + i for i in range(40)])["close"]
+    assert make_agent()._macd_hist(close) == 0.0
