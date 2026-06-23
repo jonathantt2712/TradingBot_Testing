@@ -6,6 +6,7 @@ import { ProfileCard } from '@/components/profile/ProfileCard'
 import { AccountDetailsCard } from '@/components/profile/AccountDetailsCard'
 import { SecurityCard } from '@/components/profile/SecurityCard'
 import { AlpacaAccountCard } from '@/components/profile/AlpacaAccountCard'
+import { TelegramCard } from '@/components/profile/TelegramCard'
 
 export default async function ProfilePage() {
   const session = await auth()
@@ -45,6 +46,8 @@ export default async function ProfilePage() {
         <SecurityCard />
 
         <AlpacaAccountCard />
+
+        <TelegramCard />
       </div>
     </div>
   )

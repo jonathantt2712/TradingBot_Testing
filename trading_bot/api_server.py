@@ -161,7 +161,6 @@ try:
     _AGENTS_AVAILABLE = True
     _telegram = _TelegramPublisher(
         bot_token=_settings.telegram_bot_token,
-        chat_id=_settings.telegram_chat_id,
     )
     logger.info("Agent pipeline loaded via bootstrap.build_manager — unified with live/backtest")
 
@@ -2006,6 +2005,8 @@ async def _do_exit_position(trade: dict, price: float, reason: str,
 
     _log_exit_decision(ticker, direction, "exit", reason, score=score, price=price)
     logger.info("Position EXIT: %s %s @ %.2f — %s", direction, ticker, price, reason)
+    if _telegram is not None:
+        asyncio.create_task(_telegram.send_trade_exit(trade, price, reason))
     return True
 
 
@@ -2202,6 +2203,7 @@ async def _background_loop() -> None:
     last_snapshot_day  = ""
     last_premarket_day = ""
     last_eod_extend_day = ""
+    last_weekly_summary_day = ""
     while True:
         # Reset daily scan stats at midnight
         today = str(date.today())
@@ -2267,6 +2269,38 @@ async def _background_loop() -> None:
                 except Exception as exc:
                     logger.warning("EOD rec extension failed: %s", exc)
 
+        # Weekly Telegram summary — every Monday at 8:00 AM ET
+        if _ET is not None and _telegram is not None and _telegram.enabled:
+            now_et = datetime.now(_ET)
+            if (today != last_weekly_summary_day
+                    and now_et.weekday() == 0       # Monday
+                    and now_et.hour == 8 and now_et.minute < 10):
+                last_weekly_summary_day = today
+                try:
+                    from datetime import timedelta as _td
+                    week_ago = (datetime.utcnow() - _td(days=7)).isoformat()
+                    history  = _load(HISTORY_FILE, [])
+                    week_trades = [
+                        t for t in (history if isinstance(history, list) else [])
+                        if t.get("status") == "closed"
+                        and (t.get("executed_at") or "") >= week_ago
+                    ]
+                    wins   = [t for t in week_trades if (t.get("pnl") or 0) > 0]
+                    losses = [t for t in week_trades if (t.get("pnl") or 0) < 0]
+                    total_pnl = sum(t.get("pnl") or 0 for t in week_trades)
+                    best  = max(week_trades, key=lambda t: t.get("pnl") or 0, default={})
+                    worst = min(week_trades, key=lambda t: t.get("pnl") or 0, default={})
+                    asyncio.create_task(_telegram.send_weekly_summary({
+                        "total_trades": len(week_trades),
+                        "wins":         len(wins),
+                        "losses":       len(losses),
+                        "total_pnl":    total_pnl,
+                        "best_trade":   {"ticker": best.get("ticker"), "pnl": best.get("pnl") or 0},
+                        "worst_trade":  {"ticker": worst.get("ticker"), "pnl": worst.get("pnl") or 0},
+                    }))
+                except Exception as exc:
+                    logger.warning("Weekly Telegram summary failed: %s", exc)
+
         # Backoff: after 3 consecutive errors, wait 10× longer
         wait = 300 if consecutive_errors < 3 else 3000
         await asyncio.sleep(wait)
@@ -2297,6 +2331,18 @@ async def _background_loop() -> None:
 # === FastAPI app ===
 
 @asynccontextmanager
+async def _telegram_polling_loop() -> None:
+    """Poll Telegram for /start messages every 3 seconds to link new users."""
+    await asyncio.sleep(10)  # wait for startup
+    while True:
+        try:
+            if _telegram is not None and _telegram.enabled:
+                await _telegram.poll_once()
+        except Exception as exc:
+            logger.debug("Telegram poll error: %s", exc)
+        await asyncio.sleep(3)
+
+
 async def lifespan(app: FastAPI):
     global _trades_lock
     _trades_lock = asyncio.Lock()
@@ -2306,13 +2352,15 @@ async def lifespan(app: FastAPI):
     eod_rev  = asyncio.create_task(_eod_position_review_loop())
     strat    = asyncio.create_task(_strategy_improvement_loop())
     autox    = asyncio.create_task(_auto_execute_loop())
+    tg_poll  = asyncio.create_task(_telegram_polling_loop())
     yield
     task.cancel()
     trail.cancel()
     eod_rev.cancel()
     strat.cancel()
     autox.cancel()
-    for t in [task, trail, eod_rev, strat, autox]:
+    tg_poll.cancel()
+    for t in [task, trail, eod_rev, strat, autox, tg_poll]:
         try:
             await t
         except asyncio.CancelledError:
@@ -2747,6 +2795,8 @@ async def execute_trade(body: ExecuteBody):
     reason, trade = await _record_executed_trade(body)
     if reason:
         raise HTTPException(status_code=409, detail=reason)
+    if _telegram is not None and trade:
+        asyncio.create_task(_telegram.send_trade_entry(trade))
     return {"status": "recorded", "trade_id": trade["id"]}
 
 
@@ -3439,6 +3489,41 @@ def get_validation():
 def get_exit_decisions():
     """Rolling log of exit-monitor and EOD review decisions (newest first)."""
     return list(reversed(_EXIT_DECISIONS))
+
+
+# ---------------------------------------------------------------------------
+# Telegram endpoints
+# ---------------------------------------------------------------------------
+
+class _TelegramRegisterBody(BaseModel):
+    email: str
+
+class _TelegramUnlinkBody(BaseModel):
+    email: str
+
+@app.post("/api/telegram/register", dependencies=[Depends(_verify_bot_secret)])
+async def telegram_register(body: _TelegramRegisterBody):
+    """Generate a one-time link token for the given user email.
+    Returns the token and bot username for the deep link."""
+    if _telegram is None or not _telegram.enabled:
+        raise HTTPException(status_code=503, detail="Telegram not configured")
+    token    = _telegram.create_link_token(body.email)
+    username = await _telegram.fetch_bot_username()
+    return {"token": token, "bot_username": username}
+
+@app.get("/api/telegram/status", dependencies=[Depends(_verify_bot_secret)])
+def telegram_status(email: str):
+    """Check if a user has linked their Telegram account."""
+    if _telegram is None:
+        return {"linked": False}
+    return _telegram.link_status(email)
+
+@app.post("/api/telegram/unlink", dependencies=[Depends(_verify_bot_secret)])
+def telegram_unlink(body: _TelegramUnlinkBody):
+    """Remove a user's Telegram subscription."""
+    if _telegram is not None:
+        _telegram.unlink(body.email)
+    return {"ok": True}
 
 
 if __name__ == "__main__":
