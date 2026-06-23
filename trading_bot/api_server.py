@@ -82,6 +82,14 @@ EOD_REVIEW_MIN_BEFORE     = int(os.getenv("EOD_REVIEW_MIN_BEFORE", "25"))       
 # instant a trade closes).
 STRATEGY_LOOP_INTERVAL_MIN = int(os.getenv("STRATEGY_LOOP_INTERVAL_MIN", "60"))
 
+# Autonomous paper executor (Railway). OFF by default. When armed it places
+# Alpaca PAPER bracket orders for strong recommendations, applying the SAME
+# entry guards as /api/execute. Arm on Railway ONLY when no PC bot is running
+# the same account — otherwise both venues trade it and double up.
+AUTO_EXECUTE_ON_RAILWAY = os.getenv("AUTO_EXECUTE_ON_RAILWAY", "false").lower() in ("1", "true", "yes")
+AUTO_EXEC_POLL_MIN      = int(os.getenv("AUTO_EXEC_POLL_MIN", "5"))      # how often to sweep recs
+AUTO_EXEC_MIN_SCORE     = float(os.getenv("AUTO_EXEC_MIN_SCORE", "60"))  # LONG >= this; SHORT <= 100-this
+
 # Daily scan stats (reset at midnight by _background_loop)
 _scan_stats: Dict[str, Any] = {
     "date":             "",
@@ -2297,12 +2305,14 @@ async def lifespan(app: FastAPI):
     trail    = asyncio.create_task(_trailing_stop_loop())
     eod_rev  = asyncio.create_task(_eod_position_review_loop())
     strat    = asyncio.create_task(_strategy_improvement_loop())
+    autox    = asyncio.create_task(_auto_execute_loop())
     yield
     task.cancel()
     trail.cancel()
     eod_rev.cancel()
     strat.cancel()
-    for t in [task, trail, eod_rev, strat]:
+    autox.cancel()
+    for t in [task, trail, eod_rev, strat, autox]:
         try:
             await t
         except asyncio.CancelledError:
@@ -2631,51 +2641,68 @@ def get_open_context():
     }
 
 
-@app.post("/api/execute", dependencies=[Depends(_verify_bot_secret)])
-async def execute_trade(body: ExecuteBody):
+def _entry_guard_reason(ticker: str, direction: str,
+                        composite_score: Optional[float], beta: Optional[float],
+                        history: list) -> Optional[str]:
+    """Shared pre-trade risk gates. Returns a rejection reason (and logs it) when
+    a trade must be blocked, or None when it is clear to enter.
+
+    Used by BOTH /api/execute and the autonomous executor so manual and auto
+    entries honour the exact same circuit-breaker / position / sector / beta caps.
+    """
+    cb_reason = _check_circuit_breaker()
+    if cb_reason:
+        _log_rejection(ticker, "circuit_breaker", composite_score or 0.0,
+                       {"circuit_breaker_reason": cb_reason})
+        return cb_reason
+
+    open_count = len([t for t in history if t.get("status") == "open"])
+    if open_count >= MAX_OPEN_POSITIONS:
+        _log_rejection(ticker, "max_positions", composite_score or 0.0,
+                       {"open_count": open_count, "max": MAX_OPEN_POSITIONS})
+        return f"Max open positions ({MAX_OPEN_POSITIONS}) reached"
+
+    # Sector correlation guard: max 2 open positions per sector
+    ticker_sector = _SECTOR_MAP.get(ticker.upper(), "Other")
+    open_in_sector = sum(
+        1 for t in history
+        if t.get("status") == "open"
+        and _SECTOR_MAP.get(t.get("ticker", "").upper(), "Other") == ticker_sector
+    )
+    if open_in_sector >= 2:
+        return f"Sector limit: {open_in_sector} open positions in {ticker_sector}"
+
+    # Portfolio beta cap: net |beta| across all open positions
+    portfolio_beta = sum(
+        float(t.get("beta", 1.0)) * (1.0 if t.get("direction") == "LONG" else -1.0)
+        for t in history if t.get("status") == "open"
+    )
+    new_beta = float(beta or 1.0) * (1.0 if direction == "LONG" else -1.0)
+    if abs(portfolio_beta + new_beta) > PORTFOLIO_BETA_CAP:
+        _log_rejection(ticker, "beta_cap", composite_score or 0.0,
+                       {"portfolio_beta": round(portfolio_beta, 2),
+                        "new_beta": round(new_beta, 2),
+                        "cap": PORTFOLIO_BETA_CAP})
+        return (f"Portfolio beta cap: net beta {portfolio_beta + new_beta:+.2f} "
+                f"would exceed ±{PORTFOLIO_BETA_CAP}")
+    return None
+
+
+async def _record_executed_trade(body: ExecuteBody) -> tuple[Optional[str], Optional[dict]]:
+    """Atomically guard-check and record a trade. Returns (reject_reason, None)
+    when a gate blocks it, or (None, trade) when recorded.
+
+    Guard + append happen under one lock so concurrent entries can't both slip
+    past the position/sector caps. Assumes any real broker order was already
+    placed by the caller (the dashboard or the auto-executor)."""
     async with _trades_lock:
         history = _load(HISTORY_FILE, [])
         if not isinstance(history, list):
             history = []
-
-        # Circuit breaker checks
-        cb_reason = _check_circuit_breaker()
-        if cb_reason:
-            _log_rejection(body.ticker, "circuit_breaker", body.composite_score or 0.0,
-                           {"circuit_breaker_reason": cb_reason})
-            raise HTTPException(status_code=409, detail=cb_reason)
-
-        open_count = len([t for t in history if t.get("status") == "open"])
-        if open_count >= MAX_OPEN_POSITIONS:
-            _log_rejection(body.ticker, "max_positions", body.composite_score or 0.0,
-                           {"open_count": open_count, "max": MAX_OPEN_POSITIONS})
-            raise HTTPException(status_code=409, detail=f"Max open positions ({MAX_OPEN_POSITIONS}) reached")
-
-        # Sector correlation guard: max 2 open positions per sector
-        ticker_sector = _SECTOR_MAP.get(body.ticker.upper(), "Other")
-        open_in_sector = sum(
-            1 for t in history
-            if t.get("status") == "open"
-            and _SECTOR_MAP.get(t.get("ticker", "").upper(), "Other") == ticker_sector
-        )
-        if open_in_sector >= 2:
-            raise HTTPException(status_code=409, detail=f"Sector limit: {open_in_sector} open positions in {ticker_sector}")
-
-        # Portfolio beta cap: net |beta| across all open positions
-        portfolio_beta = sum(
-            float(t.get("beta", 1.0)) * (1.0 if t.get("direction") == "LONG" else -1.0)
-            for t in history if t.get("status") == "open"
-        )
-        new_beta = float(body.beta or 1.0) * (1.0 if body.direction == "LONG" else -1.0)
-        if abs(portfolio_beta + new_beta) > PORTFOLIO_BETA_CAP:
-            _log_rejection(body.ticker, "beta_cap", body.composite_score or 0.0,
-                           {"portfolio_beta": round(portfolio_beta, 2),
-                            "new_beta": round(new_beta, 2),
-                            "cap": PORTFOLIO_BETA_CAP})
-            raise HTTPException(
-                status_code=409,
-                detail=f"Portfolio beta cap: net beta {portfolio_beta + new_beta:+.2f} would exceed ±{PORTFOLIO_BETA_CAP}",
-            )
+        reason = _entry_guard_reason(body.ticker, body.direction,
+                                     body.composite_score, body.beta, history)
+        if reason:
+            return reason, None
 
         trade = {
             "id":              body.recommendation_id or str(uuid.uuid4()),
@@ -2712,8 +2739,184 @@ async def execute_trade(body: ExecuteBody):
         "executed_at": trade["executed_at"],
     }
     _save(CONTEXT_FILE, ctx_data)
+    return None, trade
 
+
+@app.post("/api/execute", dependencies=[Depends(_verify_bot_secret)])
+async def execute_trade(body: ExecuteBody):
+    reason, trade = await _record_executed_trade(body)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
     return {"status": "recorded", "trade_id": trade["id"]}
+
+
+# ---------------------------------------------------------------------------
+# Autonomous paper executor (Railway) — places entries by itself when armed.
+# ---------------------------------------------------------------------------
+
+def _auto_exec_disarmed_reason() -> Optional[str]:
+    """Why the autonomous executor may NOT place orders, or None when armed.
+
+    ALL of these must hold, so it can never trade a live account or fire by
+    accident: the deploy opt-in, a paper account, real keys, and the dashboard
+    toggle the operator already uses for the PC bot."""
+    if not AUTO_EXECUTE_ON_RAILWAY:
+        return "AUTO_EXECUTE_ON_RAILWAY off"
+    if not _ALPACA_PAPER:
+        return "ALPACA_PAPER is false — refusing to auto-trade a non-paper account"
+    if not (_ALPACA_KEY and _ALPACA_SECRET):
+        return "Alpaca API keys not set"
+    if not _load_trade_mode().get("auto_execute", False):
+        return "dashboard auto-execute toggle off"
+    return None
+
+
+def _auto_exec_candidates(recs: list, now_iso: str) -> list:
+    """Strong, fresh, sized recommendations eligible for autonomous entry.
+
+    Conviction is symmetric: a LONG needs composite_score >= AUTO_EXEC_MIN_SCORE,
+    a SHORT needs it <= 100 - AUTO_EXEC_MIN_SCORE. Expired or unsizable (qty<=0)
+    recs are skipped."""
+    out: list = []
+    for r in recs:
+        if not isinstance(r, dict):
+            continue
+        direction = r.get("direction")
+        score = r.get("composite_score")
+        if score is None or direction not in ("LONG", "SHORT"):
+            continue
+        strong = (score >= AUTO_EXEC_MIN_SCORE) if direction == "LONG" \
+            else (score <= 100 - AUTO_EXEC_MIN_SCORE)
+        if not strong:
+            continue
+        exp = r.get("expires_at")
+        if exp and str(exp) <= now_iso:
+            continue
+        if int((r.get("risk") or {}).get("qty") or 0) <= 0:
+            continue
+        out.append(r)
+    return out
+
+
+async def _submit_paper_bracket(session: aiohttp.ClientSession, *, ticker: str,
+                                direction: str, qty: int, stop_loss: float,
+                                take_profit: float) -> Optional[str]:
+    """Submit a paper bracket order to Alpaca. Returns the order_id or None.
+
+    Mirrors the shape used by the PC broker and the dashboard (market entry,
+    TIF day, bracket children) so fills behave identically across venues."""
+    side = "buy" if str(direction).upper() == "LONG" else "sell"
+    order = {
+        "symbol":        ticker,
+        "qty":           str(int(qty)),
+        "side":          side,
+        "type":          "market",
+        "time_in_force": "day",
+        "order_class":   "bracket",
+        "stop_loss":     {"stop_price":  str(round(stop_loss, 2))},
+        "take_profit":   {"limit_price": str(round(take_profit, 2))},
+    }
+    try:
+        async with session.post(f"{_BROKER_BASE}/v2/orders", headers=_ALPACA_HEADERS,
+                                json=order, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status in (200, 201):
+                data = await r.json()
+                return data.get("id")
+            logger.warning("Auto-exec: Alpaca rejected %s %s: HTTP %s %s",
+                           direction, ticker, r.status, (await r.text())[:200])
+    except Exception as exc:
+        logger.warning("Auto-exec: submit failed for %s: %s", ticker, exc)
+    return None
+
+
+async def _run_auto_executor() -> int:
+    """One sweep: place paper orders for eligible recs, return how many placed."""
+    recs = _load(RECS_FILE, [])
+    if not isinstance(recs, list):
+        return 0
+    candidates = _auto_exec_candidates(recs, datetime.utcnow().isoformat())
+    if not candidates:
+        return 0
+
+    placed = 0
+    async with aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+    ) as session:
+        for rec in candidates:
+            ticker    = str(rec.get("ticker", "")).upper()
+            direction = rec["direction"]
+            risk      = rec.get("risk") or {}
+            qty       = int(risk.get("qty") or 0)
+
+            # Re-read history each iteration so it reflects orders just placed.
+            history = _load(TRADES_FILE, [])
+            history = history if isinstance(history, list) else []
+            if any(t.get("status") == "open"
+                   and str(t.get("ticker", "")).upper() == ticker
+                   and t.get("direction") == direction
+                   for t in history):
+                continue  # already holding this name+side
+
+            # Pre-check guards BEFORE placing, so we never orphan an order.
+            reason = _entry_guard_reason(ticker, direction, rec.get("composite_score"),
+                                         rec.get("beta"), history)
+            if reason:
+                logger.info("Auto-exec skip %s %s: %s", direction, ticker, reason)
+                continue
+
+            order_id = await _submit_paper_bracket(
+                session, ticker=ticker, direction=direction, qty=qty,
+                stop_loss=float(risk["stop_loss"]), take_profit=float(risk["take_profit"]),
+            )
+            if not order_id:
+                continue
+
+            body = ExecuteBody(
+                ticker=ticker, direction=direction, qty=qty,
+                entry=float(risk.get("entry") or 0),
+                stop_loss=float(risk["stop_loss"]), take_profit=float(risk["take_profit"]),
+                recommendation_id=rec.get("id"), order_id=order_id,
+                composite_score=rec.get("composite_score"),
+                evaluations=rec.get("evaluations"), beta=rec.get("beta"),
+            )
+            rej, _ = await _record_executed_trade(body)
+            if rej:
+                logger.warning("Auto-exec: order %s placed for %s but record rejected "
+                               "(%s) — orphaned bracket", order_id, ticker, rej)
+                continue
+            placed += 1
+            logger.info("Auto-exec PLACED %s %s x%d @ market (order %s, score %.1f)",
+                        direction, ticker, qty, order_id, rec.get("composite_score") or 0.0)
+    return placed
+
+
+async def _auto_execute_loop() -> None:
+    """Autonomous paper-entry loop. OFF unless explicitly armed.
+
+    Sweeps the latest recommendations every AUTO_EXEC_POLL_MIN minutes during
+    market hours and submits Alpaca PAPER bracket orders for strong, fresh,
+    sized signals — applying the SAME guards as /api/execute. Exits are then
+    handled by the existing close/trailing/EOD loops."""
+    await asyncio.sleep(20)  # let the startup scan populate recommendations
+    interval = max(60, AUTO_EXEC_POLL_MIN * 60)
+    last_reason = ""
+    while True:
+        await asyncio.sleep(interval)
+        reason = _auto_exec_disarmed_reason()
+        if reason:
+            if reason != last_reason:
+                logger.info("Auto-executor disarmed: %s", reason)
+                last_reason = reason
+            continue
+        last_reason = ""
+        if not _is_market_open():
+            continue
+        try:
+            placed = await _run_auto_executor()
+            if placed:
+                logger.info("Auto-executor: placed %d paper order(s) this sweep", placed)
+        except Exception as exc:
+            logger.warning("Auto-executor error: %s", exc)
 
 
 @app.post("/api/scan", dependencies=[Depends(_verify_bot_secret)])
