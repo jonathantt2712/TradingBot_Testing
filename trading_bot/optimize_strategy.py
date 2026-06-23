@@ -91,7 +91,11 @@ SPLIT_FRAC     = 0.70 # walk-forward: tune on first 70%, validate on last 30%
 
 # Objectives — all "higher is better". Default: total realized P&L (raw trading profit).
 OBJECTIVES = ("total_pnl", "ev_per_trade", "profit_factor", "sharpe")
-_WORST     = float("-inf")
+# Finite "worst possible objective" sort sentinel. NOT -inf: rank_value is
+# written into the results JSON, and Infinity/-Infinity is invalid JSON that the
+# dashboard's JSON.parse rejects. -1e18 is below any real objective, so sorting
+# is unchanged while the output stays parseable.
+_WORST     = -1e18
 
 # Metrics kept per split in the results file / tables (drop the heavy trades list).
 _SLIM_KEYS = ("total_trades", "win_rate", "total_pnl", "avg_win", "avg_loss",
