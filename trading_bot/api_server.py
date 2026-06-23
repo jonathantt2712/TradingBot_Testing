@@ -3412,6 +3412,29 @@ def get_regime_performance():
     return result
 
 
+@app.get("/api/validation", dependencies=[Depends(_verify_bot_secret)])
+def get_validation():
+    """Statistical edge audit on the REALISED track record (Pillar 3).
+
+    Per-trade returns + a sign-flip randomization significance test + the equity
+    and underwater-drawdown series for the dashboard to plot. Pure numpy/pandas,
+    so it runs on Railway with no extra deps. Heavy price-permutation / candlestick
+    rendering stays in the offline CLI (validation.run)."""
+    try:
+        from validation.trade_history import analyze
+        res = analyze(TRADES_FILE, n_perm=1000, seed=7)
+    except Exception as exc:
+        logger.debug("validation failed", exc_info=True)
+        return {"trades": 0, "message": f"validation unavailable: {exc}"}
+    p = (res.get("randomization_test") or {}).get("p_value")
+    res["verdict"] = (
+        "edge" if (p is not None and p < 0.01)
+        else "weak" if (p is not None and p < 0.05)
+        else "inconclusive"
+    )
+    return res
+
+
 @app.get("/api/exit-decisions", dependencies=[Depends(_verify_bot_secret)])
 def get_exit_decisions():
     """Rolling log of exit-monitor and EOD review decisions (newest first)."""

@@ -4,18 +4,19 @@ import { usePathname } from 'next/navigation'
 import { signOut } from 'next-auth/react'
 import {
   LayoutDashboard, TrendingUp, History, BarChart2,
-  Zap, Settings, FlaskConical, LogOut, User, Brain, Sparkles,
+  Zap, Settings, FlaskConical, LogOut, User, Brain, Sparkles, ShieldCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const nav = [
-  { href: '/',          icon: LayoutDashboard, label: 'Dashboard'  },
-  { href: '/trades',    icon: TrendingUp,      label: 'Trades'     },
-  { href: '/agents',    icon: Brain,           label: 'Agents'     },
-  { href: '/learning',  icon: Sparkles,        label: 'Learning'   },
-  { href: '/history',   icon: History,         label: 'History'    },
-  { href: '/pnl',       icon: BarChart2,       label: 'P&L'        },
-  { href: '/backtest',  icon: FlaskConical,    label: 'Backtest'   },
+  { href: '/',           icon: LayoutDashboard, label: 'Dashboard'  },
+  { href: '/trades',     icon: TrendingUp,      label: 'Trades'     },
+  { href: '/agents',     icon: Brain,           label: 'Agents'     },
+  { href: '/learning',   icon: Sparkles,        label: 'Learning'   },
+  { href: '/history',    icon: History,         label: 'History'    },
+  { href: '/pnl',        icon: BarChart2,       label: 'P&L'        },
+  { href: '/backtest',   icon: FlaskConical,    label: 'Backtest'   },
+  { href: '/validation', icon: ShieldCheck,     label: 'Validation' },
 ]
 
 /** Bottom tab bar shown only on mobile (< md breakpoint) */

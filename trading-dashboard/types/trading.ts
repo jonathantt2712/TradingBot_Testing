@@ -152,3 +152,27 @@ export interface LearningData {
   steps:           number
   simulated?:      boolean
 }
+
+export interface ValidationRandomization {
+  real_stat:    number
+  p_value:      number
+  n:            number
+  perm_mean:    number
+  perm_std:     number
+  significant:  boolean
+}
+
+export interface ValidationData {
+  trades:              number
+  verdict:             'edge' | 'weak' | 'inconclusive'
+  message?:            string
+  total_return?:       number
+  win_rate?:           number
+  profit_factor?:      number
+  per_trade_sharpe?:   number
+  max_drawdown?:       number
+  randomization_test?: ValidationRandomization
+  equity:              number[]
+  drawdown:            number[]
+  sample_warning?:     string | null
+}
