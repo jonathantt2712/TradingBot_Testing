@@ -302,7 +302,17 @@ class TechnicalAgent(BaseAgent):
 
         # ── Time-of-day phase weight adjustment ──────────────────────────
         try:
-            _now_et = datetime.now(ZoneInfo("America/New_York"))
+            # Phase must reflect the BAR's time, not wall-clock now: otherwise a
+            # backtest applies today's live phase to historical bars (run-time
+            # dependent, non-deterministic). Live is unchanged — the last bar is
+            # real-time — while backtests become correct and reproducible.
+            if getattr(ctx, "backtest_mode", False):
+                _bar_ts = df.index[-1]
+                if getattr(_bar_ts, "tzinfo", None) is None:
+                    _bar_ts = _bar_ts.tz_localize("UTC")
+                _now_et = _bar_ts.astimezone(ZoneInfo("America/New_York"))
+            else:
+                _now_et = datetime.now(ZoneInfo("America/New_York"))
             _now_et_h = _now_et.hour + _now_et.minute / 60.0
             if 9.5 <= _now_et_h < 10.5:       # 9:30–10:30 ET: momentum phase
                 _tod_mult = {
