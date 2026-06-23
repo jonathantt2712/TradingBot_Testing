@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
 import { Sidebar, MobileNav } from '@/components/layout/Sidebar'
+import { RouteSubTabs } from '@/components/layout/SubTabs'
 import { SessionProvider } from '@/components/providers/SessionProvider'
 import { Toaster } from 'sonner'
 import { auth } from '@/auth'
@@ -53,6 +54,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <SessionProvider>
           <Sidebar email={email} />
           <main className="flex-1 overflow-y-auto pb-16 md:pb-0">
+            <RouteSubTabs />
             {children}
           </main>
           <MobileNav />
