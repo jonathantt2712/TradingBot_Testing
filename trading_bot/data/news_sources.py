@@ -72,17 +72,25 @@ class PoliStockSource(NewsSource):
         except aiohttp.ClientError as exc:
             logger.error("news fetch failed for %s: %s", ticker, exc)
             return []
-        return [
-            Headline(
+        out: list[Headline] = []
+        for item in payload.get("items", []):
+            raw_ts = item.get("published_at")
+            if not raw_ts:
+                continue
+            try:
+                published_at = datetime.fromisoformat(raw_ts)
+            except (TypeError, ValueError):
+                logger.debug("skipping headline with bad published_at: %r", raw_ts)
+                continue
+            out.append(Headline(
                 ticker=ticker,
                 title=item.get("title", ""),
                 summary=item.get("summary", ""),
-                published_at=datetime.fromisoformat(item["published_at"]),
+                published_at=published_at,
                 url=item.get("url", ""),
                 source="polistock",
-            )
-            for item in payload.get("items", [])
-        ]
+            ))
+        return out
 
 
 class AlpacaNewsSource(NewsSource):
