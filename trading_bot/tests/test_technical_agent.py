@@ -49,3 +49,20 @@ def test_day_range_position_at_high():
     pos = make_agent()._day_range_position(bars)
     assert pos is not None
     assert pos > 0.8
+
+
+def test_macd_hist_short_frame_returns_zero():
+    # ta.macd() returns None when the frame is too short for its 26+9 windows;
+    # the guard must treat that as flat (0.0) rather than crash to neutral.
+    short = make_session_bars([100.0, 101.0, 102.0])["close"]
+    assert make_agent()._macd_hist(short) == 0.0
+
+
+def test_macd_hist_positive_on_rising_trend():
+    rising = make_session_bars([100.0 + i for i in range(40)])["close"]
+    assert make_agent()._macd_hist(rising) > 0
+
+
+def test_macd_hist_negative_on_falling_trend():
+    falling = make_session_bars([100.0 - i for i in range(40)])["close"]
+    assert make_agent()._macd_hist(falling) < 0
