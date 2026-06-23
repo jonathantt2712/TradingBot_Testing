@@ -185,9 +185,10 @@ class RiskAgent(BaseAgent):
             logger.error("no account equity in context — refusing to build a plan")
             return None
 
-        stop_mult, target_mult = self._effective_atr_multiples(getattr(ctx, "backtest_mode", False))
+        backtest = getattr(ctx, "backtest_mode", False)
+        stop_mult, target_mult = self._effective_atr_multiples(backtest)
         vol_mult = self._volatility_multiplier(atr, price)
-        kelly_mult = self._kelly_multiplier(target_mult / max(stop_mult, 0.1))
+        kelly_mult = self._kelly_multiplier(target_mult / max(stop_mult, 0.1), backtest_mode=backtest)
         risk_usd = equity * self.cfg.max_risk_per_trade_pct * vol_mult * kelly_mult
         stop_dist = atr * stop_mult
         target_dist = self._target_dist(ctx.bars, intended, price, atr, target_mult)
@@ -220,13 +221,19 @@ class RiskAgent(BaseAgent):
         )
 
     @staticmethod
-    def _kelly_multiplier(rr: float) -> float:
+    def _kelly_multiplier(rr: float, *, backtest_mode: bool = False) -> float:
         """Fractional Kelly position sizing multiplier.
 
         Reads win_rate_30d and update_count from strategy_weights.json.
         Half Kelly when N >= 30 trades, Quarter Kelly (cap at 1.0x) when N < 30.
         Normalised so that W=50%, R=2.0 yields 1.0x (baseline unchanged).
+
+        Returns 1.0 (neutral) in backtests: the win-rate file is point-in-time
+        *current*, so feeding it into historical sizing leaks future information and
+        makes results non-deterministic. The optimizer tunes ATR/thresholds, not Kelly.
         """
+        if backtest_mode:
+            return 1.0
         try:
             with open(_STRATEGY_WEIGHTS_FILE, encoding="utf-8") as f:
                 w = json.load(f)
