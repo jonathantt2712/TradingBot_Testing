@@ -53,7 +53,10 @@ def compute_agent_scorecards(
     pnl_when_agreed: dict[str, float] = {}
 
     for t in resolved:
-        pnl = float(t["pnl"])
+        try:
+            pnl = float(t["pnl"])
+        except (TypeError, ValueError):
+            continue  # malformed record — honour the "nothing here raises" contract
         won = pnl > 0
         direction = str(t["direction"]).upper()
         for ev in (t.get("evaluations") or []):
@@ -63,8 +66,12 @@ def compute_agent_scorecards(
             score = ev.get("score")
             if not role or score is None:
                 continue
+            try:
+                score_f = float(score)
+            except (TypeError, ValueError):
+                continue
             role = str(role)
-            agreed = (float(score) >= 50) if direction == "LONG" else (float(score) <= 50)
+            agreed = (score_f >= 50) if direction == "LONG" else (score_f <= 50)
             seen[role] = seen.get(role, 0) + 1
             correct[role] = correct.get(role, 0) + (agreed == won)
             if agreed:
