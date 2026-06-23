@@ -1,6 +1,7 @@
 """Alpaca broker — REST API v2 for paper and live trading."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Optional
@@ -61,16 +62,33 @@ class AlpacaBroker(BaseBroker):
         return aiohttp.ClientSession(headers=self._headers), True
 
     async def _get(self, url: str, params: dict | None = None) -> dict | list:
+        """GET with a small backoff retry on TRANSIENT failures (timeout/429/5xx).
+
+        Reads are idempotent, so retrying is safe. Writes (_post/_delete) are
+        deliberately NOT retried — a retried order POST could double-submit a trade.
+        """
         import aiohttp
-        session, owned = self._session_or_new()
-        try:
-            async with session.get(url, params=params,
-                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                resp.raise_for_status()
-                return await resp.json()
-        finally:
-            if owned:
-                await session.close()
+        last_exc: Exception = RuntimeError("no request attempted")
+        for attempt in range(3):  # 1 try + 2 retries
+            session, owned = self._session_or_new()
+            try:
+                async with session.get(url, params=params,
+                                       timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    resp.raise_for_status()
+                    return await resp.json()
+            except aiohttp.ClientResponseError as exc:
+                # Permanent client errors (401/403/404/422) won't fix on retry.
+                if exc.status not in (429, 500, 502, 503, 504):
+                    raise
+                last_exc = exc
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+                last_exc = exc
+            finally:
+                if owned:
+                    await session.close()
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (2 ** attempt))  # 0.5s, then 1s
+        raise last_exc
 
     async def _post(self, url: str, body: dict) -> dict:
         import aiohttp
