@@ -125,10 +125,12 @@ class Scorecard:
     verdict:          str   = ""
 
     def as_dict(self) -> dict:
-        """JSON-safe dict (inf profit factor -> None, tuple -> list)."""
+        """JSON-safe dict (inf profit factor / payoff -> None, tuple -> list)."""
         d = self.__dict__.copy()
         if not math.isfinite(d["profit_factor"]):
             d["profit_factor"] = None
+        if not math.isfinite(d["payoff_ratio"]):
+            d["payoff_ratio"] = None
         d["win_rate_ci"] = list(d["win_rate_ci"])
         return d
 

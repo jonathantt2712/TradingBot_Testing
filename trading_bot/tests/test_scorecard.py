@@ -38,6 +38,8 @@ def test_profit_factor_infinite_when_no_losses(tmp_path):
     sc = _card(tmp_path, [10, 20, 30])
     assert math.isinf(sc.profit_factor)
     assert sc.as_dict()["profit_factor"] is None   # JSON-safe
+    assert math.isinf(sc.payoff_ratio)             # no losses → infinite payoff too
+    assert sc.as_dict()["payoff_ratio"] is None    # JSON-safe
     assert "∞" in format_scorecard(sc)
 
 
