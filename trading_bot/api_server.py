@@ -274,6 +274,57 @@ def _save(path: Path, obj: Any) -> None:
     tmp.replace(path)
 
 
+def _trade_key(trade: dict) -> Optional[str]:
+    """Stable unique key for a trade record. `id` is always set by /api/execute;
+    `order_id` is a defensive fallback for any legacy record without one."""
+    return trade.get("id") or trade.get("order_id") or None
+
+
+def _merge_trade_changes(disk: list, snapshot: list, changed_ids: set) -> list:
+    """Overlay only the trades this task changed onto the latest on-disk list.
+
+    The background loops load trades.json, mutate a snapshot, then save. Because
+    they run as separate asyncio tasks against the SAME file, a blind save of the
+    whole snapshot clobbers trades another task opened or closed in the meantime
+    (lost/resurrected positions). Instead, reload under the lock and replace only
+    the records this task actually touched (by id); every other on-disk record —
+    including ones added concurrently — is preserved untouched.
+    """
+    if not changed_ids:
+        return disk
+    snap_by_id = {k: t for t in snapshot if (k := _trade_key(t)) is not None}
+    out: list = []
+    seen: set = set()
+    for t in disk:
+        k = _trade_key(t)
+        if k in changed_ids and k in snap_by_id:
+            out.append(snap_by_id[k])
+            seen.add(k)
+        else:
+            out.append(t)
+    # A changed trade missing from disk (rare) is appended so it isn't dropped.
+    for k in changed_ids:
+        if k not in seen and k in snap_by_id:
+            out.append(snap_by_id[k])
+    return out
+
+
+async def _save_trade_changes(snapshot: list, changed_ids: set) -> list:
+    """Atomically merge this task's changed trades into trades.json under the lock.
+
+    Returns the merged list so callers can drive downstream learning off the
+    authoritative state rather than their stale snapshot.
+    """
+    async with _trades_lock:
+        disk = _load(TRADES_FILE, [])
+        if not isinstance(disk, list):
+            disk = []
+        merged = _merge_trade_changes(disk, snapshot, changed_ids)
+        _save(TRADES_FILE, merged)
+    return merged
+
+
+
 def _load_trade_mode() -> Dict[str, Any]:
     """Read the runtime auto-execute toggle.
 
@@ -582,7 +633,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
     if not open_trades:
         return
 
-    modified = False
+    changed_ids: set = set()
     for trade in open_trades:
         try:
             order_id  = trade["order_id"]
@@ -642,7 +693,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
                 trade["pnl"]         = round(pnl, 2)
                 trade["pnl_pct"]     = round(pnl_pct, 2)
                 trade["closed_at"]   = datetime.utcnow().isoformat()
-                modified = True
+                changed_ids.add(_trade_key(trade))
                 _update_agent_attribution(trade)
                 logger.info(
                     "Closed (simulated) %s %s via %s: exit=%.2f  PnL=$%.2f (%.2f%%)",
@@ -680,7 +731,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             elif parent_status in ("canceled", "expired", "done_for_day"):
                 trade["status"]    = "cancelled"
                 trade["closed_at"] = datetime.utcnow().isoformat()
-                modified = True
+                changed_ids.add(_trade_key(trade))
                 continue
             else:
                 continue   # entry filled, exit pending
@@ -702,7 +753,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             trade["pnl"]         = round(pnl, 2)
             trade["pnl_pct"]     = round(pnl_pct, 2)
             trade["closed_at"]   = datetime.utcnow().isoformat()
-            modified = True
+            changed_ids.add(_trade_key(trade))
             _update_agent_attribution(trade)
             logger.info("Closed %s %s via %s: exit=%.2f PnL=$%.2f (%.2f%%)",
                         direction, trade["ticker"], exit_reason, exit_price, pnl, pnl_pct)
@@ -710,10 +761,9 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
         except Exception as exc:
             logger.debug("Could not check order %s: %s", trade.get("order_id"), exc)
 
-    if modified:
-        async with _trades_lock:
-            _save(TRADES_FILE, trades)
-        _drive_weight_tuner(trades)
+    if changed_ids:
+        merged = await _save_trade_changes(trades, changed_ids)
+        _drive_weight_tuner(merged)
 
 
 # === Strategy weight learning ===
@@ -1797,7 +1847,7 @@ async def _trailing_stop_loop() -> None:
                 except Exception:
                     continue
 
-                modified = False
+                changed_ids: set = set()
                 for trade in open_trades:
                     ticker    = trade.get("ticker", "")
                     direction = trade.get("direction", "LONG")
@@ -1823,14 +1873,14 @@ async def _trailing_stop_loop() -> None:
                                     price, trade["risk"].get("high_water_mark", price)
                                 )
                             trade["stop_loss"] = new_stop
-                            modified = True
+                            changed_ids.add(_trade_key(trade))
                             logger.debug("Trail stop updated %s LONG stop %.2f -> %.2f",
                                          ticker, stop, new_stop)
                         # Check if current price hit the stop
                         effective_stop = max(stop, new_stop) if new_stop > stop else stop
                         if price <= effective_stop:
                             _close_simulated_trade(trade, effective_stop, "trailing_stop")
-                            modified = True
+                            changed_ids.add(_trade_key(trade))
                             logger.info("Trailing stop hit: %s LONG closed @ %.2f", ticker, effective_stop)
 
                     else:  # SHORT
@@ -1843,18 +1893,17 @@ async def _trailing_stop_loop() -> None:
                                     price, trade["risk"].get("low_water_mark", price)
                                 )
                             trade["stop_loss"] = new_stop
-                            modified = True
+                            changed_ids.add(_trade_key(trade))
                             logger.debug("Trail stop updated %s SHORT stop %.2f -> %.2f",
                                          ticker, stop, new_stop)
                         effective_stop = min(stop, new_stop) if new_stop < stop else stop
                         if price >= effective_stop:
                             _close_simulated_trade(trade, effective_stop, "trailing_stop")
-                            modified = True
+                            changed_ids.add(_trade_key(trade))
                             logger.info("Trailing stop hit: %s SHORT closed @ %.2f", ticker, effective_stop)
 
-                if modified:
-                    async with _trades_lock:
-                        _save(TRADES_FILE, trades)
+                if changed_ids:
+                    await _save_trade_changes(trades, changed_ids)
 
         except Exception as exc:
             logger.warning("Trailing stop loop error: %s", exc)
@@ -2005,7 +2054,7 @@ async def _eod_position_review_loop() -> None:
                 except Exception:
                     snaps = {}
 
-                modified = False
+                changed_ids: set = set()
                 kept: list = []
                 closed: list = []
 
@@ -2062,15 +2111,14 @@ async def _eod_position_review_loop() -> None:
                         ok = await _do_exit_position(trade, p, reason, session, score=score)
                         if ok:
                             closed.append(ticker)
-                            modified = True
+                            changed_ids.add(_trade_key(trade))
                     else:
                         _log_exit_decision(ticker, direction, "hold_overnight", reason, score=score, price=p)
                         kept.append(ticker)
                         logger.info("EOD review: KEPT %s %s overnight (score %.0f)", direction, ticker, score or 0)
 
-                if modified:
-                    async with _trades_lock:
-                        _save(TRADES_FILE, trades)
+                if changed_ids:
+                    await _save_trade_changes(trades, changed_ids)
 
                 logger.info(
                     "EOD review done — closed: %s | kept overnight: %s",
