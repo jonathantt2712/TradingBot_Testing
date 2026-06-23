@@ -551,14 +551,26 @@ def calc_summary(all_trades: list[TradeResult]) -> dict:
     total_pnl   = float(df["pnl_usd"].sum())
     gross_wins  = float(df.loc[df["pnl_usd"] > 0, "pnl_usd"].sum())
     gross_loss  = abs(float(df.loc[df["pnl_usd"] < 0, "pnl_usd"].sum()))
-    profit_factor = gross_wins / gross_loss if gross_loss > 0 else float("inf")
+    # No losing trades → "infinite" PF, but Infinity is invalid JSON (the JS
+    # dashboard's JSON.parse rejects it) and would also poison the optimizer's
+    # ranking. Use a finite sentinel so results stay parseable and rankable.
+    if gross_loss > 0:
+        profit_factor = gross_wins / gross_loss
+    else:
+        profit_factor = 999.0 if gross_wins > 0 else 0.0
 
     avg_win  = float(df.loc[df["outcome"] == "TP_HIT",    "pnl_usd"].mean()) if wins  else 0.0
     avg_loss = float(df.loc[df["outcome"] == "SL_HIT",    "pnl_usd"].mean()) if losses else 0.0
 
     df_sorted = df.sort_values("entry_time")
     daily = df_sorted.groupby(df_sorted["entry_time"].str[:10])["pnl_usd"].sum()
-    sharpe = float(daily.mean() / daily.std() * (252 ** 0.5)) if len(daily) > 1 else 0.0
+    # Guard a zero/NaN daily-PnL std (one trading day, or identical daily P&L) —
+    # otherwise Sharpe is inf/nan, which is invalid JSON for the dashboard.
+    sharpe = 0.0
+    if len(daily) > 1:
+        sd = float(daily.std())
+        if sd > 0 and not math.isnan(sd):
+            sharpe = float(daily.mean() / sd * (252 ** 0.5))
 
     cum = df_sorted["pnl_usd"].cumsum()
     max_dd = float((cum - cum.cummax()).min())
