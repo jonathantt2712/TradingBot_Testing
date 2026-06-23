@@ -75,7 +75,7 @@ class PortfolioManager:
         broker: Optional[BaseBroker],
         fundamental: FundamentalAgent,
         vision: Optional[VisionAgent] = None,
-        technical: TechnicalAgent = None,
+        technical: Optional[TechnicalAgent] = None,
         risk: RiskAgent,
         liquid: Optional[LiquidAgent] = None,
         insider: Optional["InsiderAgent"] = None,
@@ -171,7 +171,7 @@ class PortfolioManager:
         squeeze_eval: Optional[AgentEvaluation] = results[squeeze_idx] if squeeze_idx is not None else None
         macro_eval:   Optional[AgentEvaluation] = results[macro_idx]   if macro_idx   is not None else None
 
-        evaluations = tuple(r for r in results)
+        evaluations = tuple(results)
 
         decision_meta: Optional[dict] = None
         if self._decision_agent is not None and self._decision_agent.available:
