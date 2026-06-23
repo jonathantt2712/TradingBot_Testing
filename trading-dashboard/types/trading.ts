@@ -153,6 +153,15 @@ export interface LearningData {
   simulated?:      boolean
 }
 
+export interface OhlcBar {
+  t: string
+  o: number
+  h: number
+  l: number
+  c: number
+  v: number
+}
+
 export interface ValidationRandomization {
   real_stat:    number
   p_value:      number

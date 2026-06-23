@@ -7,7 +7,8 @@ import {
 import { RefreshCw, Wifi, WifiOff, ShieldCheck, AlertTriangle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import type { ValidationData } from '@/types/trading'
+import type { ValidationData, TradeRecord, OhlcBar } from '@/types/trading'
+import CandleChart, { type TradeMarker } from '@/components/validation/CandleChart'
 
 const REFRESH_MS = 60_000
 const axisTick = { fontSize: 10, fill: '#64748B' }
@@ -33,6 +34,12 @@ export default function ValidationPage() {
   const [live, setLive]       = useState(false)
   const [loading, setLoading] = useState(true)
 
+  // Candlestick state: closed trades drive the ticker list + entry/exit markers.
+  const [closed, setClosed]   = useState<TradeRecord[]>([])
+  const [ticker, setTicker]   = useState<string>('')
+  const [bars, setBars]       = useState<OhlcBar[]>([])
+  const [barsLoading, setBarsLoading] = useState(false)
+
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
@@ -45,11 +52,45 @@ export default function ValidationPage() {
     }
   }, [])
 
+  const fetchHistory = useCallback(async () => {
+    try {
+      const h = await api.history()
+      const c = (h || []).filter(t => t.status === 'closed' && t.exit != null)
+      setClosed(c)
+      setTicker(prev => prev || c[0]?.ticker || '')
+    } catch { /* keep empty */ }
+  }, [])
+
   useEffect(() => {
-    fetchData()
+    fetchData(); fetchHistory()
     const id = setInterval(fetchData, REFRESH_MS)
     return () => clearInterval(id)
-  }, [fetchData])
+  }, [fetchData, fetchHistory])
+
+  // Load bars whenever the selected ticker changes.
+  useEffect(() => {
+    if (!ticker) { setBars([]); return }
+    let cancelled = false
+    setBarsLoading(true)
+    api.bars(ticker, '5Min', 300)
+      .then(res => { if (!cancelled) setBars(res?.[ticker] ?? []) })
+      .catch(() => { if (!cancelled) setBars([]) })
+      .finally(() => { if (!cancelled) setBarsLoading(false) })
+    return () => { cancelled = true }
+  }, [ticker])
+
+  const tickers = useMemo(
+    () => Array.from(new Set(closed.map(t => t.ticker))), [closed])
+
+  const markers = useMemo<TradeMarker[]>(() => {
+    const out: TradeMarker[] = []
+    for (const t of closed) {
+      if (t.ticker !== ticker) continue
+      if (t.opened_at && t.entry != null) out.push({ t: t.opened_at, price: t.entry, kind: 'entry' })
+      if (t.closed_at && t.exit != null)  out.push({ t: t.closed_at, price: t.exit, kind: 'exit' })
+    }
+    return out
+  }, [closed, ticker])
 
   const equityRows = useMemo(() =>
     (data?.equity ?? []).map((e, i) => ({ i: i + 1, equity: +e.toFixed(4) })), [data])
@@ -145,9 +186,34 @@ export default function ValidationPage() {
             </div>
           </div>
 
+          {/* Candlesticks with entry/exit markers — verify WHERE it traded */}
+          {tickers.length > 0 && (
+            <div className="card p-4">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-sm font-semibold text-primary">
+                  Where it traded — entries ▲ / exits ▼
+                </div>
+                <select
+                  value={ticker}
+                  onChange={e => setTicker(e.target.value)}
+                  className="bg-bg-elev border border-bg-border rounded px-2 py-1 text-xs text-primary"
+                >
+                  {tickers.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              {barsLoading
+                ? <div className="h-72 flex items-center justify-center text-sm text-muted">Loading {ticker} bars…</div>
+                : <CandleChart bars={bars} markers={markers} />}
+              <div className="text-[11px] text-muted mt-1">
+                5-min bars (recent). Markers snap to the bar at each fill time. Bars come live from
+                Alpaca; older trades may fall outside the available window.
+              </div>
+            </div>
+          )}
+
           <p className="text-[11px] text-muted">
-            Note: the strong 1,000× price-permutation and walk-forward-permutation tests, plus
-            candlestick charts with entry/exit markers, run offline via <code>validation.run --bars</code>
+            Note: the strong 1,000× price-permutation and walk-forward-permutation tests run offline
+            via <code>validation.run --bars</code>
             {' '}(they need a vectorised signal proxy + bar data). This view is the realised-record screen.
           </p>
         </>
