@@ -269,7 +269,7 @@ class UniverseScanner:
             return f"market-cap proxy ${market_cap_proxy/1e6:.1f}M < $50M"
 
         # Must be moving
-        chg = abs(data.get("percent_change") or data.get("change_percent") or 0.0)
+        chg = data.get("percent_change") or data.get("change_percent") or 0.0
         try:
             chg = abs(float(chg))
         except (TypeError, ValueError):
@@ -287,7 +287,7 @@ class UniverseScanner:
         Higher means more liquid AND more directional = better candidate.
         """
         import math
-        chg = abs(data.get("percent_change") or data.get("change_percent") or 0.0)
+        chg = data.get("percent_change") or data.get("change_percent") or 0.0
         try:
             chg = abs(float(chg))
         except (TypeError, ValueError):
