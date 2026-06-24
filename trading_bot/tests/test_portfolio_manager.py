@@ -356,3 +356,50 @@ def test_concentration_cap_disabled_when_zero():
         {"symbol": "NVDA"}, {"symbol": "AAPL"}, {"symbol": "MSFT"}, {"symbol": "AMD"},
     ])
     assert _allowed(pm, "META") is True              # cap off → not blocked
+
+
+# ── _effective_thresholds ────────────────────────────────────────────────────
+
+def test_effective_thresholds_backtest_uses_configured_values():
+    # In backtest mode the file is never read — always returns the configured default.
+    import json, execution.portfolio_manager as pm_mod
+    pm = make_pm()
+    # Even if the file exists and has tuned values, backtest mode ignores them.
+    pm._tuned_file = {"live_tuning_active": True, "long_threshold": 70.0, "short_threshold": 30.0}
+    pm._tuned_weights_ts = float("inf")   # pretend cache is still fresh
+    long_t, short_t = pm._effective_thresholds(backtest_mode=True)
+    assert long_t == pm._thresholds.long_above
+    assert short_t == pm._thresholds.short_below
+
+
+def test_effective_thresholds_live_reads_tuned_file(tmp_path, monkeypatch):
+    import json, execution.portfolio_manager as pm_mod
+    weights_file = tmp_path / "strategy_weights.json"
+    weights_file.write_text(json.dumps({
+        "live_tuning_active": True,
+        "long_threshold": 68.0,
+        "short_threshold": 32.0,
+    }))
+    monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
+    pm = make_pm()
+    pm._tuned_weights_ts = 0.0   # force cache miss so file is read
+    long_t, short_t = pm._effective_thresholds(backtest_mode=False)
+    assert long_t == pytest.approx(68.0)
+    assert short_t == pytest.approx(32.0)
+
+
+def test_effective_thresholds_inactive_tuning_falls_back_to_config(tmp_path, monkeypatch):
+    import json, execution.portfolio_manager as pm_mod
+    weights_file = tmp_path / "strategy_weights.json"
+    weights_file.write_text(json.dumps({
+        "live_tuning_active": False,
+        "long_threshold": 70.0,
+        "short_threshold": 30.0,
+    }))
+    monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
+    pm = make_pm()
+    pm._tuned_weights_ts = 0.0
+    long_t, short_t = pm._effective_thresholds(backtest_mode=False)
+    # live_tuning_active is False → thresholds in file are NOT applied
+    assert long_t == pm._thresholds.long_above
+    assert short_t == pm._thresholds.short_below
