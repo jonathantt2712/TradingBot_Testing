@@ -2849,7 +2849,17 @@ async def _submit_paper_bracket(session: aiohttp.ClientSession, *, ticker: str,
 
     Mirrors the shape used by the PC broker and the dashboard (market entry,
     TIF day, bracket children) so fills behave identically across venues."""
-    side = "buy" if str(direction).upper() == "LONG" else "sell"
+    direction = str(direction).upper()
+    if direction not in ("LONG", "SHORT"):
+        logger.error("_submit_paper_bracket: invalid direction %r for %s — skipping", direction, ticker)
+        return None
+    side = "buy" if direction == "LONG" else "sell"
+    # Bracket sanity: for LONG SL must be below TP; for SHORT SL must be above TP.
+    bracket_ok = (stop_loss < take_profit) if side == "buy" else (stop_loss > take_profit)
+    if not bracket_ok:
+        logger.error("_submit_paper_bracket: bracket legs inverted for %s %s SL=%.4f TP=%.4f — skipping",
+                     direction, ticker, stop_loss, take_profit)
+        return None
     order = {
         "symbol":        ticker,
         "qty":           str(int(qty)),
