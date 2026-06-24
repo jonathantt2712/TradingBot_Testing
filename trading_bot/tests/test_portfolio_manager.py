@@ -146,6 +146,20 @@ def test_dispersion_excludes_risk_gate():
     assert pm._directional_dispersion(evals) == pytest.approx(0.0)
 
 
+def test_dispersion_at_lower_haircut_boundary():
+    # pstdev([68, 32]) == 18.0 exactly → just hits the 0.75x haircut threshold.
+    pm = make_pm()
+    evals = [_ev(AgentRole.FUNDAMENTAL, 68), _ev(AgentRole.TECHNICAL, 32)]
+    assert pm._directional_dispersion(evals) == pytest.approx(18.0)
+
+
+def test_dispersion_at_upper_haircut_boundary():
+    # pstdev([75, 25]) == 25.0 exactly → just hits the 0.5x haircut threshold.
+    pm = make_pm()
+    evals = [_ev(AgentRole.FUNDAMENTAL, 75), _ev(AgentRole.TECHNICAL, 25)]
+    assert pm._directional_dispersion(evals) == pytest.approx(25.0)
+
+
 def test_dispersion_zero_with_single_directional_agent():
     pm = make_pm()
     evals = [_ev(AgentRole.TECHNICAL, 80), _ev(AgentRole.RISK, 90)]

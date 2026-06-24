@@ -105,7 +105,8 @@ _scan_stats: Dict[str, Any] = {
 import secrets as _secrets
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 
 _BOT_API_SECRET = os.getenv("BOT_API_SECRET", "")
 
@@ -118,6 +119,12 @@ async def _verify_bot_secret(x_bot_secret: str = Header(default="")) -> None:
 
 logger = logging.getLogger("api_server")
 logging.basicConfig(level=logging.INFO)
+
+if not _BOT_API_SECRET:
+    logger.warning(
+        "BOT_API_SECRET is not set — all /api/* endpoints are publicly accessible. "
+        "Set this env var in Railway (and Vercel) before going live."
+    )
 
 # === Agent imports (lazy -- fallback to simple formula if unavailable) ===
 
@@ -2643,12 +2650,12 @@ def get_sectors():
 
 
 class ExecuteBody(BaseModel):
-    ticker:            str
-    direction:         str
-    qty:               int
-    entry:             float
-    stop_loss:         float
-    take_profit:       float
+    ticker:            str = Field(..., min_length=1, max_length=10, pattern=r"^[A-Z0-9.\-]+$")
+    direction:         Literal["LONG", "SHORT"]
+    qty:               int = Field(..., gt=0)
+    entry:             float = Field(..., gt=0)
+    stop_loss:         float = Field(..., gt=0)
+    take_profit:       float = Field(..., gt=0)
     recommendation_id: Optional[str] = None
     order_id:          Optional[str] = None
     composite_score:   Optional[float] = None
