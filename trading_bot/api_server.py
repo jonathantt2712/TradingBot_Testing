@@ -452,22 +452,6 @@ def _load_weights() -> Dict[str, Any]:
     return {**DEFAULT_WEIGHTS, **_load(WEIGHTS_FILE, {})}
 
 
-def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
-    """Append a trade rejection record to risk_rejections.jsonl."""
-    entry = {
-        "ts":              datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-        "ticker":          ticker,
-        "reason":          reason,
-        "composite_score": round(score, 1),
-        **details,
-    }
-    try:
-        with open(REJECT_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as exc:
-        logger.debug("rejection log write failed: %s", exc)
-
-
 def _close_simulated_trade(trade: dict, exit_price: float, reason: str) -> None:
     """Mark a trade as closed in-place (used by trailing stop and EoD flatten)."""
     direction = trade.get("direction", "LONG")
@@ -1485,10 +1469,6 @@ async def _run_market_scan(force: bool = False) -> None:
                     if score < effective_min:
                         _rej(sym, f"Below min score ({score:.1f} < {effective_min})", price=price, chg_pct=chg_pct, score=score)
                         continue
-                else:
-                    _rej(sym, "Agent evaluation failed", price=price, chg_pct=chg_pct)
-                    # agent_used stays False; fallback formula runs below
-
                     agent_used = True
                     intended   = _Decision.LONG if direction == "LONG" else _Decision.SHORT
                     # Reuse the plan pm.decide() already built when it agrees with
@@ -1511,6 +1491,10 @@ async def _run_market_scan(force: bool = False) -> None:
                         take_profit = round(entry * (1 + d * tp_pct),   2)
                         qty  = _kelly_qty(equity, entry, stop_loss, take_profit, score)
                         rr   = round(tp_pct / stop_pct, 2)
+
+                else:
+                    _rej(sym, "Agent evaluation failed", price=price, chg_pct=chg_pct)
+                    # agent_used stays False; fallback formula runs below
 
             if not agent_used:
                 # Fallback formula: agents unavailable, no bars, or agent timed out.
