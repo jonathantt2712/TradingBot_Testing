@@ -9,6 +9,7 @@
  */
 import { NextResponse } from 'next/server'
 import { botGet }       from '@/lib/bot-api'
+import { auth }         from '@/auth'
 
 export interface PositionContext {
   ticker:          string
@@ -23,6 +24,8 @@ export interface PositionContext {
 }
 
 export async function GET() {
+  const session = await auth()
+  if (!session?.user) return NextResponse.json([], { status: 401 })
   try {
     const data = await botGet('/api/open') as PositionContext[]
     return NextResponse.json(data)
