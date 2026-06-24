@@ -3380,6 +3380,7 @@ def post_learning_simulate(n_trades: int = 140):
     """Seed the Learning view by driving the real WeightTuner over a simulated
     track record. Clearly tagged simulated=true; superseded by real tuning steps.
     """
+    n_trades = max(20, min(n_trades, 500))
     try:
         from simulate_learning import run_simulation
         result = run_simulation(n_trades=n_trades)
@@ -3392,6 +3393,7 @@ def post_learning_simulate(n_trades: int = 140):
 @app.get("/api/monte-carlo", dependencies=[Depends(_verify_bot_secret)])
 def get_monte_carlo(n_sims: int = 10_000):
     """Monte Carlo resample of trade win/loss sequence → 95% CI on win rate and PnL."""
+    n_sims = max(100, min(n_sims, 100_000))
     import random as _rand
     trades = _load(HISTORY_FILE, [])
     if not isinstance(trades, list):
