@@ -37,6 +37,19 @@ def test_insufficient_data_absent_from_graph():
     assert g.correlated_with("ZZZ") == set()    # unknown symbol → empty
 
 
+def test_inverse_correlation_not_blocked():
+    # Negatively correlated names diversify (long AAA + long BBB = hedge), so
+    # the graph must NOT link them. Only positive correlation matters for
+    # concentration risk.
+    base = np.cumsum(np.random.default_rng(42).normal(0, 1, 60)) + 100
+    a = _bars_from_closes(base)
+    b = _bars_from_closes(-base + 200)   # perfect negative correlation
+    g = CorrelationGraph.build_from_bars({"AAA": a, "BBB": b}, threshold=0.7, min_points=10)
+    assert g.has("AAA") and g.has("BBB")
+    assert not g.correlated("AAA", "BBB")   # negatively correlated → NOT an edge
+    assert g.correlated_with("AAA") == set()
+
+
 def test_correlated_is_symmetric_and_self_false():
     base = np.cumsum(np.random.default_rng(3).normal(0, 1, 60)) + 100
     g = CorrelationGraph.build_from_bars(
