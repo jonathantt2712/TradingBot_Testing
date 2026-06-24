@@ -310,3 +310,82 @@ def test_divergence_signal_neutral_for_non_diverging_market():
     bars = make_session_bars(closes)
     score = TechnicalAgent()._divergence_signal(bars)
     assert score is None or score == 50.0
+
+
+# ── _lottery_penalty ──────────────────────────────────────────────────────────
+
+def test_lottery_penalty_zero_for_short_frame():
+    # < 25 bars → 0.0 unconditionally
+    bars = make_session_bars([100.0] * 20)
+    assert TechnicalAgent()._lottery_penalty(bars) == 0.0
+
+
+def test_lottery_penalty_zero_when_criteria_not_met():
+    # Tiny price move (<12%) and normal volume → no lottery penalty
+    bars = _multi_day(n_prior=20, prior_vol=200_000, today_vol=250_000,
+                      today_closes=[100.0] * 25)
+    assert TechnicalAgent()._lottery_penalty(bars) == 0.0
+
+
+def test_lottery_penalty_positive_on_spike_with_surge():
+    # Big price move (>12%) combined with volume >2.5× → lottery profile → penalty > 0
+    # prior_vol=100_000/day; today_vol=300_000 paced over 25 bars → ratio ~3×
+    closes = [100.0] * 5 + [115.0] * 20   # 15% move in last 20 bars
+    bars = _multi_day(n_prior=20, prior_vol=100_000, today_closes=closes, today_vol=300_000)
+    penalty = TechnicalAgent()._lottery_penalty(bars)
+    assert penalty > 0.0
+
+
+# ── _is_retail_driven ─────────────────────────────────────────────────────────
+
+def test_is_retail_driven_false_when_move_too_small():
+    # Price move < 8% and normal volume → not retail-driven
+    bars = _multi_day(n_prior=20, prior_vol=200_000,
+                      today_closes=[100.0] * 10, today_vol=200_000)
+    assert TechnicalAgent()._is_retail_driven(bars) is False
+
+
+def test_is_retail_driven_true_when_both_criteria_met():
+    # Price move > 8% with volume surge > 2× → retail-driven
+    closes = [100.0] * 5 + [110.0] * 5   # 10% move
+    bars = _multi_day(n_prior=20, prior_vol=100_000, today_closes=closes, today_vol=300_000)
+    assert TechnicalAgent()._is_retail_driven(bars) is True
+
+
+# ── _session_vwap ─────────────────────────────────────────────────────────────
+
+def test_session_vwap_reflects_current_session():
+    # VWAP computed solely from today's bars should be close to today's avg close
+    bars = _multi_day(n_prior=5, today_closes=[105.0] * 10)
+    vwap = TechnicalAgent()._session_vwap(bars)
+    # With all high=105.5, low=104.5, close=105 the typical price ≈ 105
+    assert 103.0 < vwap < 107.0
+
+
+# ── _trend_join_score ─────────────────────────────────────────────────────────
+
+def test_trend_join_none_for_single_session():
+    # Only one date in the index → can't compare to prior day
+    bars = make_session_bars([100.0] * 10)
+    assert TechnicalAgent()._trend_join_score(bars) is None
+
+
+def test_trend_join_bullish_above_prior_high():
+    # Today breaks above prior high: price=105 > prior_high=101 and near today HOD
+    prior_bars = _multi_day(n_prior=1, prior_vol=200_000, today_closes=[105.0] * 10)
+    # today_closes=105 means close is above prior session high (101.0)
+    score = TechnicalAgent()._trend_join_score(prior_bars)
+    assert score is not None and score > 50.0
+
+
+def test_trend_join_neutral_inside_prior_range():
+    # Today peaks at 104 then falls back to 100: close is NOT near today's HOD (104.5)
+    # and NOT above prior_high (101) and NOT below prior_low (99) → both fracs 0 → 50
+    today_closes = [100.0, 101.0, 102.0, 103.0, 104.0, 103.0, 102.0, 101.0, 100.0, 100.0]
+    bars = _multi_day(n_prior=1, prior_vol=200_000, today_closes=today_closes)
+    score = TechnicalAgent()._trend_join_score(bars)
+    # Close (100) < today_HOD*0.995 (≈103.5) and < prev_high (101)... wait,
+    # close=100 < prev_high=101 so bull crit 1 fails; but bull crit 2 fails too (100 < 103.5).
+    # Bear crit 1: 100 < prev_low(99)? No. Bear crit 2: 100 <= 99*1.005=99.5? No.
+    # Both fracs 0 → score 50.0 or None.
+    assert score is None or score == 50.0
