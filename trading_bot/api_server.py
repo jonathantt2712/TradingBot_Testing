@@ -100,6 +100,7 @@ _scan_stats: Dict[str, Any] = {
     "scan_errors":      0,
     "last_scan_at":     None,
     "market_closed_skips": 0,
+    "running":          False,
 }
 
 import secrets as _secrets
@@ -1201,6 +1202,16 @@ async def _run_market_scan(force: bool = False) -> None:
     ``force=True`` (a manual scan from the dashboard button) bypasses the
     off-hours hourly throttle so a click always runs a fresh scan.
     """
+    if _scan_stats.get("running"):
+        return
+    _scan_stats["running"] = True
+    try:
+        await _run_market_scan_inner(force=force)
+    finally:
+        _scan_stats["running"] = False
+
+
+async def _run_market_scan_inner(force: bool = False) -> None:
     _reset_scan_stats_if_needed()
 
     if not _ALPACA_KEY or not _ALPACA_SECRET:
@@ -2959,6 +2970,8 @@ async def _auto_execute_loop() -> None:
 
 @app.post("/api/scan", dependencies=[Depends(_verify_bot_secret)])
 async def trigger_scan():
+    if _scan_stats.get("running"):
+        return {"status": "already_running", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
     asyncio.create_task(_run_market_scan(force=True))
     return {"status": "scan_triggered", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
