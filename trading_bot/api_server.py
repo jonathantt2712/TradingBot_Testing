@@ -934,6 +934,7 @@ _backtest_stats: Dict[str, Any] = {
     "last_status":   None,   # "ok" | "failed" | "timeout"
     "error_count":   0,
     "last_error":    None,
+    "running":       False,
     "last_log":      None,   # full stdout from last run
     "log_lines":     [],     # live lines while running
 }
@@ -1617,9 +1618,12 @@ _BACKTEST_INTERVAL_H = int(os.getenv("BACKTEST_INTERVAL_H", "24"))
 
 async def _run_backtest() -> None:
     """Run backtest_intraday.py as a subprocess (non-blocking)."""
+    if _backtest_stats.get("running"):
+        return
     if not _BACKTEST_SCRIPT.exists():
         logger.warning("backtest_intraday.py not found — skipping auto-backtest")
         return
+    _backtest_stats["running"] = True
     logger.info("Auto-backtest starting (interval=%dh)…", _BACKTEST_INTERVAL_H)
     proc = None
     try:
@@ -1680,6 +1684,8 @@ async def _run_backtest() -> None:
             "last_status": "failed",
             "error_count": _backtest_stats["error_count"] + 1,
         })
+    finally:
+        _backtest_stats["running"] = False
 
 
 _OPTIMIZER_SCRIPT = _HERE / "optimize_strategy.py"
@@ -3057,6 +3063,8 @@ def get_backtest():
 
 @app.post("/api/backtest/run", dependencies=[Depends(_verify_bot_secret)])
 async def run_backtest_now():
+    if _backtest_stats.get("running"):
+        return {"status": "already_running", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
     asyncio.create_task(_run_backtest())
     return {"status": "backtest_triggered", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
