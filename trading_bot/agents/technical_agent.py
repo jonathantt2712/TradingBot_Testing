@@ -1152,6 +1152,9 @@ class TechnicalAgent(BaseAgent):
         return float(100 - 100 / (1 + gain / loss))
 
     def _macd_hist(self, close: pd.Series) -> float:
+        # MACD needs slow (26) + signal (9) - 1 = 34 bars to be meaningful.
+        if len(close) < 34:
+            return 0.0
         if _HAS_PANDAS_TA:
             macd = ta.macd(close)
             # ta.macd returns None when the frame is too short for its 26+9 windows;

@@ -83,3 +83,32 @@ def test_evaluate_vetoes_when_no_room(flat_bars):
                           account={"equity": 100_000.0}, backtest_mode=True)
     ev = asyncio.run(agent.evaluate(ctx))
     assert ev.veto
+
+
+def test_zero_atr_refuses_to_plan():
+    # Truly flat bars (all identical OHLCV) produce ATR = 0; build_plan must
+    # return None rather than divide by zero in sizing.
+    bars = make_session_bars([100.0] * 40, bar_range=0.0)
+    agent = RiskAgent(_cfg())
+    ctx = AnalysisContext(ticker="TEST", bars=bars, account={"equity": 100_000.0})
+    assert agent.build_plan(ctx, intended=Decision.LONG) is None
+
+
+def test_volatility_multiplier_clips_high_volatility():
+    # ATR = 10 on a $100 stock → atr_pct = 10% >> 1.5% baseline → mult < 1.
+    # The 0.5x floor prevents position size from going to near-zero.
+    mult = RiskAgent._volatility_multiplier(atr=10.0, price=100.0)
+    assert mult == pytest.approx(0.5)  # floor: 0.015 / 0.10 = 0.15, clipped to 0.5
+
+
+def test_volatility_multiplier_clips_low_volatility():
+    # ATR = 0.1 on a $100 stock → atr_pct = 0.1% << 1.5% baseline → mult > 1.
+    # The 1.5x ceiling prevents position over-sizing on illiquid, penny-like spread.
+    mult = RiskAgent._volatility_multiplier(atr=0.1, price=100.0)
+    assert mult == pytest.approx(1.5)  # ceiling: 0.015 / 0.001 = 15, clipped to 1.5
+
+
+def test_volatility_multiplier_neutral_at_baseline():
+    # ATR = 1.5 on a $100 stock → atr_pct = 1.5% = baseline → exactly 1.0x.
+    mult = RiskAgent._volatility_multiplier(atr=1.5, price=100.0)
+    assert mult == pytest.approx(1.0, rel=1e-6)

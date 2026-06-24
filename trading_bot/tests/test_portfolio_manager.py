@@ -88,6 +88,41 @@ def test_composite_squeeze_boost_on_confirmed_squeeze():
     assert boosted > plain
 
 
+def test_composite_all_none_returns_neutral():
+    # When every agent evaluation is None (e.g. all feeds failed), the blender
+    # must return the neutral 50.0 rather than raise ZeroDivisionError.
+    pm = make_pm()
+    assert pm._composite(None, None, None, None) == 50.0
+
+
+def test_composite_minimum_confidence_all_agents():
+    # Clamped minimum confidence (0.05) still produces a valid composite — the
+    # denominator is non-zero and the blended score reflects the raw scores.
+    pm = make_pm()
+    f = _ev(AgentRole.FUNDAMENTAL, 80, confidence=0.01)  # clamped to 0.05
+    v = _ev(AgentRole.VISION,      80, confidence=0.01)
+    t = _ev(AgentRole.TECHNICAL,   80, confidence=0.01)
+    composite = pm._composite(f, v, t, None)
+    assert 70.0 < composite < 90.0  # all at 80 → blend near 80
+
+
+def test_composite_squeeze_boost_applies_at_low_confidence():
+    # The SQUEEZE_BOOST is applied before confidence scaling, so even a low-
+    # confidence confirmed squeeze still pulls the composite higher than an
+    # equally low-confidence non-squeeze setup.
+    pm = make_pm()
+    f = _ev(AgentRole.FUNDAMENTAL, 50)
+    v = _ev(AgentRole.VISION, 50)
+    t = _ev(AgentRole.TECHNICAL, 50)
+    sq_boosted = AgentEvaluation(
+        role=AgentRole.SQUEEZE, score=90, confidence=0.05, data={"setup": "squeeze_long"}
+    )
+    sq_plain = AgentEvaluation(
+        role=AgentRole.SQUEEZE, score=90, confidence=0.05, data={"setup": "moderate"}
+    )
+    assert pm._composite(f, v, t, None, None, sq_boosted) > pm._composite(f, v, t, None, None, sq_plain)
+
+
 # ── agent disagreement dispersion ────────────────────────────────────────────
 
 def test_dispersion_zero_when_agents_agree():
