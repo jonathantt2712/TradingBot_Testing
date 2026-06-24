@@ -265,6 +265,18 @@ class AlpacaBroker(BaseBroker):
             logger.warning("%s: qty=%d — skipping order", decision.ticker, qty)
             return None
 
+        # Pre-flight bracket sanity: for a LONG the stop must be below the entry
+        # and the target above it; for a SHORT it's the mirror. Sending an inverted
+        # bracket to Alpaca wastes a fill and can't be unwound cleanly.
+        entry = plan.entry
+        valid = (sl < entry < tp) if side == "buy" else (tp < entry < sl)
+        if not valid:
+            logger.error(
+                "%s bracket invalid (%s): SL=%.4f entry=%.4f TP=%.4f — order not sent",
+                decision.ticker, side.upper(), sl, entry, tp,
+            )
+            return None
+
         body = {
             "symbol":        decision.ticker,
             "qty":           str(qty),
