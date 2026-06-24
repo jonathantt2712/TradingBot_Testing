@@ -167,3 +167,47 @@ def test_update_from_trades_skips_unscored_and_unresolved(_isolate_files):
     ]
     tuner.update_from_trades(trades)
     assert not (_isolate_files / "strategy_weights.json").exists()
+
+
+# ── edge cases ───────────────────────────────────────────────────────────────
+
+def test_all_wins_loosens_threshold_to_floor(_isolate_files):
+    # 100% win rate satisfies the `> 65.0` branch; thresholds loosen.
+    # After multiple tuning rounds from a stuck floor (55.0 / 45.0), they
+    # must not cross the saturation bounds.
+    (_isolate_files / "strategy_weights.json").write_text(
+        json.dumps({"long_threshold": 55.0, "short_threshold": 45.0})
+    )
+    tuner = WeightTuner({"technical": 1.0})
+    entries = [_entry("LONG", 100.0, {"technical": 60}) for _ in range(10)]  # 100% wr
+    tuner._run(entries)
+    w = _read_weights(_isolate_files)
+    assert w["long_threshold"] >= 55.0   # cannot drop below floor
+    assert w["short_threshold"] <= 45.0  # cannot rise above ceiling
+
+
+def test_all_losses_tightens_threshold_to_ceiling(_isolate_files):
+    # 0% win rate satisfies the `< 40.0` branch; thresholds tighten.
+    # Already at the ceiling → clamped (no further movement).
+    (_isolate_files / "strategy_weights.json").write_text(
+        json.dumps({"long_threshold": 75.0, "short_threshold": 25.0})
+    )
+    tuner = WeightTuner({"technical": 1.0})
+    entries = [_entry("LONG", -100.0, {"technical": 60}) for _ in range(10)]  # 0% wr
+    tuner._run(entries)
+    w = _read_weights(_isolate_files)
+    assert w["long_threshold"] == 75.0   # clamped at ceiling
+    assert w["short_threshold"] == 25.0  # clamped at floor
+
+
+def test_single_direction_bias_defaults_to_prev(_isolate_files):
+    # When all trades are in one direction, short_wr is None → bias cannot be
+    # computed from win rates → must fall back to prev_bias (from existing file).
+    (_isolate_files / "strategy_weights.json").write_text(
+        json.dumps({"long_threshold": 60.0, "short_threshold": 40.0, "bias": "neutral"})
+    )
+    tuner = WeightTuner({"technical": 1.0})
+    entries = [_entry("LONG", 100.0, {"technical": 60}) for _ in range(10)]  # only LONGs
+    tuner._run(entries)
+    w = _read_weights(_isolate_files)
+    assert w["bias"] == "neutral"   # fallback to prev_bias since short_wr is None
