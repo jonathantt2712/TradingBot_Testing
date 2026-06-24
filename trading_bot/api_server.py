@@ -2978,6 +2978,7 @@ async def reset_circuit_breaker():
 @app.get("/api/rejections", dependencies=[Depends(_verify_bot_secret)])
 def get_rejections(limit: int = 50):
     """Return the last `limit` trade rejection records."""
+    limit = max(1, min(limit, 500))
     try:
         lines = REJECT_LOG.read_text(encoding="utf-8").strip().splitlines()
         records = []
@@ -2997,6 +2998,7 @@ def get_rejections(limit: int = 50):
 @app.get("/api/snapshots", dependencies=[Depends(_verify_bot_secret)])
 def get_snapshots(days: int = 30):
     """Return daily benchmark snapshots (last N days)."""
+    days = max(1, min(days, 365))
     try:
         lines = SNAPSHOT_LOG.read_text(encoding="utf-8").strip().splitlines()
         records = []
