@@ -14,6 +14,9 @@ export async function POST(req: Request) {
   if (!password) {
     return NextResponse.json({ error: 'A new password is required' }, { status: 400 })
   }
+  if (password.length < 8) {
+    return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 })
+  }
 
   const passwordHash = await bcrypt.hash(password, 10)
   await prisma.user.update({
