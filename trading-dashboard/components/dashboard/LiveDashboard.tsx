@@ -122,8 +122,16 @@ export function LiveDashboard({
     }
   }, [])
 
-  // SSR already provides fresh data on every page load — no immediate refresh needed.
-  // Polling only runs on interval so SSR values are never overwritten on mount.
+  // ⚠️  DO NOT add an immediate useEffect(() => { refreshFast/Slow() }, [...]) here.
+  //
+  // This component receives all its data as fresh SSR props (fetched server-side
+  // on every page load). Firing a client-side fetch on mount overwrites those
+  // Alpaca-computed values (Sharpe, Max DD, total P&L, regime) with the bot's
+  // cached/default values ~500ms later, causing a visible flicker.
+  //
+  // Polling starts AFTER the first interval so SSR data is never clobbered.
+  // If you need data not covered by SSR, add it to loadDashboard() in app/page.tsx
+  // and pass it as an initial* prop — then use skipInitialRun: true in usePolling.
   useEffect(() => {
     const fastId = setInterval(refreshFast, FAST_MS)
     return () => clearInterval(fastId)
