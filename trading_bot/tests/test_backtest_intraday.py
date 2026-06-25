@@ -19,6 +19,7 @@ import backtest_intraday as _bt_mod
 from backtest_intraday import (
     LOOKBACK_BARS,
     TradeResult,
+    _load_current_weights,
     _prior_vix,
     _session_vwap_chg,
     _spy_regime_at,
@@ -730,3 +731,45 @@ class TestUpdateWeightsFromBacktest:
         w = self._read_weights()
         assert w["atr_stop_multiple"] < 2.0
         assert w["atr_target_multiple"] < 4.0
+
+
+# ── _load_current_weights ──────────────────────────────────────────────────────
+
+class TestLoadCurrentWeights:
+    @pytest.fixture(autouse=True)
+    def _patch_weights_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_bt_mod, "_WEIGHTS_FILE", tmp_path / "weights.json")
+        self.weights_path = tmp_path / "weights.json"
+
+    def test_missing_file_returns_defaults(self):
+        w = _load_current_weights()
+        assert w["atr_stop_multiple"] == pytest.approx(2.0)
+        assert w["atr_target_multiple"] == pytest.approx(4.0)
+
+    def test_valid_file_overrides_defaults(self):
+        self.weights_path.write_text(json.dumps({"atr_stop_multiple": 1.5}), encoding="utf-8")
+        w = _load_current_weights()
+        assert w["atr_stop_multiple"] == pytest.approx(1.5)
+        assert w["atr_target_multiple"] == pytest.approx(4.0)  # default preserved
+
+    def test_malformed_json_returns_defaults(self):
+        self.weights_path.write_text("NOT_JSON", encoding="utf-8")
+        w = _load_current_weights()
+        assert w["atr_stop_multiple"] == pytest.approx(2.0)
+        assert w["atr_target_multiple"] == pytest.approx(4.0)
+
+    def test_extra_keys_in_file_are_passed_through(self):
+        self.weights_path.write_text(json.dumps({"custom_key": 99.0}), encoding="utf-8")
+        w = _load_current_weights()
+        assert w["custom_key"] == pytest.approx(99.0)
+        assert w["atr_stop_multiple"] == pytest.approx(2.0)
+
+    def test_file_overrides_take_precedence_over_defaults(self):
+        """When the file has both keys, they must replace the hard-coded defaults."""
+        self.weights_path.write_text(
+            json.dumps({"atr_stop_multiple": 3.0, "atr_target_multiple": 5.0}),
+            encoding="utf-8",
+        )
+        w = _load_current_weights()
+        assert w["atr_stop_multiple"] == pytest.approx(3.0)
+        assert w["atr_target_multiple"] == pytest.approx(5.0)
