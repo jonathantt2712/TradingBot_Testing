@@ -8,6 +8,7 @@ import pytest
 
 from simulate_learning import _build_trades, _score_for, _AGENT_SKILL, _tag_simulated
 import simulate_learning as _sl_mod
+from core import weight_tuner
 
 
 # ── _score_for ─────────────────────────────────────────────────────────────────
@@ -159,3 +160,49 @@ class TestTagSimulated:
 
     def test_missing_files_are_noop(self):
         _tag_simulated()   # no files exist — must not raise
+
+
+# ── run_simulation ─────────────────────────────────────────────────────────────
+
+class TestRunSimulation:
+    @pytest.fixture(autouse=True)
+    def _patch_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_sl_mod, "_HISTORY_FILE", tmp_path / "h.jsonl")
+        monkeypatch.setattr(_sl_mod, "_WEIGHTS_FILE", tmp_path / "w.json")
+        monkeypatch.setattr(weight_tuner, "_HISTORY_FILE", tmp_path / "h.jsonl")
+        monkeypatch.setattr(weight_tuner, "_WEIGHTS_FILE", tmp_path / "w.json")
+        self.tmp = tmp_path
+
+    def test_returns_dict_with_expected_keys(self):
+        result = _sl_mod.run_simulation(n_trades=15, seed=42)
+        assert "trades" in result
+        assert "steps" in result
+        assert "simulated" in result
+
+    def test_simulated_flag_is_true(self):
+        result = _sl_mod.run_simulation(n_trades=15, seed=42)
+        assert result["simulated"] is True
+
+    def test_trade_count_matches_request(self):
+        result = _sl_mod.run_simulation(n_trades=15, seed=42)
+        assert result["trades"] == 15
+
+    def test_steps_nonzero_with_enough_trades(self):
+        """n_trades > _MIN_TRADES must produce at least one history snapshot."""
+        result = _sl_mod.run_simulation(n_trades=weight_tuner._MIN_TRADES + 5, seed=42)
+        assert result["steps"] >= 1
+
+    def test_fewer_than_min_trades_produces_no_steps(self):
+        """n_trades < _MIN_TRADES means the tuner never fires → 0 steps."""
+        result = _sl_mod.run_simulation(n_trades=weight_tuner._MIN_TRADES - 1, seed=42)
+        assert result["steps"] == 0
+
+    def test_history_lines_tagged_simulated(self):
+        """Every snapshot written by run_simulation must carry simulated=true."""
+        _sl_mod.run_simulation(n_trades=15, seed=42)
+        h = self.tmp / "h.jsonl"
+        if h.exists():
+            for line in h.read_text().splitlines():
+                if line.strip():
+                    snap = json.loads(line)
+                    assert snap.get("simulated") is True
