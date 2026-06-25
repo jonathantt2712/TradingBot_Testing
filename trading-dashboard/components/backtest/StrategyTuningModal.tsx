@@ -200,7 +200,7 @@ export function StrategyTuningModal({ onClose }: Props) {
         body:    JSON.stringify(draft),
       })
       if (!r.ok) throw new Error()
-      toast.success('Parameters saved — active until market close today (16:00 ET)')
+      toast.success('Parameters saved — self-tuner will continue adjusting from these values')
       onClose()
     } catch {
       toast.error('Could not save — bot offline?')
@@ -243,20 +243,16 @@ export function StrategyTuningModal({ onClose }: Props) {
             <div className="flex gap-3 rounded-xl border border-caution/30 bg-caution/10 p-4">
               <AlertTriangle className="h-5 w-5 text-caution shrink-0 mt-0.5" />
               <div className="space-y-2 text-sm">
-                <p className="font-semibold text-caution">Manual override — read before continuing</p>
+                <p className="font-semibold text-caution">Manual parameter seed</p>
                 <p className="text-subtle leading-relaxed">
-                  You are about to manually set the bot&apos;s trading parameters. These values
-                  will <strong className="text-primary">override the self-tuner</strong> for
-                  the rest of today&apos;s trading session.
+                  The values you set here become the bot&apos;s <strong className="text-primary">new starting point</strong>.
+                  The self-tuner will continue running and may adjust them further over time
+                  based on trade results — just as it would from the defaults.
                 </p>
                 <p className="text-subtle leading-relaxed">
-                  At <strong className="text-primary">market close (16:00 ET)</strong> the
-                  overrides expire automatically and the self-tuner resumes its normal
-                  learning — adjusting parameters based on recent trade results.
-                </p>
-                <p className="text-muted text-xs">
-                  Use this to react quickly to unusual market conditions. For permanent
-                  changes, run the optimizer and apply its results instead.
+                  Use this when you want to guide the bot in a specific direction
+                  (e.g. be more conservative in a choppy market) without turning off
+                  the automatic learning entirely.
                 </p>
               </div>
             </div>
@@ -267,7 +263,7 @@ export function StrategyTuningModal({ onClose }: Props) {
                 onClick={() => setStep('edit')}
                 className="btn-primary text-xs flex-1"
               >
-                I understand — set parameters
+                Got it — set parameters
               </button>
             </div>
           </div>
@@ -333,7 +329,7 @@ export function StrategyTuningModal({ onClose }: Props) {
                     ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     : <Save className="h-3.5 w-3.5" />
                   }
-                  Save for today
+                  Save
                 </button>
               </div>
             </div>
