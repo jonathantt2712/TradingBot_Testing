@@ -107,11 +107,12 @@ export function LiveDashboard({
     }
   }, [applyPositions])
 
-  // Slow: PnL chart, regime, scan-stats (5 min)
+  // Slow: PnL chart, regime (from Alpaca directly), scan-stats (5 min)
   const refreshSlow = useCallback(async () => {
     const [p, r, ss] = await Promise.allSettled([
       fetch('/api/bot/pnl').then(res => res.ok ? res.json() : null),
-      fetch('/api/bot/regime').then(res => res.ok ? res.json() : null),
+      // Regime fetched directly from Alpaca — always fresh, no bot dependency
+      fetch('/api/alpaca/regime').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/scan-stats').then(res => res.ok ? res.json() : null),
     ])
     if (p.status  === 'fulfilled' && Array.isArray(p.value))  setPnl(p.value)

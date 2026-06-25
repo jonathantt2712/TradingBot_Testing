@@ -11,6 +11,7 @@ import { getAccount, getPositions, getPortfolioHistory, type AlpacaCreds } from 
 import { getAlpacaCreds } from '@/lib/session'
 import { botGet } from '@/lib/bot-api'
 import { computeSharpe, computeMaxDD } from '@/lib/stats'
+import { computeRegime } from '@/lib/regime'
 import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/trading'
 import type { AlpacaAccount } from '@/lib/alpaca'
 
@@ -21,7 +22,7 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     creds ? getPortfolioHistory(creds, '1A', '1D') : Promise.reject(new Error('no creds')),
     botGet<PortfolioStats>('/api/stats'),
     botGet<PnLPoint[]>('/api/pnl'),
-    botGet<RegimeInfo>('/api/regime'),
+    creds ? computeRegime(creds) : Promise.reject(new Error('no creds')),
     botGet<SectorStat[]>('/api/sectors'),
     botGet<{ trading?: { mode_label?: string; execute_live?: boolean; paper_mode?: boolean }; issues?: HealthIssue[] }>('/api/health'),
     botGet<Record<string, unknown>>('/api/scan-stats'),
