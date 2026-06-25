@@ -1,9 +1,11 @@
 'use client'
+import { useState } from 'react'
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
   PieChart, Pie, Cell, Legend,
 } from 'recharts'
+import { Info, X } from 'lucide-react'
 import { cn, formatCurrency, formatPct } from '@/lib/utils'
 import type { PnLPoint, PortfolioStats, TradeRecord } from '@/types/trading'
 
@@ -42,6 +44,7 @@ function ChartTooltip({ active, payload, label }: any) {
 }
 
 export function PnLAnalytics({ pnl, stats, trades, live, attribution, monteCarlo, regimePerf }: Props) {
+  const [sharpeModal, setSharpeModal] = useState(false)
   const wins   = trades.filter(t => (t.pnl ?? 0) > 0).length
   const losses = trades.filter(t => (t.pnl ?? 0) < 0).length
   const pie    = [
@@ -88,16 +91,84 @@ export function PnLAnalytics({ pnl, stats, trades, live, attribution, monteCarlo
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
         {summaryCards.map(c => (
-          <div key={c.label} className="card p-4" title={(c as any).tooltip}>
+          <div key={c.label} className="card p-4 relative">
             <p className="stat-label text-[10px] flex items-center gap-1">
               {c.label}
-              {(c as any).tooltip && <span className="text-muted opacity-60 cursor-help">ⓘ</span>}
+              {c.label === 'Sharpe' && (
+                <button
+                  onClick={() => setSharpeModal(true)}
+                  className="text-muted hover:text-brand-cyan transition-colors"
+                  aria-label="What is Sharpe Ratio?"
+                >
+                  <Info className="h-3 w-3" />
+                </button>
+              )}
             </p>
             <p className={cn('mt-1 text-xl font-bold font-mono', c.color)}>{c.value}</p>
             <p className="mt-0.5 text-[10px] text-muted">{c.sub}</p>
           </div>
         ))}
       </div>
+
+      {/* Sharpe Ratio explanation modal */}
+      {sharpeModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          onClick={() => setSharpeModal(false)}
+        >
+          <div
+            className="relative w-full max-w-md rounded-2xl border border-bg-border bg-bg-card p-6 shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setSharpeModal(false)}
+              className="absolute right-4 top-4 text-muted hover:text-primary transition-colors"
+            >
+              <X className="h-4 w-4" />
+            </button>
+
+            <h2 className="text-base font-bold text-primary mb-4">What is the Sharpe Ratio?</h2>
+
+            <div className="space-y-3 text-sm text-subtle leading-relaxed">
+              <p>
+                The <span className="text-primary font-semibold">Sharpe Ratio</span> measures how much return the bot earns <em>relative to the risk it takes</em>. It answers the question: "Is the profit worth the volatility?"
+              </p>
+
+              <div className="rounded-lg bg-bg-base px-4 py-3 font-mono text-xs text-center text-brand-cyan">
+                Sharpe = (avg daily return ÷ std deviation) × √252
+              </div>
+
+              <p>
+                A higher number is better. The <span className="text-caution font-semibold">×√252</span> scales the daily result to an annual figure (252 trading days per year).
+              </p>
+
+              <div className="space-y-1.5 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="w-20 font-mono text-bull font-semibold">Above 2.0</span>
+                  <span className="text-muted">Excellent — strong returns with low volatility</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-20 font-mono text-brand-cyan font-semibold">1.0 – 2.0</span>
+                  <span className="text-muted">Good — solid risk-adjusted performance</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-20 font-mono text-caution font-semibold">0.0 – 1.0</span>
+                  <span className="text-muted">Acceptable — but room to improve</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-20 font-mono text-bear font-semibold">Below 0</span>
+                  <span className="text-muted">The strategy is losing on average</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-20 font-mono text-muted font-semibold">—</span>
+                  <span className="text-muted">Not enough data yet (need at least 3 trading days)</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* Portfolio Value + Equity Curve */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
