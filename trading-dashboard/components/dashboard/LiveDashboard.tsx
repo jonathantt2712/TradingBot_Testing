@@ -88,9 +88,18 @@ export function LiveDashboard({
     if (newPositions !== null)                                         setPositions(newPositions)
     if (sec.status === 'fulfilled' && Array.isArray(sec.value))       setSectors(sec.value)
     if (s.status   === 'fulfilled' && s.value && !s.value.error) {
-      const newStats = { ...s.value }
-      newStats.open_positions = newPositions !== null ? newPositions.length : s.value.open_positions
-      setStats(newStats)
+      setStats(prev => {
+        const next = { ...s.value }
+        next.open_positions = newPositions !== null ? newPositions.length : s.value.open_positions
+        // Preserve Alpaca-computed values when the bot returns its 0 defaults.
+        // These are set server-side from the equity curve and the bot has no
+        // access to Alpaca history, so its values are always less accurate.
+        if (!next.sharpe_ratio  && prev.sharpe_ratio)  next.sharpe_ratio  = prev.sharpe_ratio
+        if (!next.max_drawdown  && prev.max_drawdown)  next.max_drawdown  = prev.max_drawdown
+        if (!next.total_pnl     && prev.total_pnl)     next.total_pnl     = prev.total_pnl
+        if (!next.today_pnl     && prev.today_pnl)     next.today_pnl     = prev.today_pnl
+        return next
+      })
     }
   }, [applyPositions])
 
