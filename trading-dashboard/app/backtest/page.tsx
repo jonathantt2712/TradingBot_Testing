@@ -2,11 +2,11 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   TrendingUp, TrendingDown, BarChart2, Target, AlertTriangle,
-  RefreshCw, CheckCircle2, XCircle, Clock, Activity, Play, Loader2, Download, ChevronDown, ChevronUp,
+  RefreshCw, CheckCircle2, XCircle, Clock, Activity, Play, Loader2, Download, ChevronDown, ChevronUp, Sliders,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EquityCurve, ParamHeatmap, type BacktestTrade } from '@/components/backtest/BacktestCharts'
-import { StrategyTuningCard } from '@/components/backtest/StrategyTuningCard'
+import { StrategyTuningModal } from '@/components/backtest/StrategyTuningModal'
 
 interface TickerStat {
   ticker:   string
@@ -222,6 +222,7 @@ export default function BacktestPage() {
   const [data,       setData]       = useState<BacktestPayload | null>(null)
   const [loading,    setLoading]    = useState(true)
   const [error,      setError]      = useState<string | null>(null)
+  const [tuningOpen, setTuningOpen] = useState(false)
   const [running,    setRunning]    = useState(false)
   const [optimizing, setOptimizing] = useState(false)
   const [applying,   setApplying]   = useState(false)
@@ -348,22 +349,6 @@ export default function BacktestPage() {
     }, 15_000)
   }
 
-  async function resetWeights() {
-    if (!confirm('Reset strategy weights to defaults? This clears any self-tuner adjustments.')) return
-    try {
-      const res = await fetch('/api/optimize/reset', { method: 'POST' })
-      const d = await res.json()
-      if (d.status === 'reset') {
-        setApplyMsg({ ok: true, text: 'Strategy weights reset to defaults — self-tuner will re-learn from next trades.' })
-        load()
-      } else {
-        setApplyMsg({ ok: false, text: d.error || 'Reset failed' })
-      }
-    } catch {
-      setApplyMsg({ ok: false, text: 'Failed to reach the bot' })
-    }
-  }
-
   async function applyOptimal() {
     if (applying) return
     setApplying(true); setApplyMsg(null)
@@ -446,11 +431,12 @@ export default function BacktestPage() {
             </button>
           )}
           <button
-            onClick={resetWeights}
-            title="Reset self-tuner back to factory defaults (clears drifted min_score / ATR)"
-            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all bg-bear/10 border border-bear/30 text-bear hover:bg-bear/20"
+            onClick={() => setTuningOpen(true)}
+            title="Manually override today's trading parameters"
+            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all bg-brand-cyan/10 border border-brand-cyan/30 text-brand-cyan hover:bg-brand-cyan/20"
           >
-            Reset Weights
+            <Sliders className="h-3.5 w-3.5" />
+            Change Parameters
           </button>
           <button onClick={load} disabled={loading} className="btn-ghost text-xs">
             <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
@@ -775,8 +761,9 @@ export default function BacktestPage() {
         </div>
       )}
 
-      {/* Strategy weight tuner — always visible */}
-      <StrategyTuningCard />
+      {tuningOpen && (
+        <StrategyTuningModal onClose={() => setTuningOpen(false)} />
+      )}
     </div>
   )
 }

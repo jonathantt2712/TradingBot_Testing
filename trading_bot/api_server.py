@@ -803,6 +803,17 @@ def _update_strategy_weights() -> None:
     # tuning on its own — only a deliberate, OOS-validated optimizer Apply flips
     # live_tuning_active (avoids stepping live sizing from the DEFAULT baseline).
     # Once Apply has activated tuning, these refinements build on the applied values.
+    # Clear manual overrides if their end-of-day expiry has passed.
+    expiry_str = weights.get("override_expires_at")
+    if expiry_str:
+        try:
+            if datetime.fromisoformat(expiry_str) <= datetime.now(timezone.utc).replace(tzinfo=None):
+                weights["manual_overrides"]    = {}
+                weights["override_expires_at"] = None
+                logger.info("Manual overrides expired — self-tuner resumes full control")
+        except Exception:
+            pass
+
     # Self-tuner skips any field the user has manually locked.
     locked: set = set(weights.get("manual_overrides") or {})
 
@@ -3238,10 +3249,21 @@ def patch_strategy_weights(body: PatchWeightsBody):
             del overrides[key]
             unlocked.append(key)
 
-    weights["manual_overrides"] = overrides
+    # Overrides expire at 16:00 ET today (or tomorrow if already past close)
+    _et = _ZoneInfo("America/New_York")
+    now_et = datetime.now(_et)
+    expiry = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    if now_et >= expiry:
+        from datetime import timedelta as _td
+        expiry += _td(days=1)
+    weights["manual_overrides"]    = overrides
+    weights["override_expires_at"] = expiry.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
     _save_weights(weights)
-    logger.info("Strategy weights patched by operator: updated=%s unlocked=%s", updated, unlocked)
-    return {"status": "ok", "updated": updated, "unlocked": unlocked, "manual_overrides": list(overrides.keys())}
+    logger.info("Strategy weights patched by operator: updated=%s unlocked=%s expires=%s",
+                updated, unlocked, weights["override_expires_at"])
+    return {"status": "ok", "updated": updated, "unlocked": unlocked,
+            "manual_overrides": list(overrides.keys()),
+            "expires_at": weights["override_expires_at"]}
 
 
 @app.get("/api/optimize/applied", dependencies=[Depends(_verify_bot_secret)])
@@ -3272,6 +3294,7 @@ def get_strategy_weights():
         "bias":                w.get("bias", "neutral"),
         "last_updated":        w.get("last_updated"),
         "manual_overrides":    w.get("manual_overrides") or {},
+        "override_expires_at": w.get("override_expires_at"),
         "defaults": {
             "min_score":           DEFAULT_WEIGHTS["min_score"],
             "atr_stop_multiple":   DEFAULT_WEIGHTS["atr_stop_multiple"],
