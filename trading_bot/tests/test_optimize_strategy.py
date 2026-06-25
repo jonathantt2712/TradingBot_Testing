@@ -1,22 +1,27 @@
 """Unit tests for optimize_strategy pure helpers.
 
-Covers: _split_caches, _threshold_combos, _atr_combos, _slim, _fmt_params.
+Covers: _split_caches, _threshold_combos, _atr_combos, _slim, _fmt_params,
+_params_label, _write_dashboard_files.
 No network calls, no broker connections.
 """
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 
+import optimize_strategy as _opt_mod
 from optimize_strategy import (
     _atr_combos,
     _fmt_params,
+    _params_label,
     _slim,
     _split_caches,
     _threshold_combos,
+    _write_dashboard_files,
     SPLIT_FRAC,
     MIN_TRADES,
     MIN_OOS_TRADES,
@@ -246,3 +251,80 @@ class TestFmtParams:
 
     def test_empty_dict_returns_empty_string(self):
         assert _fmt_params({}) == ""
+
+
+# ── _params_label ─────────────────────────────────────────────────────────────
+
+class TestParamsLabel:
+    def test_threshold_key_shortened(self):
+        result = _params_label({"LONG_THRESHOLD": 60.0})
+        assert "LONG_T=60.0" in result
+        assert "LONG_THRESHOLD" not in result
+
+    def test_multiple_key_shortened(self):
+        result = _params_label({"ATR_STOP_MULTIPLE": 2.0, "ATR_TARGET_MULTIPLE": 4.0})
+        assert "ATR_STOP_M=2.0" in result
+        assert "ATR_TARGET_M=4.0" in result
+        assert "_MULTIPLE" not in result
+
+    def test_empty_dict_returns_empty_string(self):
+        assert _params_label({}) == ""
+
+
+# ── _write_dashboard_files ────────────────────────────────────────────────────
+
+class TestWriteDashboardFiles:
+    @pytest.fixture(autouse=True)
+    def _patch_paths(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_opt_mod, "OPTIMAL_JSON", tmp_path / "backtest_optimal.json")
+        monkeypatch.setattr(_opt_mod, "OPTIMAL_CONFIG", tmp_path / "OPTIMAL_CONFIG.txt")
+        self.tmp = tmp_path
+
+    def _best(self, **oos_overrides):
+        base = {
+            "total_trades": 30, "win_rate": 55.0, "total_pnl": 1500.0,
+            "avg_win": 80.0, "avg_loss": -60.0, "profit_factor": 1.8,
+            "sharpe": 1.2, "max_drawdown": -200.0, "ev_per_trade": 50.0,
+        }
+        if oos_overrides:
+            return {
+                "params": {"LONG_THRESHOLD": 60.0, "SHORT_THRESHOLD": 40.0},
+                "in_sample": base,
+                "oos": {**base, **oos_overrides},
+            }
+        return {"params": {"LONG_THRESHOLD": 60.0, "SHORT_THRESHOLD": 40.0}, **base}
+
+    def test_empty_best_writes_no_files(self):
+        _write_dashboard_files({}, days=30, objective="total_pnl", validated=False)
+        assert not (self.tmp / "backtest_optimal.json").exists()
+        assert not (self.tmp / "OPTIMAL_CONFIG.txt").exists()
+
+    def test_json_file_is_parseable(self):
+        _write_dashboard_files(self._best(), days=30, objective="total_pnl", validated=False)
+        data = json.loads((self.tmp / "backtest_optimal.json").read_text())
+        assert isinstance(data, dict)
+
+    def test_json_file_contains_optimal_params(self):
+        _write_dashboard_files(self._best(), days=30, objective="total_pnl", validated=False)
+        data = json.loads((self.tmp / "backtest_optimal.json").read_text())
+        assert "optimal_params" in data
+        assert data["optimal_params"]["LONG_THRESHOLD"] == pytest.approx(60.0)
+
+    def test_config_txt_contains_params(self):
+        _write_dashboard_files(self._best(), days=30, objective="total_pnl", validated=False)
+        txt = (self.tmp / "OPTIMAL_CONFIG.txt").read_text()
+        assert "LONG_THRESHOLD=60.0" in txt
+        assert "SHORT_THRESHOLD=40.0" in txt
+
+    def test_oos_metrics_used_when_validated(self):
+        """When best has an 'oos' block the JSON reports OOS stats, not in-sample."""
+        best = self._best(win_rate=48.0, total_pnl=800.0)
+        _write_dashboard_files(best, days=30, objective="total_pnl", validated=True)
+        data = json.loads((self.tmp / "backtest_optimal.json").read_text())
+        assert data["win_rate"] == pytest.approx(48.0)
+        assert data["total_pnl"] == pytest.approx(800.0)
+
+    def test_optimal_window_days_stored(self):
+        _write_dashboard_files(self._best(), days=45, objective="total_pnl", validated=False)
+        data = json.loads((self.tmp / "backtest_optimal.json").read_text())
+        assert data["optimal_window_days"] == 45
