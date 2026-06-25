@@ -599,6 +599,80 @@ async def _fetch_multi_bars(
     return result
 
 
+async def _refresh_regime() -> None:
+    """Lightweight regime refresh — runs every 5 min regardless of market hours.
+
+    Fetches only SPY/QQQ snapshots + VIX from Yahoo so the regime card on the
+    dashboard never goes stale, even when the full scanner is throttled off-hours.
+    """
+    if not _ALPACA_KEY or not _ALPACA_SECRET:
+        return
+    try:
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+        ) as session:
+            vix_index = await _fetch_vix_index(session)
+
+            async with session.get(
+                f"{_DATA_BASE}/v2/stocks/snapshots?symbols=SPY,QQQ,VIXY",
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status != 200:
+                    return
+                snaps: dict = await r.json()
+
+            def _snap_chg(sym: str) -> float:
+                s = snaps.get(sym, {})
+                prev = s.get("prevDailyBar", {}).get("c", 0)
+                curr = s.get("dailyBar",     {}).get("c", 0) or s.get("latestTrade", {}).get("p", 0)
+                if prev and curr:
+                    return round((curr - prev) / prev * 100, 2)
+                return 0.0
+
+            spy_chg = _snap_chg("SPY")
+            qqq_chg = _snap_chg("QQQ")
+
+            vixy_snap = snaps.get("VIXY", {})
+            vix_approx = round(float(vixy_snap.get("latestTrade", {}).get("p", 0) or
+                                     vixy_snap.get("dailyBar",    {}).get("c", 0) or 0), 1)
+
+            if vix_index > 0:
+                vix_level, vix_label = vix_index, "VIX"
+            elif vix_approx > 0:
+                vix_level, vix_label = vix_approx, "VIX-proxy"
+            else:
+                vix_level, vix_label = 15.0, "VIX"
+
+            if spy_chg > 0.5 and qqq_chg > 0.5 and vix_level < 25:
+                label     = "risk_on"
+                rationale = f"SPY +{spy_chg:.2f}%, QQQ +{qqq_chg:.2f}%, {vix_label} {vix_level:.1f} — bullish"
+            elif spy_chg < -0.5 or vix_level > 35:
+                label     = "risk_off"
+                rationale = f"SPY {spy_chg:.2f}%, {vix_label} {vix_level:.1f} — bearish"
+            elif abs(spy_chg) < 0.3 and abs(qqq_chg) < 0.3:
+                label     = "choppy"
+                rationale = f"SPY {spy_chg:.2f}%, QQQ {qqq_chg:.2f}% — low momentum"
+            else:
+                label     = "neutral"
+                rationale = f"SPY {spy_chg:.2f}%, QQQ {qqq_chg:.2f}%"
+
+            existing = _load(REGIME_FILE, {})
+            _save(REGIME_FILE, {
+                **existing,
+                "regime":      label,
+                "vix_level":   vix_level,
+                "spy_day_chg": spy_chg,
+                "qqq_day_chg": qqq_chg,
+                "rationale":   rationale,
+                "timestamp":   datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+            })
+            logger.debug("Regime refreshed: %s (SPY %+.2f%% QQQ %+.2f%% VIX %.1f)",
+                         label, spy_chg, qqq_chg, vix_level)
+    except Exception as exc:
+        logger.debug("_refresh_regime failed: %s", exc)
+
+
 async def _fetch_vix_index(session: aiohttp.ClientSession) -> float:
     """Fetch the real CBOE VIX index level.
 
@@ -2320,6 +2394,13 @@ async def _background_loop() -> None:
                     }))
                 except Exception as exc:
                     logger.warning("Weekly Telegram summary failed: %s", exc)
+
+        # Refresh regime every loop iteration (every 5 min) regardless of
+        # whether the full scan runs — keeps the dashboard card fresh off-hours.
+        try:
+            await _refresh_regime()
+        except Exception as exc:
+            logger.debug("Regime refresh error: %s", exc)
 
         # Backoff: after 3 consecutive errors, wait 10× longer
         wait = 300 if consecutive_errors < 3 else 3000
