@@ -92,3 +92,18 @@ def test_rationale_lists_subsignals():
     assert "rel_vol=" in ev.rationale
     for key in ev.data["signals"]:
         assert f"{key}=" in ev.rationale
+
+
+def test_zero_volume_bars_never_produce_nan_score():
+    # Regression: _vwap_deviation_signal returned float(nan) instead of None
+    # when all intraday volumes were 0. nan passed the `is not None` guard and
+    # corrupted np.mean(), yielding an unpredictable score (often 100.0 via
+    # Python's min/max NaN behavior). Fixed by an explicit cum_vol <= 0 guard.
+    bars = _multiday_bars(_QUIET_WEEK + [
+        ("2026-06-17", [100.0] * 10, 0),  # all-zero volume today
+    ])
+    ev = _run(bars)
+    assert not np.isnan(ev.score)
+    assert 1.0 <= ev.score <= 100.0
+    # VWAP signal must NOT appear in signals dict when volume is zero
+    assert "vwap_dev" not in ev.data.get("signals", {})

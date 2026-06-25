@@ -1,11 +1,11 @@
-"""Regime agent: VIX source selection (real index vs VIXY proxy)."""
+"""Regime agent: VIX source selection, classify_regime pure logic, and integration."""
 import asyncio
 
 import pandas as pd
 import pytest
 
 from agents import regime_agent
-from agents.regime_agent import MarketRegime, detect_regime
+from agents.regime_agent import MarketRegime, RegimeSnapshot, classify_regime, detect_regime
 
 
 def _flat_bars(price: float, n: int = 5) -> pd.DataFrame:
@@ -76,3 +76,100 @@ def test_vixy_fallback_risk_off_at_high_price(monkeypatch):
 
     assert snap.regime == MarketRegime.RISK_OFF
     assert "VIXY=40.0 (>38)" in snap.rationale
+
+
+# ── classify_regime (pure logic) ─────────────────────────────────────────────
+
+def test_classify_risk_off_vix_spike():
+    # VIX > 25 alone triggers RISK_OFF regardless of SPY/QQQ
+    regime, rationale = classify_regime(
+        vix_level=30.0, spy_vs_vwap=1.0, spy_day_chg=0.5,
+        qqq_vs_vwap=1.0, qqq_day_chg=0.5,
+    )
+    assert regime is MarketRegime.RISK_OFF
+    assert "VIX=30.0" in rationale
+
+
+def test_classify_risk_off_spy_selloff():
+    # SPY below VWAP AND down >0.8% triggers RISK_OFF even with low VIX
+    regime, rationale = classify_regime(
+        vix_level=15.0, spy_vs_vwap=-0.5, spy_day_chg=-1.2,
+        qqq_vs_vwap=0.5, qqq_day_chg=0.2,
+    )
+    assert regime is MarketRegime.RISK_OFF
+    assert "SPY below VWAP" in rationale
+
+
+def test_classify_risk_off_qqq_selloff():
+    # QQQ below VWAP AND down >0.8% also triggers RISK_OFF
+    regime, rationale = classify_regime(
+        vix_level=15.0, spy_vs_vwap=0.2, spy_day_chg=0.1,
+        qqq_vs_vwap=-1.0, qqq_day_chg=-1.5,
+    )
+    assert regime is MarketRegime.RISK_OFF
+
+
+def test_classify_risk_on_requires_two_signals():
+    # Low VIX alone (1 signal) is not enough for RISK_ON → NEUTRAL
+    regime, _ = classify_regime(
+        vix_level=15.0, spy_vs_vwap=None, spy_day_chg=None,
+        qqq_vs_vwap=None, qqq_day_chg=None,
+    )
+    assert regime is MarketRegime.NEUTRAL
+
+
+def test_classify_risk_on_with_two_signals():
+    # Low VIX + SPY above VWAP = 2 RISK-ON signals → RISK_ON
+    regime, rationale = classify_regime(
+        vix_level=15.0, spy_vs_vwap=0.3, spy_day_chg=0.2,
+        qqq_vs_vwap=None, qqq_day_chg=None,
+    )
+    assert regime is MarketRegime.RISK_ON
+    assert "RISK-ON" in rationale
+
+
+def test_classify_neutral_mid_vix():
+    # VIX in neutral band (18-25), SPY slightly above VWAP (1 signal only) → NEUTRAL
+    regime, _ = classify_regime(
+        vix_level=21.0, spy_vs_vwap=0.2, spy_day_chg=0.1,
+        qqq_vs_vwap=None, qqq_day_chg=None,
+    )
+    assert regime is MarketRegime.NEUTRAL
+
+
+def test_classify_all_none_is_neutral():
+    # No data at all → NEUTRAL
+    regime, _ = classify_regime(
+        vix_level=None, spy_vs_vwap=None, spy_day_chg=None,
+        qqq_vs_vwap=None, qqq_day_chg=None,
+    )
+    assert regime is MarketRegime.NEUTRAL
+
+
+# ── RegimeSnapshot threshold deltas ──────────────────────────────────────────
+
+def _snap(regime: MarketRegime) -> RegimeSnapshot:
+    return RegimeSnapshot(
+        regime=regime, vix_level=None,
+        spy_vs_vwap=None, spy_day_chg=None,
+        qqq_vs_vwap=None, qqq_day_chg=None,
+        rationale="test",
+    )
+
+
+def test_risk_on_loosens_long_tightens_short():
+    snap = _snap(MarketRegime.RISK_ON)
+    assert snap.long_delta < 0    # lower threshold → easier to go LONG
+    assert snap.short_delta > 0   # higher threshold → harder to SHORT
+
+
+def test_risk_off_tightens_long_loosens_short():
+    snap = _snap(MarketRegime.RISK_OFF)
+    assert snap.long_delta > 0    # higher threshold → harder to go LONG
+    assert snap.short_delta < 0   # lower threshold → easier to SHORT
+
+
+def test_neutral_no_delta():
+    snap = _snap(MarketRegime.NEUTRAL)
+    assert snap.long_delta == 0.0
+    assert snap.short_delta == 0.0

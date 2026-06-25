@@ -107,7 +107,9 @@ export interface AlpacaOrder {
 }
 
 export function getOrders(creds: AlpacaCreds, status = 'closed', limit = 50): Promise<AlpacaOrder[]> {
-  return alpacaGet(brokerBase(creds), `/v2/orders?status=${status}&limit=${limit}&direction=desc`, creds)
+  const safeStatus = (['open', 'closed', 'all'] as const).includes(status as any) ? status : 'closed'
+  const safeLimit  = Math.min(Math.max(1, Math.floor(Number(limit))), 500)
+  return alpacaGet(brokerBase(creds), `/v2/orders?status=${safeStatus}&limit=${safeLimit}&direction=desc`, creds)
 }
 
 // Latest quote

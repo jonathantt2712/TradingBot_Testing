@@ -31,9 +31,9 @@ function fmtCurrency(n: number) {
 }
 
 export async function POST(req: Request) {
-  // Verify bot secret
+  // Verify bot secret — fail closed: no secret configured means reject all callers.
   const secret = req.headers.get('x-bot-secret') ?? ''
-  if (BOT_SECRET && secret !== BOT_SECRET) {
+  if (!BOT_SECRET || secret !== BOT_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!BOT_TOKEN) return NextResponse.json({ ok: true })

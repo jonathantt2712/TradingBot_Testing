@@ -4,6 +4,7 @@
  */
 import { NextResponse } from 'next/server'
 import { prisma }       from '@/lib/prisma'
+import { auth }         from '@/auth'
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const TG_API    = `https://api.telegram.org/bot${BOT_TOKEN}`
@@ -46,26 +47,39 @@ const INTRO = [
   '🔗 <b>To connect your account:</b> go to your <b>Profile page</b> on the dashboard and click <b>Connect Telegram</b>.',
 ].join('\n')
 
-/** Register the webhook with Telegram — call once after deploy */
+/** Register the webhook with Telegram — call once after deploy (admin only) */
 export async function GET() {
+  const session = await auth()
+  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   if (!BOT_TOKEN) return NextResponse.json({ error: 'TELEGRAM_BOT_TOKEN not set' }, { status: 503 })
   const url = process.env.NEXTJS_URL
   if (!url)  return NextResponse.json({ error: 'NEXTJS_URL not set' }, { status: 503 })
 
+  const webhookBody: Record<string, string> = { url: `${url}/api/telegram/webhook` }
+  if (WEBHOOK_SECRET) webhookBody.secret_token = WEBHOOK_SECRET
   const res  = await fetch(`${TG_API}/setWebhook`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ url: `${url}/api/telegram/webhook` }),
+    body:    JSON.stringify(webhookBody),
   })
   const data = await res.json()
   return NextResponse.json(data)
 }
+
+const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET ?? ''
 
 /** Handle incoming Telegram update */
 export async function POST(req: Request) {
   // Always return 200 so Telegram doesn't keep retrying
   try {
     if (!BOT_TOKEN) return NextResponse.json({ ok: true })
+
+    // Verify Telegram's webhook secret if one is configured.
+    // Set TELEGRAM_WEBHOOK_SECRET when registering the webhook via setWebhook.
+    if (WEBHOOK_SECRET) {
+      const header = (req as any).headers?.get?.('x-telegram-bot-api-secret-token') ?? ''
+      if (header !== WEBHOOK_SECRET) return NextResponse.json({ ok: true })
+    }
 
     let update: any
     try { update = await req.json() } catch { return NextResponse.json({ ok: true }) }

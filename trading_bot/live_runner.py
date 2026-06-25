@@ -111,6 +111,7 @@ async def evaluate_ticker(
     execute: bool,
 ) -> None:
     async with _EVAL_SEMAPHORE:
+        chart = None
         try:
             # Fetch 5-min and 1-hour bars concurrently; hourly enables MTF gate
             raw = await asyncio.gather(
@@ -139,6 +140,12 @@ async def evaluate_ticker(
             )
         except Exception:
             logger.exception("evaluation failed for %s", ticker)
+        finally:
+            if chart:
+                try:
+                    os.unlink(chart)
+                except OSError:
+                    pass
 
 
 async def breakout_monitor_loop(
