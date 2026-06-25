@@ -13,11 +13,14 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+import os
+
 import optimize_strategy as _opt_mod
 from optimize_strategy import (
     _atr_combos,
     _fmt_params,
     _params_label,
+    _print_recommendation,
     _slim,
     _split_caches,
     _threshold_combos,
@@ -328,3 +331,78 @@ class TestWriteDashboardFiles:
         _write_dashboard_files(self._best(), days=45, objective="total_pnl", validated=False)
         data = json.loads((self.tmp / "backtest_optimal.json").read_text())
         assert data["optimal_window_days"] == 45
+
+
+# ── _print_recommendation overfit detection ────────────────────────────────────
+
+def _rec(is_pnl: float, oos_pnl: float) -> list[dict]:
+    """Minimal validated result list for _print_recommendation."""
+    slim = {k: 0 for k in _SLIM_KEYS}
+    return [{
+        "params": {"LONG_THRESHOLD": 60.0, "SHORT_THRESHOLD": 40.0},
+        "in_sample": {**slim, "total_pnl": is_pnl, "win_rate": 55.0},
+        "oos":       {**slim, "total_pnl": oos_pnl, "win_rate": 50.0},
+        "rank_value": oos_pnl,
+        "trades_ok": True,
+    }]
+
+
+class TestPrintRecommendation:
+    def test_empty_results_no_output(self, capsys):
+        _print_recommendation([], "total_pnl")
+        assert capsys.readouterr().out == ""
+
+    def test_oos_non_positive_warns(self, capsys):
+        _print_recommendation(_rec(is_pnl=1000.0, oos_pnl=-50.0), "total_pnl")
+        out = capsys.readouterr().out
+        assert "do NOT deploy" in out.lower() or "non-positive" in out.lower()
+
+    def test_oos_far_below_is_warns_overfit(self, capsys):
+        """OOS profit < 40% of in-sample triggers the 'likely overfit' warning."""
+        _print_recommendation(_rec(is_pnl=1000.0, oos_pnl=300.0), "total_pnl")
+        out = capsys.readouterr().out
+        assert "overfit" in out.lower() or "caution" in out.lower()
+
+    def test_oos_holds_up_shows_success(self, capsys):
+        """OOS profit >= 40% of in-sample shows the positive checkmark."""
+        _print_recommendation(_rec(is_pnl=1000.0, oos_pnl=600.0), "total_pnl")
+        out = capsys.readouterr().out
+        assert "generalise" in out.lower() or "✅" in out
+
+    def test_non_validated_warns_no_oos(self, capsys):
+        """A result without 'oos' key triggers the full-window overfit warning."""
+        slim = {k: 0 for k in _SLIM_KEYS}
+        result = [{
+            "params": {"LONG_THRESHOLD": 60.0},
+            "total_pnl": 500.0, "win_rate": 55.0, "ev_per_trade": 50.0,
+            "profit_factor": 1.5, "total_trades": 30,
+            "rank_value": 500.0, "trades_ok": True,
+        }]
+        _print_recommendation(result, "total_pnl")
+        out = capsys.readouterr().out
+        assert "no walk-forward" in out.lower() or "no-validate" in out.lower() or "overfitting" in out.lower()
+
+    def test_params_printed_in_output(self, capsys):
+        """The recommendation must echo the parameter values."""
+        _print_recommendation(_rec(is_pnl=1000.0, oos_pnl=600.0), "total_pnl")
+        out = capsys.readouterr().out
+        assert "60.0" in out
+        assert "40.0" in out
+
+
+# ── _make_settings env var cleanup ────────────────────────────────────────────
+
+class TestMakeSettings:
+    def test_env_vars_cleaned_up_after_call(self):
+        """_make_settings must not leave env var overrides in os.environ."""
+        from optimize_strategy import _make_settings
+        key = "LONG_THRESHOLD"
+        assert key not in os.environ   # precondition: not set
+        _make_settings({key: 62.0})
+        assert key not in os.environ   # must be cleaned up
+
+    def test_overrides_applied_during_call(self):
+        """The returned settings must reflect the overrides that were passed."""
+        from optimize_strategy import _make_settings
+        s = _make_settings({"LONG_THRESHOLD": 63.0})
+        assert s.thresholds.long_above == pytest.approx(63.0)
