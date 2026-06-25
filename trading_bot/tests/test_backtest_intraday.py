@@ -6,6 +6,7 @@ calls or broker connections.
 """
 from __future__ import annotations
 
+import json
 import math
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -14,12 +15,14 @@ import pandas as pd
 import pytest
 
 from core.enums import Decision
+import backtest_intraday as _bt_mod
 from backtest_intraday import (
     LOOKBACK_BARS,
     TradeResult,
     _prior_vix,
     _session_vwap_chg,
     _spy_regime_at,
+    _update_weights_from_backtest,
     calc_summary,
     choose_window_days,
     data_span_days,
@@ -579,3 +582,92 @@ class TestRegimeAt:
         """regime_at always returns a plain string (not a Enum member)."""
         result = regime_at(self._ts(), None, None, {})
         assert isinstance(result, str)
+
+
+# ── _update_weights_from_backtest ──────────────────────────────────────────────
+
+def _bt_trade(pnl: float, direction: str = "LONG") -> TradeResult:
+    """Minimal TradeResult for testing _update_weights_from_backtest."""
+    won = pnl > 0
+    return TradeResult(
+        ticker="AAPL", direction=direction,
+        entry_time="2026-06-16 09:35:00+00:00",
+        exit_time="2026-06-16 14:00:00+00:00",
+        entry_price=100.0, exit_price=101.0 if won else 99.0,
+        qty=10.0, stop_loss=98.0, take_profit=104.0,
+        risk_reward=2.0, outcome="TP_HIT" if won else "SL_HIT",
+        pnl_usd=pnl, pnl_pct=abs(pnl) / 100.0,
+        score=70.0, regime="neutral",
+    )
+
+
+class TestUpdateWeightsFromBacktest:
+    @pytest.fixture(autouse=True)
+    def _patch_weights(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_bt_mod, "_WEIGHTS_FILE", tmp_path / "strategy_weights.json")
+        self.weights_file = tmp_path / "strategy_weights.json"
+
+    def _read_weights(self) -> dict:
+        return json.loads(self.weights_file.read_text())
+
+    def test_too_few_trades_writes_no_file(self):
+        trades = [_bt_trade(100.0) for _ in range(5)]  # < 10 combined
+        _update_weights_from_backtest(trades)
+        assert not self.weights_file.exists()
+
+    def test_enough_trades_writes_file(self):
+        trades = [_bt_trade(100.0) for _ in range(10)]
+        _update_weights_from_backtest(trades)
+        assert self.weights_file.exists()
+
+    def test_win_rate_computed_correctly(self):
+        wins   = [_bt_trade(100.0) for _ in range(7)]
+        losses = [_bt_trade(-50.0) for _ in range(3)]
+        _update_weights_from_backtest(wins + losses)
+        w = self._read_weights()
+        assert w["win_rate_30d"] == pytest.approx(70.0)
+
+    def test_all_wins_high_win_rate(self):
+        trades = [_bt_trade(100.0) for _ in range(10)]
+        _update_weights_from_backtest(trades)
+        w = self._read_weights()
+        assert w["win_rate_30d"] == pytest.approx(100.0)
+
+    def test_bias_long_when_long_dominant(self):
+        long_wins  = [_bt_trade(100.0, "LONG")  for _ in range(8)]
+        short_loss = [_bt_trade(-50.0, "SHORT") for _ in range(2)]
+        _update_weights_from_backtest(long_wins + short_loss)
+        w = self._read_weights()
+        assert w["bias"] == "long"
+
+    def test_bias_short_when_short_dominant(self):
+        short_wins = [_bt_trade(100.0, "SHORT") for _ in range(8)]
+        long_loss  = [_bt_trade(-50.0, "LONG")  for _ in range(2)]
+        _update_weights_from_backtest(short_wins + long_loss)
+        w = self._read_weights()
+        assert w["bias"] == "short"
+
+    def test_bias_neutral_when_balanced(self):
+        trades = [_bt_trade(100.0, "LONG") for _ in range(5)]
+        trades += [_bt_trade(100.0, "SHORT") for _ in range(5)]
+        _update_weights_from_backtest(trades)
+        w = self._read_weights()
+        assert w["bias"] == "neutral"
+
+    def test_high_win_rate_loosens_atr_target(self):
+        """When win_rate > 58% AND PF > 1.4, atr_target_multiple should increase."""
+        # All wins → win_rate = 100%, PF = 2.0 (default for no losses)
+        trades = [_bt_trade(100.0) for _ in range(10)]
+        self.weights_file.write_text(json.dumps({"atr_target_multiple": 4.0, "atr_stop_multiple": 2.0}))
+        _update_weights_from_backtest(trades)
+        w = self._read_weights()
+        assert w["atr_target_multiple"] > 4.0
+
+    def test_low_win_rate_tightens_atr(self):
+        """When win_rate < 40%, atr_stop_multiple and atr_target_multiple should tighten."""
+        trades = [_bt_trade(-50.0) for _ in range(10)]  # all losses
+        self.weights_file.write_text(json.dumps({"atr_target_multiple": 4.0, "atr_stop_multiple": 2.0}))
+        _update_weights_from_backtest(trades)
+        w = self._read_weights()
+        assert w["atr_stop_multiple"] < 2.0
+        assert w["atr_target_multiple"] < 4.0
