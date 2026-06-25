@@ -17,11 +17,13 @@ from core.enums import Decision
 from backtest_intraday import (
     LOOKBACK_BARS,
     TradeResult,
+    _prior_vix,
     _session_vwap_chg,
     _spy_regime_at,
     calc_summary,
     choose_window_days,
     data_span_days,
+    regime_at,
     simulate_day_trade,
     trim_bars,
 )
@@ -504,3 +506,76 @@ class TestSessionVwapChg:
         # VWAP up to bar 4 should be ~100, not skewed by the 200-bars
         assert vs_vwap is not None
         assert abs(vs_vwap) < 1.0   # near zero, since bars 0-4 are all 100
+
+
+# ── _prior_vix ─────────────────────────────────────────────────────────────────
+
+class TestPriorVix:
+    def test_empty_dict_returns_none(self):
+        assert _prior_vix({}, date(2026, 6, 16)) is None
+
+    def test_same_day_excluded(self):
+        """Same-day VIX must NOT be returned (no look-ahead)."""
+        d = date(2026, 6, 16)
+        assert _prior_vix({d: 18.0}, d) is None
+
+    def test_future_dates_only_returns_none(self):
+        future = {date(2026, 6, 17): 20.0, date(2026, 6, 18): 22.0}
+        assert _prior_vix(future, date(2026, 6, 16)) is None
+
+    def test_returns_most_recent_prior(self):
+        d = date(2026, 6, 16)
+        vix = {date(2026, 6, 13): 17.0, date(2026, 6, 14): 19.5, date(2026, 6, 15): 21.0}
+        assert _prior_vix(vix, d) == pytest.approx(21.0)
+
+    def test_single_prior_date(self):
+        assert _prior_vix({date(2026, 6, 15): 23.5}, date(2026, 6, 16)) == pytest.approx(23.5)
+
+    def test_mixed_past_future_returns_latest_past(self):
+        d = date(2026, 6, 16)
+        vix = {
+            date(2026, 6, 14): 16.0,
+            date(2026, 6, 15): 18.5,   # most recent prior
+            date(2026, 6, 17): 25.0,   # future — excluded
+        }
+        assert _prior_vix(vix, d) == pytest.approx(18.5)
+
+
+# ── regime_at ─────────────────────────────────────────────────────────────────
+
+class TestRegimeAt:
+    def _ts(self, hour: int = 10, minute: int = 30, d: date = date(2026, 6, 16)):
+        """A UTC Timestamp for the given ET time."""
+        return pd.Timestamp(
+            datetime(d.year, d.month, d.day, hour, minute, tzinfo=_ET).astimezone(timezone.utc)
+        )
+
+    def test_all_none_returns_valid_regime(self):
+        """When all inputs are missing, regime_at returns a valid regime string."""
+        result = regime_at(self._ts(), None, None, {})
+        assert result in ("risk_on", "neutral", "risk_off")
+
+    def test_high_vix_returns_risk_off(self):
+        """VIX > 25 must push regime to risk_off."""
+        d = date(2026, 6, 16)
+        ts = self._ts(d=d)
+        vix = {date(2026, 6, 15): 30.0}   # VIX = 30 prior day
+        result = regime_at(ts, None, None, vix)
+        assert result == "risk_off"
+
+    def test_low_vix_with_rising_spy_returns_risk_on(self):
+        """VIX < 18 AND SPY above VWAP and up >= 0.1% → risk_on."""
+        d = date(2026, 6, 16)
+        ts = self._ts(hour=10, minute=30, d=d)
+        # Rising SPY bars for the same day (opens at 100, rises to 110)
+        spy = _make_bars(list(range(100, 115)), _rth_start(d))
+        qqq = _make_bars(list(range(200, 215)), _rth_start(d))
+        vix = {date(2026, 6, 15): 14.0}   # VIX = 14 (well below 18)
+        entry_ts = pd.Timestamp(spy.index[10])
+        result = regime_at(entry_ts, spy, qqq, vix)
+        assert result == "risk_on"
+
+    def test_regime_returns_string(self):
+        """regime_at always returns a plain string (not a Enum member)."""
+        result = regime_at(self._ts(), None, None, {})
+        assert isinstance(result, str)
