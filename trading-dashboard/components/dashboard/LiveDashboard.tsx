@@ -2,12 +2,11 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react'
 import dynamic from 'next/dynamic'
-import { StatsCards }      from './StatsCards'
-import { RegimeIndicator } from './RegimeIndicator'
-import { SectorHeatmap }   from './SectorHeatmap'
+import { StatsCards }    from './StatsCards'
+import { SectorHeatmap } from './SectorHeatmap'
 import { PositionsTable }  from './PositionsTable'
 import { cn } from '@/lib/utils'
-import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/trading'
+import type { PortfolioStats, PnLPoint, SectorStat } from '@/types/trading'
 import type { AlpacaPosition } from '@/lib/alpaca'
 
 // Charts pull in recharts (~115 kB). Defer it so the dashboard shell (stats,
@@ -35,7 +34,6 @@ interface ScanStats {
 interface Props {
   initialStats:     PortfolioStats
   initialPnl:       PnLPoint[]
-  initialRegime:    RegimeInfo
   initialSectors:   SectorStat[]
   initialPositions: AlpacaPosition[]
   initialScanStats: ScanStats | null
@@ -51,14 +49,12 @@ function relativeTime(iso: string): string {
 export function LiveDashboard({
   initialStats,
   initialPnl,
-  initialRegime,
   initialSectors,
   initialPositions,
   initialScanStats,
 }: Props) {
   const [stats,          setStats]          = useState(initialStats)
   const [pnl,            setPnl]            = useState(initialPnl)
-  const [regime,         setRegime]         = useState(initialRegime)
   const [sectors,        setSectors]        = useState(initialSectors)
   const [positions,      setPositions]      = useState(initialPositions)
   const [scanStats,      setScanStats]      = useState<ScanStats | null>(initialScanStats)
@@ -107,16 +103,13 @@ export function LiveDashboard({
     }
   }, [applyPositions])
 
-  // Slow: PnL chart, regime (from Alpaca directly), scan-stats (5 min)
+  // Slow: PnL chart + scan-stats (5 min). Regime is polled by RegimeIndicator itself.
   const refreshSlow = useCallback(async () => {
-    const [p, r, ss] = await Promise.allSettled([
+    const [p, ss] = await Promise.allSettled([
       fetch('/api/bot/pnl').then(res => res.ok ? res.json() : null),
-      // Regime fetched directly from Alpaca — always fresh, no bot dependency
-      fetch('/api/alpaca/regime').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/scan-stats').then(res => res.ok ? res.json() : null),
     ])
-    if (p.status  === 'fulfilled' && Array.isArray(p.value))  setPnl(p.value)
-    if (r.status  === 'fulfilled' && r.value?.regime)          setRegime(r.value)
+    if (p.status  === 'fulfilled' && Array.isArray(p.value)) setPnl(p.value)
     if (ss.status === 'fulfilled' && ss.value) {
       setScanStats(ss.value)
       setCircuitBreaker(ss.value.circuit_breaker ?? null)
@@ -173,30 +166,25 @@ export function LiveDashboard({
         </div>
       )}
 
-      {/* Top section: [scan strip + stat cards] left | [market regime] right */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_240px] lg:items-start">
-        <div className="space-y-3">
-          {/* Scan stats strip */}
-          {scanStats && (
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-bg-border bg-bg-card px-4 py-2 text-xs text-muted">
-              <span className="flex items-center gap-1.5 font-medium">
-                <span className={cn('h-2 w-2 rounded-full', scanStats.market_open ? 'bg-bull' : 'bg-bear')} />
-                {scanStats.market_open ? 'Market Open' : 'Market Closed'}
-              </span>
-              {scanStats.last_scan_at && (
-                <span>Last scan: <span className="text-subtle">{relativeTime(scanStats.last_scan_at)}</span></span>
-              )}
-              <span>Scans today: <span className="text-subtle">{scanStats.scans_today ?? '—'}</span></span>
-              <span>Tickers scanned: <span className="text-subtle">{scanStats.tickers_scanned ?? '—'}</span></span>
-              {(scanStats.scan_errors ?? 0) > 0 && (
-                <span className="text-bear font-semibold">Errors: {scanStats.scan_errors}</span>
-              )}
-            </div>
+      {/* Scan stats strip */}
+      {scanStats && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-bg-border bg-bg-card px-4 py-2 text-xs text-muted">
+          <span className="flex items-center gap-1.5 font-medium">
+            <span className={cn('h-2 w-2 rounded-full', scanStats.market_open ? 'bg-bull' : 'bg-bear')} />
+            {scanStats.market_open ? 'Market Open' : 'Market Closed'}
+          </span>
+          {scanStats.last_scan_at && (
+            <span>Last scan: <span className="text-subtle">{relativeTime(scanStats.last_scan_at)}</span></span>
           )}
-          <StatsCards stats={stats} />
+          <span>Scans today: <span className="text-subtle">{scanStats.scans_today ?? '—'}</span></span>
+          <span>Tickers scanned: <span className="text-subtle">{scanStats.tickers_scanned ?? '—'}</span></span>
+          {(scanStats.scan_errors ?? 0) > 0 && (
+            <span className="text-bear font-semibold">Errors: {scanStats.scan_errors}</span>
+          )}
         </div>
-        <RegimeIndicator regime={regime} />
-      </div>
+      )}
+
+      <StatsCards stats={stats} />
 
       {/* Middle: equity curve (left) | sector heat (right) */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_280px]">

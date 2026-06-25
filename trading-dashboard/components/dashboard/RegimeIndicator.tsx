@@ -15,9 +15,22 @@ interface ScanStats {
   last_scan_at?:    string | null
 }
 
-export function RegimeIndicator({ regime }: Props) {
+export function RegimeIndicator({ regime: initialRegime }: Props) {
+  const [regime,    setRegime]    = useState(initialRegime)
   const [showInfo, setShowInfo]   = useState(false)
   const [scanStats, setScanStats] = useState<ScanStats | null>(null)
+
+  // Self-poll every 3 minutes so the card updates without a page refresh
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/bot/regime', { cache: 'no-store' })
+        if (r.ok) { const d = await r.json(); if (d?.regime) setRegime(d) }
+      } catch {}
+    }
+    const id = setInterval(poll, 3 * 60_000)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
     if (!showInfo) return

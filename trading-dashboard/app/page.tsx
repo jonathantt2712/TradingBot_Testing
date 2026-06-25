@@ -1,9 +1,10 @@
 export const dynamic = 'force-dynamic'
 
-import { AccountBar }     from '@/components/dashboard/AccountBar'
+import { AccountBar }      from '@/components/dashboard/AccountBar'
 import { HealthBanner, type HealthIssue } from '@/components/dashboard/HealthBanner'
-import { LiveDashboard }  from '@/components/dashboard/LiveDashboard'
-import { RefreshButton }  from '@/components/layout/RefreshButton'
+import { LiveDashboard }   from '@/components/dashboard/LiveDashboard'
+import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
+import { RefreshButton }   from '@/components/layout/RefreshButton'
 import {
   demoStats, demoPnL, demoRegime, demoSectors,
 } from '@/lib/api'
@@ -117,16 +118,20 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      <AccountBar account={account} error={accountError} tradingMode={tradingMode} />
-
-      <LiveDashboard
-        initialStats={stats}
-        initialPnl={pnl}
-        initialRegime={regime}
-        initialSectors={sectors}
-        initialPositions={positions}
-        initialScanStats={scanStats as any}
-      />
+      {/* Two-column layout: left = AccountBar + dashboard content, right = Market Regime */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_240px] lg:items-start">
+        <div className="space-y-4">
+          <AccountBar account={account} error={accountError} tradingMode={tradingMode} />
+          <LiveDashboard
+            initialStats={stats}
+            initialPnl={pnl}
+            initialSectors={sectors}
+            initialPositions={positions}
+            initialScanStats={scanStats as any}
+          />
+        </div>
+        <RegimeIndicator regime={regime} />
+      </div>
     </div>
   )
 }
