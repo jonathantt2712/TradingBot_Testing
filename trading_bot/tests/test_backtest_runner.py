@@ -96,6 +96,22 @@ class TestSimulateFillLong:
         )
         assert outcome == "TP_HIT"
 
+    def test_timeout_exits_at_max_bars_close_not_beyond(self):
+        """When max_bars < len(bars) the exit must use bar[max_bars-1].close,
+        not any later bar — the bars beyond max_bars are never examined."""
+        entry, sl, tp = 100.0, 50.0, 200.0
+        # 5 safe bars then 1 that would hit TP if examined
+        bars = _bars(
+            [(100, 101, 99, 100)] * 3 + [(100, 250, 99, 250)],
+            _rth_ts(),
+        )
+        outcome, exit_px, _, _, _ = simulate_fill(
+            bars, direction=Decision.LONG, entry=entry, stop_loss=sl, take_profit=tp,
+            qty=1, max_bars=3,
+        )
+        assert outcome == "TIMEOUT"
+        assert exit_px == pytest.approx(100.0)   # close of bar[2], not 250
+
 
 # ── SHORT fills ────────────────────────────────────────────────────────────────
 
