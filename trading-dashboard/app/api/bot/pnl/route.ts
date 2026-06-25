@@ -1,34 +1,38 @@
-import { NextResponse }       from 'next/server'
-import { getAlpacaCreds }    from '@/lib/session'
+import { NextResponse }        from 'next/server'
+import { getAlpacaCreds }      from '@/lib/session'
 import { getPortfolioHistory } from '@/lib/alpaca'
-import { botGet }            from '@/lib/bot-api'
-import { demoPnL }           from '@/lib/api'
-import type { PnLPoint }     from '@/types/trading'
+import { botGet }              from '@/lib/bot-api'
+import { demoPnL }             from '@/lib/api'
+import type { PnLPoint }       from '@/types/trading'
 
 export async function GET() {
   // Try Alpaca portfolio history first — gives real equity curve data
   try {
     const creds = await getAlpacaCreds()
     if (creds) {
-      const hist = await getPortfolioHistory(creds)
-      if (hist.timestamp?.length) {
-        const base    = hist.base_value || (hist.equity ?? []).find((e: number) => e > 0) || 0
-        const profits = hist.profit_loss ?? []
-        const equities = hist.equity ?? []
+      const hist     = await getPortfolioHistory(creds)
+      const ts       = hist.timestamp   ?? []
+      const equities = hist.equity      ?? []
+      const profits  = hist.profit_loss ?? []
 
-        const points: PnLPoint[] = hist.timestamp
-          .map((ts: number, i: number) => ({
-            date:           new Date(ts * 1000).toISOString().slice(0, 10),
-            // cumulative P&L = equity relative to the base (start of period)
-            cumulative_pnl: +((equities[i] ?? 0) - base).toFixed(2),
-            // daily P&L = what Alpaca reports for that day
-            daily_pnl:      +(profits[i] ?? 0).toFixed(2),
+      if (ts.length > 0) {
+        const base = hist.base_value || equities.find((e: number) => e > 0) || 0
+
+        const points: PnLPoint[] = ts.map((t: number, i: number) => {
+          const eq  = equities[i] ?? 0
+          const pl  = profits[i]  ?? 0
+          return {
+            date:           new Date(t * 1000).toISOString().slice(0, 10),
+            cumulative_pnl: base > 0 ? +(eq - base).toFixed(2) : +pl.toFixed(2),
+            daily_pnl:      +pl.toFixed(2),
             trade_count:    0,
-            equity:         +(equities[i] ?? 0).toFixed(2),
-          }))
-          .filter((p: PnLPoint) => (p.equity ?? 0) > 0)
+            equity:         +eq.toFixed(2),
+          }
+        // Only filter out zero-equity if we actually have equity data —
+        // avoids emptying the array when Alpaca doesn't return equity values.
+        }).filter((p: PnLPoint) => equities.some((e: number) => e > 0) ? (p.equity ?? 0) > 0 : true)
 
-        return NextResponse.json(points)
+        if (points.length > 0) return NextResponse.json(points)
       }
     }
   } catch (e) {
