@@ -139,3 +139,23 @@ class TestBuildLearningDashboard:
     def test_win_rate_color_red_below_50(self):
         html = build_learning_dashboard([_snap(win_rate=40.0)])
         assert 'class="stat-value red"' in html
+
+    def test_sparse_snapshot_no_crash(self):
+        """A snapshot missing most keys must not raise KeyError."""
+        sparse = {"ts": "2026-06-01T10:00:00"}
+        html = build_learning_dashboard([sparse])
+        assert isinstance(html, str)
+        assert "No learning history yet" not in html
+
+    def test_missing_ts_key_no_crash(self):
+        """A snapshot with no 'ts' key must not raise KeyError."""
+        snap = {"win_rate": 55.0, "bias": "neutral"}
+        html = build_learning_dashboard([snap])
+        assert isinstance(html, str)
+
+    def test_none_win_rate_shows_na(self):
+        """win_rate=None should render as 'n/a', not crash."""
+        snap = _snap()
+        snap["win_rate"] = None
+        html = build_learning_dashboard([snap])
+        assert "n/a" in html

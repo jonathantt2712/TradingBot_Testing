@@ -54,7 +54,7 @@ def build_learning_dashboard(history: list[dict]) -> str:
     if not agents:
         agents = list(_AGENT_COLORS)
 
-    labels = [s["ts"][:19].replace("T", " ") for s in history]
+    labels = [s.get("ts", "")[:19].replace("T", " ") for s in history]
     weight_series = {
         a: [round(s.get("weights", {}).get(a, 0.0) * 100, 2) for s in history]
         for a in agents
