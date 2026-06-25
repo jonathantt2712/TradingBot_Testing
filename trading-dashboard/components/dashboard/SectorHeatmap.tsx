@@ -34,7 +34,7 @@ export function SectorHeatmap({ sectors: initialSectors }: Props) {
   const sorted = [...sectors].sort((a, b) => b.score - a.score)
 
   return (
-    <div className="card p-4">
+    <div className="card p-4 h-full">
       <p className="stat-label mb-3">Sector Heat</p>
       {sorted.length === 0 ? (
         <p className="text-xs text-muted">Waiting for next scan...</p>

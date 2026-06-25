@@ -119,8 +119,8 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      {/* Two-column layout: left = AccountBar + dashboard content, right = Market Regime */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_240px] lg:items-start">
+      {/* Two-column layout — right column stretches to match left height */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_240px]">
         <div className="space-y-4">
           <AccountBar account={account} error={accountError} tradingMode={tradingMode} />
           <LiveDashboard
@@ -131,9 +131,12 @@ export default async function DashboardPage() {
             initialScanStats={scanStats as any}
           />
         </div>
-        <div className="space-y-4">
+        {/* Right column: Regime at top, Sector Heat fills remaining height */}
+        <div className="hidden lg:flex flex-col gap-4">
           <RegimeIndicator regime={regime} />
-          <SectorHeatmap sectors={sectors} />
+          <div className="flex-1 min-h-0">
+            <SectorHeatmap sectors={sectors} />
+          </div>
         </div>
       </div>
     </div>
