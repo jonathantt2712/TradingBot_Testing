@@ -103,16 +103,14 @@ export function LiveDashboard({
     }
   }, [applyPositions])
 
-  // Slow: PnL chart + scan-stats (5 min). Regime is polled by RegimeIndicator itself.
+  // Slow: scan-stats only (5 min).
+  // PnL is historical daily data — SSR loads it fresh on each page load,
+  // no need to poll and risk overwriting with empty/wrong data mid-session.
   const refreshSlow = useCallback(async () => {
-    const [p, ss] = await Promise.allSettled([
-      fetch('/api/bot/pnl').then(res => res.ok ? res.json() : null),
-      fetch('/api/bot/scan-stats').then(res => res.ok ? res.json() : null),
-    ])
-    if (p.status  === 'fulfilled' && Array.isArray(p.value)) setPnl(p.value)
-    if (ss.status === 'fulfilled' && ss.value) {
-      setScanStats(ss.value)
-      setCircuitBreaker(ss.value.circuit_breaker ?? null)
+    const ss = await fetch('/api/bot/scan-stats').then(r => r.ok ? r.json() : null).catch(() => null)
+    if (ss) {
+      setScanStats(ss)
+      setCircuitBreaker(ss.circuit_breaker ?? null)
     }
   }, [])
 
