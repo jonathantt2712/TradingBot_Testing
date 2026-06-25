@@ -418,7 +418,10 @@ def _print_recommendation(results: list[dict], objective: str) -> None:
             "LONG_THRESHOLD": 60.0, "SHORT_THRESHOLD": 40.0,
             "ATR_STOP_MULTIPLE": 2.0, "ATR_TARGET_MULTIPLE": 4.0,
         }.get(k, "?")
-        arrow = "↑" if float(v) > float(cur) else "↓" if float(v) < float(cur) else "="
+        try:
+            arrow = "↑" if float(v) > float(cur) else "↓" if float(v) < float(cur) else "="
+        except (ValueError, TypeError):
+            arrow = "?"
         print(f"    {k:<26} {cur} → {v}  {arrow}")
 
     if validated:

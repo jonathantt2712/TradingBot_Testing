@@ -420,6 +420,19 @@ class TestPrintRecommendation:
         assert "60.0" in out
         assert "40.0" in out
 
+    def test_unknown_param_key_does_not_crash(self, capsys):
+        """An unknown parameter key ('?' default) must not raise ValueError."""
+        slim = {k: 0 for k in _SLIM_KEYS}
+        result = [{
+            "params": {"LONG_THRESHOLD": 60.0, "UNKNOWN_PARAM": 5.0},
+            "in_sample": {**slim, "total_pnl": 800.0, "win_rate": 55.0},
+            "oos":       {**slim, "total_pnl": 400.0, "win_rate": 50.0},
+            "rank_value": 400.0, "trades_ok": True,
+        }]
+        _print_recommendation(result, "total_pnl")   # must not raise
+        out = capsys.readouterr().out
+        assert "UNKNOWN_PARAM" in out
+
 
 # ── _make_settings env var cleanup ────────────────────────────────────────────
 
