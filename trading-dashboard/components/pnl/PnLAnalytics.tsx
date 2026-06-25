@@ -66,14 +66,14 @@ export function PnLAnalytics({ pnl, stats, trades, live, attribution, monteCarlo
     .map(([date, v]) => ({ date, ...v }))
 
   const summaryCards = [
-    { label: 'Total Return',  value: formatCurrency(stats.total_pnl),    sub: 'All time',          color: stats.total_pnl  >= 0 ? 'text-bull' : 'text-bear' },
-    { label: 'Today',         value: formatCurrency(stats.today_pnl),    sub: 'Current session',   color: stats.today_pnl  >= 0 ? 'text-bull' : 'text-bear' },
-    { label: 'Win Rate',      value: `${stats.win_rate.toFixed(1)}%`,    sub: `${wins}W / ${losses}L`, color: 'text-brand-cyan' },
-    { label: 'Max Drawdown',  value: formatPct(stats.max_drawdown),      sub: 'Peak → trough',     color: 'text-bear'       },
-    { label: 'Sharpe',        value: stats.sharpe_ratio === 0 ? '—' : stats.sharpe_ratio.toFixed(2), sub: 'Risk-adj return', color: 'text-caution',
-      tooltip: 'Sharpe ratio: annualised daily return ÷ its volatility × √252. Above 1.0 is good; above 2.0 is excellent. "—" means not enough data yet.' },
-    { label: 'Avg R/R',       value: `${stats.avg_rr.toFixed(2)}x`,      sub: 'Expected value',    color: 'text-brand-cyan' },
+    { label: 'Total Return', value: formatCurrency(stats.total_pnl),    sub: 'All time',           color: stats.total_pnl  >= 0 ? 'text-bull' : 'text-bear' },
+    { label: 'Today',        value: formatCurrency(stats.today_pnl),    sub: 'Current session',    color: stats.today_pnl  >= 0 ? 'text-bull' : 'text-bear' },
+    { label: 'Win Rate',     value: `${stats.win_rate.toFixed(1)}%`,    sub: `${wins}W / ${losses}L`, color: 'text-brand-cyan' },
+    { label: 'Max Drawdown', value: formatPct(stats.max_drawdown),      sub: 'Peak → trough',      color: 'text-bear'       },
+    { label: 'Avg R/R',      value: `${stats.avg_rr.toFixed(2)}x`,      sub: 'Expected value',     color: 'text-brand-cyan' },
   ]
+
+  const sharpeValue = stats.sharpe_ratio === 0 ? '—' : stats.sharpe_ratio.toFixed(2)
 
   return (
     <div className="px-6 py-6 space-y-6 max-w-[1400px]">
@@ -91,23 +91,28 @@ export function PnLAnalytics({ pnl, stats, trades, live, attribution, monteCarlo
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
         {summaryCards.map(c => (
-          <div key={c.label} className="card p-4 relative">
-            <p className="stat-label text-[10px] flex items-center gap-1">
-              {c.label}
-              {c.label === 'Sharpe' && (
-                <button
-                  onClick={() => setSharpeModal(true)}
-                  className="text-muted hover:text-brand-cyan transition-colors"
-                  aria-label="What is Sharpe Ratio?"
-                >
-                  <Info className="h-3 w-3" />
-                </button>
-              )}
-            </p>
+          <div key={c.label} className="card p-4">
+            <p className="stat-label text-[10px]">{c.label}</p>
             <p className={cn('mt-1 text-xl font-bold font-mono', c.color)}>{c.value}</p>
             <p className="mt-0.5 text-[10px] text-muted">{c.sub}</p>
           </div>
         ))}
+
+        {/* Sharpe — separate so the info button works independently */}
+        <div className="card p-4">
+          <div className="flex items-center gap-1">
+            <p className="stat-label text-[10px]">Sharpe</p>
+            <button
+              type="button"
+              onClick={() => setSharpeModal(true)}
+              className="flex items-center justify-center rounded p-0.5 text-muted hover:text-brand-cyan transition-colors"
+            >
+              <Info className="h-3 w-3" />
+            </button>
+          </div>
+          <p className="mt-1 text-xl font-bold font-mono text-caution">{sharpeValue}</p>
+          <p className="mt-0.5 text-[10px] text-muted">Risk-adj return</p>
+        </div>
       </div>
 
       {/* Sharpe Ratio explanation modal */}
