@@ -460,8 +460,8 @@ def build_dashboard(trades: list[TradeRecord], recommendations: list[dict], tick
 </div>
 
 <script>
-const TRADES = $trades_json;
-const RECS   = $recs_json;
+const TRADES = {trades_json};
+const RECS   = {recs_json};
 const TICKERS = {json.dumps(tickers)};
 
 // --- utils ---

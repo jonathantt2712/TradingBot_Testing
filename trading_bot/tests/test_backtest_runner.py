@@ -1,6 +1,6 @@
-"""Unit tests for backtest_runner — simulate_fill.
+"""Unit tests for backtest_runner — simulate_fill and build_dashboard.
 
-Only the pure fill simulator is tested here; network-dependent helpers
+Only pure helpers are tested here; network-dependent helpers
 (fetch_historical_bars, get_recommendations, backtest_ticker) are not.
 """
 from __future__ import annotations
@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from backtest_runner import simulate_fill
+import backtest_runner as _br_mod
+from backtest_runner import simulate_fill, build_dashboard, TradeRecord
 from core.enums import Decision
 
 _ET = ZoneInfo("America/New_York")
@@ -221,3 +222,72 @@ class TestSimulateFillEOD:
         )
         assert pnl == pytest.approx((entry - close_px) * 2)
         assert pnl_pct == pytest.approx((entry - close_px) / entry * 100)
+
+
+# ── build_dashboard ────────────────────────────────────────────────────────────
+
+def _trade(ticker: str = "NVDA", pnl: float = 100.0, outcome: str = "TP_HIT") -> TradeRecord:
+    return TradeRecord(
+        ticker=ticker, direction="LONG",
+        entry_time="2026-06-16T09:35:00", exit_time="2026-06-16T10:00:00",
+        entry_price=100.0, exit_price=103.0, qty=10,
+        stop_loss=98.0, take_profit=103.0, risk_reward=1.5,
+        outcome=outcome, pnl_usd=pnl, pnl_pct=3.0,
+        composite_score=65.0,
+        agent_scores={"technical": 70.0, "fundamental": 60.0},
+        agent_confidences={"technical": 0.80, "fundamental": 0.75},
+    )
+
+
+class TestBuildDashboard:
+    @pytest.fixture(autouse=True)
+    def _redirect_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_br_mod, "DASHBOARD_DIR", tmp_path)
+        self.tmp = tmp_path
+
+    def test_returns_path_pointing_to_index_html(self):
+        out = build_dashboard([], [], ["NVDA"])
+        assert out.name == "index.html"
+
+    def test_file_created_on_disk(self):
+        build_dashboard([], [], ["NVDA"])
+        assert (self.tmp / "index.html").exists()
+
+    def test_valid_html_doctype(self):
+        build_dashboard([], [], [])
+        html = (self.tmp / "index.html").read_text()
+        assert html.strip().startswith("<!DOCTYPE html>")
+
+    def test_empty_trades_no_crash(self):
+        result = build_dashboard([], [], ["AAPL", "MSFT"])
+        assert result is not None
+
+    def test_tickers_embedded_in_html(self):
+        build_dashboard([], [], ["NVDA", "TSLA"])
+        html = (self.tmp / "index.html").read_text()
+        assert "NVDA" in html
+        assert "TSLA" in html
+
+    def test_trade_data_embedded_as_json(self):
+        trades = [_trade("AAPL", 120.0, "TP_HIT")]
+        build_dashboard(trades, [], ["AAPL"])
+        html = (self.tmp / "index.html").read_text()
+        assert "AAPL" in html
+        assert "120.0" in html or "120" in html
+
+    def test_recommendation_data_embedded(self):
+        recs = [{"ticker": "MSFT", "direction": "LONG", "composite_score": 68.0,
+                 "is_actionable": True, "risk": None, "agent_scores": {},
+                 "agent_confidences": {}, "rationales": {}, "as_of": "2026-06-16T10:00:00Z"}]
+        build_dashboard([], recs, ["MSFT"])
+        html = (self.tmp / "index.html").read_text()
+        assert "MSFT" in html
+
+    def test_multiple_trades_no_crash(self):
+        trades = [
+            _trade("NVDA", 200.0, "TP_HIT"),
+            _trade("TSLA", -80.0, "SL_HIT"),
+            _trade("AAPL", 5.0, "TIMEOUT"),
+        ]
+        result = build_dashboard(trades, [], ["NVDA", "TSLA", "AAPL"])
+        assert result.exists()
