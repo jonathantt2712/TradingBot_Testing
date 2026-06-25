@@ -21,6 +21,7 @@ from optimize_strategy import (
     _fmt_params,
     _params_label,
     _print_recommendation,
+    _print_table,
     _slim,
     _split_caches,
     _threshold_combos,
@@ -436,3 +437,61 @@ class TestMakeSettings:
         from optimize_strategy import _make_settings
         s = _make_settings({"LONG_THRESHOLD": 63.0})
         assert s.thresholds.long_above == pytest.approx(63.0)
+
+
+# ── _print_table ──────────────────────────────────────────────────────────────
+
+def _validated_result(is_pnl: float = 800.0, oos_pnl: float = 400.0) -> dict:
+    slim = {k: 0 for k in _SLIM_KEYS}
+    return {
+        "params": {"LONG_THRESHOLD": 60.0, "SHORT_THRESHOLD": 40.0},
+        "in_sample": {**slim, "total_pnl": is_pnl, "win_rate": 55.0, "total_trades": 30},
+        "oos":       {**slim, "total_pnl": oos_pnl, "win_rate": 50.0, "total_trades": 15},
+        "rank_value": oos_pnl,
+        "trades_ok": True,
+    }
+
+
+def _unvalidated_result(pnl: float = 500.0) -> dict:
+    slim = {k: 0 for k in _SLIM_KEYS}
+    return {
+        "params": {"LONG_THRESHOLD": 60.0, "SHORT_THRESHOLD": 40.0},
+        **slim,
+        "total_pnl": pnl, "win_rate": 52.0, "total_trades": 25,
+        "rank_value": pnl,
+        "trades_ok": True,
+    }
+
+
+class TestPrintTable:
+    def test_empty_results_prints_no_threshold_message(self, capsys):
+        _print_table([], "Phase 1", "total_pnl")
+        out = capsys.readouterr().out
+        assert "no results" in out.lower() or "minimum trade threshold" in out.lower()
+
+    def test_validated_results_prints_oos_header(self, capsys):
+        _print_table([_validated_result()], "Phase 1", "total_pnl")
+        out = capsys.readouterr().out
+        assert "OOS" in out
+
+    def test_validated_results_shows_is_and_oos_pnl(self, capsys):
+        _print_table([_validated_result(is_pnl=800.0, oos_pnl=400.0)], "Phase 1", "total_pnl")
+        out = capsys.readouterr().out
+        assert "800" in out
+        assert "400" in out
+
+    def test_unvalidated_results_prints_single_pnl(self, capsys):
+        _print_table([_unvalidated_result(pnl=500.0)], "Phase 1", "total_pnl")
+        out = capsys.readouterr().out
+        assert "500" in out
+        assert "OOS" not in out
+
+    def test_title_appears_in_output(self, capsys):
+        _print_table([_validated_result()], "Phase 2 — ATR Grid", "total_pnl")
+        out = capsys.readouterr().out
+        assert "Phase 2" in out
+
+    def test_params_appear_in_table(self, capsys):
+        _print_table([_validated_result()], "Phase 1", "total_pnl")
+        out = capsys.readouterr().out
+        assert "60.0" in out or "LONG_T" in out
