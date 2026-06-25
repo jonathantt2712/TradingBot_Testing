@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EquityCurve, ParamHeatmap, type BacktestTrade } from '@/components/backtest/BacktestCharts'
+import { StrategyTuningCard } from '@/components/backtest/StrategyTuningCard'
 
 interface TickerStat {
   ticker:   string
@@ -773,6 +774,9 @@ export default function BacktestPage() {
           )}
         </div>
       )}
+
+      {/* Strategy weight tuner — always visible */}
+      <StrategyTuningCard />
     </div>
   )
 }

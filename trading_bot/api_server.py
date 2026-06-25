@@ -803,17 +803,29 @@ def _update_strategy_weights() -> None:
     # tuning on its own — only a deliberate, OOS-validated optimizer Apply flips
     # live_tuning_active (avoids stepping live sizing from the DEFAULT baseline).
     # Once Apply has activated tuning, these refinements build on the applied values.
+    # Self-tuner skips any field the user has manually locked.
+    locked: set = set(weights.get("manual_overrides") or {})
+
     if win_rate > 0.60:
-        weights["min_score"]            = max(30,  weights["min_score"] - 1)
-        weights["time_window_minutes"]   = min(60,  weights["time_window_minutes"] + 2)
-        weights["atr_target_multiple"]   = min(5.0, weights["atr_target_multiple"] * 1.03)
-        weights["chg_weight"]            = min(10.0, weights["chg_weight"] * 1.02)
+        if "min_score"          not in locked:
+            weights["min_score"]          = max(30,  weights["min_score"] - 1)
+        if "time_window_minutes" not in locked:
+            weights["time_window_minutes"] = min(60,  weights["time_window_minutes"] + 2)
+        if "atr_target_multiple" not in locked:
+            weights["atr_target_multiple"] = min(5.0, weights["atr_target_multiple"] * 1.03)
+        if "chg_weight"          not in locked:
+            weights["chg_weight"]          = min(10.0, weights["chg_weight"] * 1.02)
     elif win_rate < 0.40:
-        weights["min_score"]            = min(70,  weights["min_score"] + 2)
-        weights["time_window_minutes"]   = max(20,  weights["time_window_minutes"] - 5)
-        weights["atr_stop_multiple"]     = max(1.0, weights["atr_stop_multiple"] * 0.95)
-        weights["chg_weight"]            = max(1.5, weights["chg_weight"] * 0.95)
-        weights["intra_weight"]          = max(0.5, weights["intra_weight"] * 0.97)
+        if "min_score"          not in locked:
+            weights["min_score"]          = min(70,  weights["min_score"] + 2)
+        if "time_window_minutes" not in locked:
+            weights["time_window_minutes"] = max(20,  weights["time_window_minutes"] - 5)
+        if "atr_stop_multiple"  not in locked:
+            weights["atr_stop_multiple"]  = max(1.0, weights["atr_stop_multiple"] * 0.95)
+        if "chg_weight"          not in locked:
+            weights["chg_weight"]         = max(1.5, weights["chg_weight"] * 0.95)
+        if "intra_weight"        not in locked:
+            weights["intra_weight"]       = max(0.5, weights["intra_weight"] * 0.97)
 
     if long_win_rate > short_win_rate + 0.20:
         weights["bias"] = "long"
@@ -3177,15 +3189,59 @@ def apply_optimal_params():
 
 @app.post("/api/optimize/reset", dependencies=[Depends(_verify_bot_secret)])
 def reset_strategy_weights():
-    """Reset strategy_weights.json to factory defaults.
-
-    Clears any self-tuner drift (raised min_score, tightened ATR multiples)
-    so the bot starts fresh. The self-tuner will re-learn from the next closed
-    trades automatically.
-    """
-    _save_weights(dict(DEFAULT_WEIGHTS))
+    """Reset strategy_weights.json to factory defaults and clear manual overrides."""
+    reset = dict(DEFAULT_WEIGHTS)
+    reset["manual_overrides"] = {}
+    _save_weights(reset)
     logger.info("Strategy weights reset to defaults by operator")
-    return {"status": "reset", "weights": DEFAULT_WEIGHTS}
+    return {"status": "reset", "weights": reset}
+
+
+class PatchWeightsBody(BaseModel):
+    # float value → set + lock that field; null → unlock (self-tuner takes over)
+    min_score:           Optional[float] = None
+    atr_stop_multiple:   Optional[float] = None
+    atr_target_multiple: Optional[float] = None
+    time_window_minutes: Optional[float] = None
+    # Explicit null sentinel — FastAPI doesn't distinguish "omitted" from "null"
+    # without this; we use a separate flag dict instead.
+    unlock:              Optional[List[str]] = None
+
+
+@app.patch("/api/optimize/patch", dependencies=[Depends(_verify_bot_secret)])
+def patch_strategy_weights(body: PatchWeightsBody):
+    """Apply user-defined overrides to strategy weights.
+
+    - Non-null field → write value AND lock it (self-tuner will skip it).
+    - Field listed in `unlock` → remove its manual lock (self-tuner resumes).
+    - Omitted fields → untouched.
+    """
+    weights   = _load_weights()
+    overrides = dict(weights.get("manual_overrides") or {})
+    updated:  Dict[str, float] = {}
+    unlocked: List[str]        = []
+
+    fields = {
+        "min_score":           body.min_score,
+        "atr_stop_multiple":   body.atr_stop_multiple,
+        "atr_target_multiple": body.atr_target_multiple,
+        "time_window_minutes": body.time_window_minutes,
+    }
+    for key, val in fields.items():
+        if val is not None:
+            weights[key]   = float(val)
+            overrides[key] = True
+            updated[key]   = float(val)
+
+    for key in (body.unlock or []):
+        if key in overrides:
+            del overrides[key]
+            unlocked.append(key)
+
+    weights["manual_overrides"] = overrides
+    _save_weights(weights)
+    logger.info("Strategy weights patched by operator: updated=%s unlocked=%s", updated, unlocked)
+    return {"status": "ok", "updated": updated, "unlocked": unlocked, "manual_overrides": list(overrides.keys())}
 
 
 @app.get("/api/optimize/applied", dependencies=[Depends(_verify_bot_secret)])
@@ -3199,6 +3255,29 @@ def get_applied_params():
         "atr_target_multiple": w.get("atr_target_multiple"),
         "applied_from_optimizer_at": w.get("applied_from_optimizer_at"),
         "applied_oos_pnl":    w.get("applied_oos_pnl"),
+    }
+
+
+@app.get("/api/optimize/weights", dependencies=[Depends(_verify_bot_secret)])
+def get_strategy_weights():
+    """Return all current strategy weights including self-tuner stats and manual overrides."""
+    w = _load_weights()
+    return {
+        "min_score":           w.get("min_score",           DEFAULT_WEIGHTS["min_score"]),
+        "atr_stop_multiple":   w.get("atr_stop_multiple",   DEFAULT_WEIGHTS["atr_stop_multiple"]),
+        "atr_target_multiple": w.get("atr_target_multiple", DEFAULT_WEIGHTS["atr_target_multiple"]),
+        "time_window_minutes": w.get("time_window_minutes", DEFAULT_WEIGHTS["time_window_minutes"]),
+        "win_rate_30d":        w.get("win_rate_30d"),
+        "update_count":        w.get("update_count", 0),
+        "bias":                w.get("bias", "neutral"),
+        "last_updated":        w.get("last_updated"),
+        "manual_overrides":    w.get("manual_overrides") or {},
+        "defaults": {
+            "min_score":           DEFAULT_WEIGHTS["min_score"],
+            "atr_stop_multiple":   DEFAULT_WEIGHTS["atr_stop_multiple"],
+            "atr_target_multiple": DEFAULT_WEIGHTS["atr_target_multiple"],
+            "time_window_minutes": DEFAULT_WEIGHTS["time_window_minutes"],
+        },
     }
 
 

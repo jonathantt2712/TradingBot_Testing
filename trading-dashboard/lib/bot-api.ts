@@ -48,3 +48,15 @@ export async function botPost<T>(path: string, body: unknown): Promise<T> {
   if (!res.ok) throw new Error(`Bot API POST ${path} -> ${res.status}`)
   return res.json()
 }
+
+export async function botPatch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BOT_URL}${path}`, {
+    method:  'PATCH',
+    headers: { 'Content-Type': 'application/json', ...BOT_HEADERS },
+    body:    JSON.stringify(body),
+    signal:  abortAfter(BOT_TIMEOUT),
+    cache:   'no-store',
+  })
+  if (!res.ok) throw new Error(`Bot API PATCH ${path} -> ${res.status}`)
+  return res.json()
+}
