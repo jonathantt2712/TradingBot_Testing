@@ -26,6 +26,7 @@ from backtest_intraday import (
     calc_summary,
     choose_window_days,
     data_span_days,
+    print_summary,
     regime_at,
     simulate_day_trade,
     trim_bars,
@@ -346,6 +347,41 @@ class TestCalcSummary:
             v = s[key]
             assert not math.isnan(v),  f"{key} is NaN"
             assert not math.isinf(v),  f"{key} is inf"
+
+
+# ── print_summary ─────────────────────────────────────────────────────────────
+
+class TestPrintSummary:
+    def test_empty_trades_returns_empty_dict(self, capsys):
+        result = print_summary([])
+        assert result == {}
+        out = capsys.readouterr().out
+        assert "No trades" in out
+
+    def test_returns_dict_with_expected_keys(self):
+        trades = [_make_trade("TP_HIT", 100.0), _make_trade("SL_HIT", -50.0)]
+        result = print_summary(trades)
+        for key in ("total_trades", "wins", "losses", "total_pnl", "win_rate"):
+            assert key in result, f"Missing key: {key}"
+
+    def test_no_crash_on_valid_trades(self, capsys):
+        trades = [_make_trade("TP_HIT", 80.0)] * 3 + [_make_trade("SL_HIT", -40.0)]
+        result = print_summary(trades)
+        assert isinstance(result, dict) and result  # non-empty
+
+    def test_header_printed_on_valid_trades(self, capsys):
+        trades = [_make_trade("TP_HIT", 50.0), _make_trade("EOD_CLOSE", 10.0)]
+        print_summary(trades)
+        out = capsys.readouterr().out
+        assert "Backtest Summary" in out
+
+    def test_returns_same_stats_as_calc_summary(self):
+        trades = [_make_trade("TP_HIT", 60.0)] * 5 + [_make_trade("SL_HIT", -30.0)] * 2
+        from_print = print_summary(trades)
+        from_calc  = calc_summary(trades)
+        assert from_print["total_pnl"]    == from_calc["total_pnl"]
+        assert from_print["total_trades"] == from_calc["total_trades"]
+        assert from_print["win_rate"]     == from_calc["win_rate"]
 
 
 # ── choose_window_days ─────────────────────────────────────────────────────────
