@@ -11,6 +11,7 @@ import {
 import { getAccount, getPositions, getPortfolioHistory, type AlpacaCreds } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
 import { botGet } from '@/lib/bot-api'
+import { computeSharpe, computeMaxDD } from '@/lib/stats'
 import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/trading'
 import type { AlpacaAccount } from '@/lib/alpaca'
 
@@ -47,6 +48,26 @@ async function loadDashboard(creds: AlpacaCreds | null) {
   }
   if (positions.status === 'fulfilled') {
     resolvedStats.open_positions = positions.value.length
+  }
+
+  // Compute Sharpe + Max DD from Alpaca equity curve (overrides bot's 0 default)
+  if (history.status === 'fulfilled') {
+    const hist = history.value
+    const pnlPoints: PnLPoint[] = (hist.timestamp ?? [])
+      .map((ts: number, i: number) => ({
+        date:           new Date(ts * 1000).toISOString().slice(0, 10),
+        daily_pnl:      +(hist.profit_loss?.[i] ?? 0),
+        cumulative_pnl: 0,
+        trade_count:    0,
+        equity:         +(hist.equity?.[i] ?? 0),
+      }))
+      .filter((p: PnLPoint) => (p.equity ?? 0) > 0)
+
+    const sharpe = computeSharpe(pnlPoints)
+    if (sharpe !== null) resolvedStats.sharpe_ratio = sharpe
+
+    const maxDD = computeMaxDD(pnlPoints)
+    if (maxDD !== null) resolvedStats.max_drawdown = maxDD
   }
 
   const tradingMode = health.status === 'fulfilled'
