@@ -82,3 +82,33 @@ def test_empty_llm_response_falls_back_to_pass(tmp_path):
     assert decision is Decision.PASS
     assert composite == 50.0
     assert "error" in meta
+
+
+def test_invalid_decision_string_falls_back_to_pass(tmp_path):
+    # LLM hallucination: valid JSON with an unrecognised decision value.
+    resp = '{"decision":"BUY","composite_score":70,"rationale":"test","key_factors":[],"concerns":[]}'
+    a = _agent(tmp_path, resp)
+    decision, composite, _ = _run(a)
+    assert decision is Decision.PASS   # invalid value → safe fallback
+
+
+def test_out_of_range_composite_score_is_clamped(tmp_path):
+    # LLM returns a score far outside [1, 100]; must be clamped, not propagated.
+    resp = '{"decision":"LONG","composite_score":250,"rationale":"test","key_factors":[],"concerns":[]}'
+    a = _agent(tmp_path, resp)
+    _, composite, _ = _run(a)
+    assert composite == 100.0
+
+    resp_low = '{"decision":"SHORT","composite_score":-10,"rationale":"test","key_factors":[],"concerns":[]}'
+    a2 = _agent(tmp_path, resp_low)
+    _, composite_low, _ = _run(a2)
+    assert composite_low == 1.0
+
+
+def test_non_json_response_falls_back_to_pass(tmp_path):
+    # LLM returns prose instead of JSON — parse_llm_json + json.loads both fail.
+    a = _agent(tmp_path, "I think you should go LONG because the trend looks good.")
+    decision, composite, meta = _run(a)
+    assert decision is Decision.PASS
+    assert composite == 50.0
+    assert "error" in meta

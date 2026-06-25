@@ -88,6 +88,41 @@ def test_composite_squeeze_boost_on_confirmed_squeeze():
     assert boosted > plain
 
 
+def test_composite_all_none_returns_neutral():
+    # When every agent evaluation is None (e.g. all feeds failed), the blender
+    # must return the neutral 50.0 rather than raise ZeroDivisionError.
+    pm = make_pm()
+    assert pm._composite(None, None, None, None) == 50.0
+
+
+def test_composite_minimum_confidence_all_agents():
+    # Clamped minimum confidence (0.05) still produces a valid composite — the
+    # denominator is non-zero and the blended score reflects the raw scores.
+    pm = make_pm()
+    f = _ev(AgentRole.FUNDAMENTAL, 80, confidence=0.01)  # clamped to 0.05
+    v = _ev(AgentRole.VISION,      80, confidence=0.01)
+    t = _ev(AgentRole.TECHNICAL,   80, confidence=0.01)
+    composite = pm._composite(f, v, t, None)
+    assert 70.0 < composite < 90.0  # all at 80 → blend near 80
+
+
+def test_composite_squeeze_boost_applies_at_low_confidence():
+    # The SQUEEZE_BOOST is applied before confidence scaling, so even a low-
+    # confidence confirmed squeeze still pulls the composite higher than an
+    # equally low-confidence non-squeeze setup.
+    pm = make_pm()
+    f = _ev(AgentRole.FUNDAMENTAL, 50)
+    v = _ev(AgentRole.VISION, 50)
+    t = _ev(AgentRole.TECHNICAL, 50)
+    sq_boosted = AgentEvaluation(
+        role=AgentRole.SQUEEZE, score=90, confidence=0.05, data={"setup": "squeeze_long"}
+    )
+    sq_plain = AgentEvaluation(
+        role=AgentRole.SQUEEZE, score=90, confidence=0.05, data={"setup": "moderate"}
+    )
+    assert pm._composite(f, v, t, None, None, sq_boosted) > pm._composite(f, v, t, None, None, sq_plain)
+
+
 # ── agent disagreement dispersion ────────────────────────────────────────────
 
 def test_dispersion_zero_when_agents_agree():
@@ -109,6 +144,20 @@ def test_dispersion_excludes_risk_gate():
     evals = [_ev(AgentRole.FUNDAMENTAL, 60), _ev(AgentRole.TECHNICAL, 60),
              _ev(AgentRole.RISK, 5)]
     assert pm._directional_dispersion(evals) == pytest.approx(0.0)
+
+
+def test_dispersion_at_lower_haircut_boundary():
+    # pstdev([68, 32]) == 18.0 exactly → just hits the 0.75x haircut threshold.
+    pm = make_pm()
+    evals = [_ev(AgentRole.FUNDAMENTAL, 68), _ev(AgentRole.TECHNICAL, 32)]
+    assert pm._directional_dispersion(evals) == pytest.approx(18.0)
+
+
+def test_dispersion_at_upper_haircut_boundary():
+    # pstdev([75, 25]) == 25.0 exactly → just hits the 0.5x haircut threshold.
+    pm = make_pm()
+    evals = [_ev(AgentRole.FUNDAMENTAL, 75), _ev(AgentRole.TECHNICAL, 25)]
+    assert pm._directional_dispersion(evals) == pytest.approx(25.0)
 
 
 def test_dispersion_zero_with_single_directional_agent():
@@ -307,3 +356,50 @@ def test_concentration_cap_disabled_when_zero():
         {"symbol": "NVDA"}, {"symbol": "AAPL"}, {"symbol": "MSFT"}, {"symbol": "AMD"},
     ])
     assert _allowed(pm, "META") is True              # cap off → not blocked
+
+
+# ── _effective_thresholds ────────────────────────────────────────────────────
+
+def test_effective_thresholds_backtest_uses_configured_values():
+    # In backtest mode the file is never read — always returns the configured default.
+    import json, execution.portfolio_manager as pm_mod
+    pm = make_pm()
+    # Even if the file exists and has tuned values, backtest mode ignores them.
+    pm._tuned_file = {"live_tuning_active": True, "long_threshold": 70.0, "short_threshold": 30.0}
+    pm._tuned_weights_ts = float("inf")   # pretend cache is still fresh
+    long_t, short_t = pm._effective_thresholds(backtest_mode=True)
+    assert long_t == pm._thresholds.long_above
+    assert short_t == pm._thresholds.short_below
+
+
+def test_effective_thresholds_live_reads_tuned_file(tmp_path, monkeypatch):
+    import json, execution.portfolio_manager as pm_mod
+    weights_file = tmp_path / "strategy_weights.json"
+    weights_file.write_text(json.dumps({
+        "live_tuning_active": True,
+        "long_threshold": 68.0,
+        "short_threshold": 32.0,
+    }))
+    monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
+    pm = make_pm()
+    pm._tuned_weights_ts = 0.0   # force cache miss so file is read
+    long_t, short_t = pm._effective_thresholds(backtest_mode=False)
+    assert long_t == pytest.approx(68.0)
+    assert short_t == pytest.approx(32.0)
+
+
+def test_effective_thresholds_inactive_tuning_falls_back_to_config(tmp_path, monkeypatch):
+    import json, execution.portfolio_manager as pm_mod
+    weights_file = tmp_path / "strategy_weights.json"
+    weights_file.write_text(json.dumps({
+        "live_tuning_active": False,
+        "long_threshold": 70.0,
+        "short_threshold": 30.0,
+    }))
+    monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
+    pm = make_pm()
+    pm._tuned_weights_ts = 0.0
+    long_t, short_t = pm._effective_thresholds(backtest_mode=False)
+    # live_tuning_active is False → thresholds in file are NOT applied
+    assert long_t == pm._thresholds.long_above
+    assert short_t == pm._thresholds.short_below

@@ -194,16 +194,23 @@ async def backtest_ticker(
 
         # Build context
         chart = render_chart(ticker, window)
-        ctx = AnalysisContext(
-            ticker=ticker,
-            bars=window,
-            account={"equity": 100_000.0},  # paper account
-            chart_image_path=chart,
-            as_of=entry_ts,
-            backtest_mode=True,
-        )
+        try:
+            ctx = AnalysisContext(
+                ticker=ticker,
+                bars=window,
+                account={"equity": 100_000.0},  # paper account
+                chart_image_path=chart,
+                as_of=entry_ts,
+                backtest_mode=True,
+            )
 
-        decision = await pm.decide(ctx)
+            decision = await pm.decide(ctx)
+        finally:
+            if chart:
+                try:
+                    os.unlink(chart)
+                except OSError:
+                    pass
 
         if not decision.is_actionable or not decision.risk:
             continue
@@ -265,6 +272,7 @@ async def get_recommendations(pm: PortfolioManager, tickers: list[str]) -> list[
     recs = []
     async with broker:
         for ticker in tickers:
+            chart = None
             try:
                 bars = await broker.get_bars(ticker, timeframe="5Min", limit=200)
                 account = await broker.get_account()
@@ -290,6 +298,12 @@ async def get_recommendations(pm: PortfolioManager, tickers: list[str]) -> list[
                 })
             except Exception:
                 logger.exception("recommendation failed for %s", ticker)
+            finally:
+                if chart:
+                    try:
+                        os.unlink(chart)
+                    except OSError:
+                        pass
     return recs
 
 

@@ -100,12 +100,14 @@ _scan_stats: Dict[str, Any] = {
     "scan_errors":      0,
     "last_scan_at":     None,
     "market_closed_skips": 0,
+    "running":          False,
 }
 
 import secrets as _secrets
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 
 _BOT_API_SECRET = os.getenv("BOT_API_SECRET", "")
 
@@ -118,6 +120,12 @@ async def _verify_bot_secret(x_bot_secret: str = Header(default="")) -> None:
 
 logger = logging.getLogger("api_server")
 logging.basicConfig(level=logging.INFO)
+
+if not _BOT_API_SECRET:
+    logger.warning(
+        "BOT_API_SECRET is not set — all /api/* endpoints are publicly accessible. "
+        "Set this env var in Railway (and Vercel) before going live."
+    )
 
 # === Agent imports (lazy -- fallback to simple formula if unavailable) ===
 
@@ -443,22 +451,6 @@ DEFAULT_WEIGHTS: Dict[str, Any] = {
 
 def _load_weights() -> Dict[str, Any]:
     return {**DEFAULT_WEIGHTS, **_load(WEIGHTS_FILE, {})}
-
-
-def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> None:
-    """Append a trade rejection record to risk_rejections.jsonl."""
-    entry = {
-        "ts":              datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-        "ticker":          ticker,
-        "reason":          reason,
-        "composite_score": round(score, 1),
-        **details,
-    }
-    try:
-        with open(REJECT_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as exc:
-        logger.debug("rejection log write failed: %s", exc)
 
 
 def _close_simulated_trade(trade: dict, exit_price: float, reason: str) -> None:
@@ -942,6 +934,7 @@ _backtest_stats: Dict[str, Any] = {
     "last_status":   None,   # "ok" | "failed" | "timeout"
     "error_count":   0,
     "last_error":    None,
+    "running":       False,
     "last_log":      None,   # full stdout from last run
     "log_lines":     [],     # live lines while running
 }
@@ -1210,6 +1203,16 @@ async def _run_market_scan(force: bool = False) -> None:
     ``force=True`` (a manual scan from the dashboard button) bypasses the
     off-hours hourly throttle so a click always runs a fresh scan.
     """
+    if _scan_stats.get("running"):
+        return
+    _scan_stats["running"] = True
+    try:
+        await _run_market_scan_inner(force=force)
+    finally:
+        _scan_stats["running"] = False
+
+
+async def _run_market_scan_inner(force: bool = False) -> None:
     _reset_scan_stats_if_needed()
 
     if not _ALPACA_KEY or not _ALPACA_SECRET:
@@ -1478,10 +1481,6 @@ async def _run_market_scan(force: bool = False) -> None:
                     if score < effective_min:
                         _rej(sym, f"Below min score ({score:.1f} < {effective_min})", price=price, chg_pct=chg_pct, score=score)
                         continue
-                else:
-                    _rej(sym, "Agent evaluation failed", price=price, chg_pct=chg_pct)
-                    # agent_used stays False; fallback formula runs below
-
                     agent_used = True
                     intended   = _Decision.LONG if direction == "LONG" else _Decision.SHORT
                     # Reuse the plan pm.decide() already built when it agrees with
@@ -1504,6 +1503,10 @@ async def _run_market_scan(force: bool = False) -> None:
                         take_profit = round(entry * (1 + d * tp_pct),   2)
                         qty  = _kelly_qty(equity, entry, stop_loss, take_profit, score)
                         rr   = round(tp_pct / stop_pct, 2)
+
+                else:
+                    _rej(sym, "Agent evaluation failed", price=price, chg_pct=chg_pct)
+                    # agent_used stays False; fallback formula runs below
 
             if not agent_used:
                 # Fallback formula: agents unavailable, no bars, or agent timed out.
@@ -1615,9 +1618,12 @@ _BACKTEST_INTERVAL_H = int(os.getenv("BACKTEST_INTERVAL_H", "24"))
 
 async def _run_backtest() -> None:
     """Run backtest_intraday.py as a subprocess (non-blocking)."""
+    if _backtest_stats.get("running"):
+        return
     if not _BACKTEST_SCRIPT.exists():
         logger.warning("backtest_intraday.py not found — skipping auto-backtest")
         return
+    _backtest_stats["running"] = True
     logger.info("Auto-backtest starting (interval=%dh)…", _BACKTEST_INTERVAL_H)
     proc = None
     try:
@@ -1678,6 +1684,8 @@ async def _run_backtest() -> None:
             "last_status": "failed",
             "error_count": _backtest_stats["error_count"] + 1,
         })
+    finally:
+        _backtest_stats["running"] = False
 
 
 _OPTIMIZER_SCRIPT = _HERE / "optimize_strategy.py"
@@ -2643,12 +2651,12 @@ def get_sectors():
 
 
 class ExecuteBody(BaseModel):
-    ticker:            str
-    direction:         str
-    qty:               int
-    entry:             float
-    stop_loss:         float
-    take_profit:       float
+    ticker:            str = Field(..., min_length=1, max_length=10, pattern=r"^[A-Z0-9.\-]+$")
+    direction:         Literal["LONG", "SHORT"]
+    qty:               int = Field(..., gt=0)
+    entry:             float = Field(..., gt=0)
+    stop_loss:         float = Field(..., gt=0)
+    take_profit:       float = Field(..., gt=0)
     recommendation_id: Optional[str] = None
     order_id:          Optional[str] = None
     composite_score:   Optional[float] = None
@@ -2842,7 +2850,17 @@ async def _submit_paper_bracket(session: aiohttp.ClientSession, *, ticker: str,
 
     Mirrors the shape used by the PC broker and the dashboard (market entry,
     TIF day, bracket children) so fills behave identically across venues."""
-    side = "buy" if str(direction).upper() == "LONG" else "sell"
+    direction = str(direction).upper()
+    if direction not in ("LONG", "SHORT"):
+        logger.error("_submit_paper_bracket: invalid direction %r for %s — skipping", direction, ticker)
+        return None
+    side = "buy" if direction == "LONG" else "sell"
+    # Bracket sanity: for LONG SL must be below TP; for SHORT SL must be above TP.
+    bracket_ok = (stop_loss < take_profit) if side == "buy" else (stop_loss > take_profit)
+    if not bracket_ok:
+        logger.error("_submit_paper_bracket: bracket legs inverted for %s %s SL=%.4f TP=%.4f — skipping",
+                     direction, ticker, stop_loss, take_profit)
+        return None
     order = {
         "symbol":        ticker,
         "qty":           str(int(qty)),
@@ -2958,6 +2976,8 @@ async def _auto_execute_loop() -> None:
 
 @app.post("/api/scan", dependencies=[Depends(_verify_bot_secret)])
 async def trigger_scan():
+    if _scan_stats.get("running"):
+        return {"status": "already_running", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
     asyncio.create_task(_run_market_scan(force=True))
     return {"status": "scan_triggered", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
@@ -2977,6 +2997,7 @@ async def reset_circuit_breaker():
 @app.get("/api/rejections", dependencies=[Depends(_verify_bot_secret)])
 def get_rejections(limit: int = 50):
     """Return the last `limit` trade rejection records."""
+    limit = max(1, min(limit, 500))
     try:
         lines = REJECT_LOG.read_text(encoding="utf-8").strip().splitlines()
         records = []
@@ -2996,6 +3017,7 @@ def get_rejections(limit: int = 50):
 @app.get("/api/snapshots", dependencies=[Depends(_verify_bot_secret)])
 def get_snapshots(days: int = 30):
     """Return daily benchmark snapshots (last N days)."""
+    days = max(1, min(days, 365))
     try:
         lines = SNAPSHOT_LOG.read_text(encoding="utf-8").strip().splitlines()
         records = []
@@ -3041,6 +3063,8 @@ def get_backtest():
 
 @app.post("/api/backtest/run", dependencies=[Depends(_verify_bot_secret)])
 async def run_backtest_now():
+    if _backtest_stats.get("running"):
+        return {"status": "already_running", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
     asyncio.create_task(_run_backtest())
     return {"status": "backtest_triggered", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
@@ -3377,6 +3401,7 @@ def post_learning_simulate(n_trades: int = 140):
     """Seed the Learning view by driving the real WeightTuner over a simulated
     track record. Clearly tagged simulated=true; superseded by real tuning steps.
     """
+    n_trades = max(20, min(n_trades, 500))
     try:
         from simulate_learning import run_simulation
         result = run_simulation(n_trades=n_trades)
@@ -3389,6 +3414,7 @@ def post_learning_simulate(n_trades: int = 140):
 @app.get("/api/monte-carlo", dependencies=[Depends(_verify_bot_secret)])
 def get_monte_carlo(n_sims: int = 10_000):
     """Monte Carlo resample of trade win/loss sequence → 95% CI on win rate and PnL."""
+    n_sims = max(100, min(n_sims, 100_000))
     import random as _rand
     trades = _load(HISTORY_FILE, [])
     if not isinstance(trades, list):

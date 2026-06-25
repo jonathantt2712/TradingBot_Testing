@@ -74,6 +74,27 @@ class BaseBroker(ABC):
         """
         return None
 
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel a single open order by ID. Returns True on success.
+
+        Brokers that do not support individual order cancellation return False.
+        """
+        return False
+
+    async def submit_stop(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        stop_price: float,
+    ) -> Optional[str]:
+        """Submit a standalone stop order. Returns the order_id or None on failure.
+
+        Used by the breakeven-lock loop to replace the bracket stop leg.
+        Brokers that do not support standalone stop orders return None.
+        """
+        return None
+
     # ── Order management ──────────────────────────────────────────────────────
 
     @abstractmethod

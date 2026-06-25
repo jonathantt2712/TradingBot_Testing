@@ -324,7 +324,7 @@ async def health_alert_loop(settings: Settings, *, interval_min: int = 10) -> No
     Runs the first check immediately (catches startup preflight issues), then
     every interval_min. No-ops cleanly when Telegram isn't configured.
     """
-    publisher = TelegramPublisher(settings.telegram_bot_token, settings.telegram_chat_id)
+    publisher = TelegramPublisher(settings.telegram_bot_token)
     while True:
         try:
             new = health.take_unsent()
@@ -348,7 +348,7 @@ async def eod_report_loop(settings: Settings) -> None:
         return
 
     agent = EODReportAgent(gemini_api_key=settings.gemini_api_key)
-    publisher = TelegramPublisher(settings.telegram_bot_token, settings.telegram_chat_id)
+    publisher = TelegramPublisher(settings.telegram_bot_token)
     reported_on = None
     while True:
         now = datetime.now(_ET)

@@ -11,6 +11,10 @@ export async function DELETE(
 
   const symbol = decodeURIComponent(params.symbol).toUpperCase()
 
+  if (!/^[A-Z0-9.]{1,10}$/.test(symbol)) {
+    return NextResponse.json({ message: 'Invalid symbol' }, { status: 400 })
+  }
+
   try {
     const order = await closePosition(creds, symbol)
     return NextResponse.json({ ok: true, symbol, order })

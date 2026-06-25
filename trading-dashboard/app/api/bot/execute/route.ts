@@ -62,6 +62,36 @@ export async function POST(req: Request) {
 
   const { ticker, direction, entry, stop_loss, take_profit } = body
 
+  // Runtime validation — TypeScript types don't protect us at the boundary.
+  if (!ticker || !/^[A-Z0-9.]{1,10}$/.test(ticker)) {
+    return NextResponse.json(
+      { success: false, order_id: '', qty: 0, message: 'Invalid ticker symbol' },
+      { status: 400 },
+    )
+  }
+  if (direction !== 'LONG' && direction !== 'SHORT') {
+    return NextResponse.json(
+      { success: false, order_id: '', qty: 0, message: 'direction must be LONG or SHORT' },
+      { status: 400 },
+    )
+  }
+  if (!(entry > 0) || !(stop_loss > 0) || !(take_profit > 0)) {
+    return NextResponse.json(
+      { success: false, order_id: '', qty: 0, message: 'entry, stop_loss, and take_profit must be positive' },
+      { status: 400 },
+    )
+  }
+  // Bracket sanity: LONG needs SL < entry < TP; SHORT needs TP < entry < SL
+  const bracketValid = direction === 'LONG'
+    ? (stop_loss < entry && entry < take_profit)
+    : (take_profit < entry && entry < stop_loss)
+  if (!bracketValid) {
+    return NextResponse.json(
+      { success: false, order_id: '', qty: 0, message: 'Bracket legs are inverted for this direction' },
+      { status: 400 },
+    )
+  }
+
   // -- 0. Size the position to the EXECUTING USER's own account equity
   let equity: number
   try {

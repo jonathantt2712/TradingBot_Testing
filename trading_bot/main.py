@@ -34,8 +34,15 @@ async def evaluate_ticker(pm: PortfolioManager, broker: BaseBroker, ticker: str,
     bars = await broker.get_bars(ticker, timeframe="5Min", limit=200)
     account = await broker.get_account()
     chart = render_chart(ticker, bars)
-    ctx = AnalysisContext(ticker=ticker, bars=bars, account=account, chart_image_path=chart)
-    decision = await pm.run_once(ctx, execute=execute)
+    try:
+        ctx = AnalysisContext(ticker=ticker, bars=bars, account=account, chart_image_path=chart)
+        decision = await pm.run_once(ctx, execute=execute)
+    finally:
+        if chart:
+            try:
+                os.unlink(chart)
+            except OSError:
+                pass
     logger.info("%s -> %s | composite=%.1f | %s",
                 ticker, decision.decision.value, decision.composite_score,
                 pm.summarise(decision.evaluations))

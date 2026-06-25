@@ -189,8 +189,13 @@ class LiquidAgent(BaseAgent):
             if today_df is None or today_df.empty or len(today_df) < 3:
                 return None
             typical = (today_df["high"] + today_df["low"] + today_df["close"]) / 3.0
-            cum_vol = today_df["volume"].cumsum().replace(0, np.nan)
-            vwap    = float((typical * today_df["volume"]).cumsum().iloc[-1] / cum_vol.iloc[-1])
+            cum_vol_last = float(today_df["volume"].cumsum().iloc[-1])
+            # Guard: zero cumulative volume (halted/synthetic bars) → no VWAP signal.
+            # The previous .replace(0, np.nan) approach let NaN slip past the
+            # `is not None` guard and corrupt the blended score.
+            if cum_vol_last <= 0:
+                return None
+            vwap    = float((typical * today_df["volume"]).cumsum().iloc[-1] / cum_vol_last)
             last_px = float(today_df["close"].iloc[-1])
             dev_pct = (last_px - vwap) / vwap * 100   # signed %
             # dev=+2% -> ~80, dev=0 -> 50, dev=-2% -> ~20

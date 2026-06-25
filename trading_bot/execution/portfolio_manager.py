@@ -752,7 +752,10 @@ class PortfolioManager:
             num += ev.score * w
             den += w
 
-        return round(num / den, 2) if den else 50.0
+        if not den:
+            logger.warning("_composite: all agent weights are zero — falling back to neutral 50.0")
+            return 50.0
+        return round(num / den, 2)
 
     def _effective_thresholds(self, backtest_mode: bool) -> tuple[float, float]:
         """Live LONG/SHORT entry thresholds.
