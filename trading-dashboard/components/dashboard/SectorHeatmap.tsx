@@ -1,4 +1,5 @@
 'use client'
+import { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import type { SectorStat } from '@/types/trading'
 
@@ -12,8 +13,26 @@ function scoreToColor(score: number): string {
   return 'bg-bear/20 border-bear/30 text-bear'
 }
 
-export function SectorHeatmap({ sectors }: Props) {
+export function SectorHeatmap({ sectors: initialSectors }: Props) {
+  const [sectors, setSectors] = useState(initialSectors)
+
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const r = await fetch('/api/bot/sectors', { cache: 'no-store' })
+        if (r.ok) {
+          const data = await r.json()
+          if (Array.isArray(data) && data.length > 0) setSectors(data)
+        }
+      } catch {}
+    }
+    const id = setInterval(poll, 3 * 60_000)
+    return () => clearInterval(id)
+  }, [])
+
   const sorted = [...sectors].sort((a, b) => b.score - a.score)
+
+  if (sorted.length === 0) return null
 
   return (
     <div className="card p-4">

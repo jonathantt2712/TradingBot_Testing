@@ -4,6 +4,7 @@ import { AccountBar }      from '@/components/dashboard/AccountBar'
 import { HealthBanner, type HealthIssue } from '@/components/dashboard/HealthBanner'
 import { LiveDashboard }   from '@/components/dashboard/LiveDashboard'
 import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
+import { SectorHeatmap }   from '@/components/dashboard/SectorHeatmap'
 import { RefreshButton }   from '@/components/layout/RefreshButton'
 import {
   demoStats, demoPnL, demoRegime, demoSectors,
@@ -130,7 +131,10 @@ export default async function DashboardPage() {
             initialScanStats={scanStats as any}
           />
         </div>
-        <RegimeIndicator regime={regime} />
+        <div className="space-y-4">
+          <RegimeIndicator regime={regime} />
+          <SectorHeatmap sectors={sectors} />
+        </div>
       </div>
     </div>
   )

@@ -2,9 +2,8 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react'
 import dynamic from 'next/dynamic'
-import { StatsCards }    from './StatsCards'
-import { SectorHeatmap } from './SectorHeatmap'
-import { PositionsTable }  from './PositionsTable'
+import { StatsCards }     from './StatsCards'
+import { PositionsTable } from './PositionsTable'
 import { cn } from '@/lib/utils'
 import type { PortfolioStats, PnLPoint, SectorStat } from '@/types/trading'
 import type { AlpacaPosition } from '@/lib/alpaca'
@@ -184,13 +183,8 @@ export function LiveDashboard({
 
       <StatsCards stats={stats} />
 
-      {/* Middle: equity curve (left) | sector heat (right) */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_280px]">
-        <PnLChart data={pnl} />
-        <SectorHeatmap sectors={sectors} />
-      </div>
+      <PnLChart data={pnl} />
 
-      {/* Bottom: open positions full width */}
       <PositionsTable positions={positions} onClosed={handleClosed} />
     </>
   )
