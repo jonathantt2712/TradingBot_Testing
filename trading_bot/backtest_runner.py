@@ -141,9 +141,9 @@ def simulate_fill(
 ) -> tuple | None:
     """Walk forward bar-by-bar and check if TP or SL is hit."""
     for i, (ts, bar) in enumerate(bars_after_entry.head(max_bars).iterrows()):
-        # EOD forced exit: intraday strategy must be flat by 15:55 ET
+        # EOD forced exit: intraday strategy must be flat by 15:55 ET (including post-market)
         bar_et = ts.astimezone(_ET)
-        if bar_et.hour == 15 and bar_et.minute >= 55:
+        if (bar_et.hour, bar_et.minute) >= (15, 55):
             last_close = float(bar["close"])
             mult = 1 if direction is Decision.LONG else -1
             pnl = mult * (last_close - entry) * qty
