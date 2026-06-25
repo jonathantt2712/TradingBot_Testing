@@ -280,16 +280,18 @@ async def _evaluate(
     if oos_cache is None:
         rec = dict(is_sum)
         rec["params"]     = params
-        rec["rank_value"] = is_sum.get(objective, _WORST) or _WORST
+        _v = is_sum.get(objective)
+        rec["rank_value"] = _v if _v is not None else _WORST
         rec["trades_ok"]  = is_sum.get("total_trades", 0) >= MIN_TRADES
         return rec
 
     oos_sum = await _eval_combo(params, tickers, oos_cache, spy_bars, use_llm)
+    _v = oos_sum.get(objective)
     rec = {
         "params":     params,
         "in_sample":  _slim(is_sum),
         "oos":        _slim(oos_sum),
-        "rank_value": oos_sum.get(objective, _WORST) or _WORST,
+        "rank_value": _v if _v is not None else _WORST,
         "trades_ok": (is_sum.get("total_trades", 0)  >= MIN_TRADES and
                       oos_sum.get("total_trades", 0) >= MIN_OOS_TRADES),
     }

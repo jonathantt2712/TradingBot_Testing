@@ -190,6 +190,51 @@ class TestSlim:
         assert s["win_rate"] == pytest.approx(55.5)
 
 
+# ── rank_value zero bug (regression) ─────────────────────────────────────────
+# The `or _WORST` idiom replaced legitimate 0.0 objective values with _WORST,
+# so breakeven param sets ranked below all losers. The fix uses explicit `is None`.
+
+def _fake_summary(objective: str, value: float) -> dict:
+    base = {k: 0 for k in _SLIM_KEYS}
+    base["total_trades"] = 50
+    base[objective] = value
+    return base
+
+
+class TestRankValueZeroBug:
+    def test_zero_total_pnl_is_not_worst(self):
+        """A breakeven param set (total_pnl=0.0) must rank above losing sets."""
+        from optimize_strategy import _WORST
+        s = _fake_summary("total_pnl", 0.0)
+        v = s.get("total_pnl")
+        rank = v if v is not None else _WORST
+        assert rank == 0.0
+        assert rank > _WORST
+
+    def test_zero_sharpe_is_not_worst(self):
+        from optimize_strategy import _WORST
+        s = _fake_summary("sharpe", 0.0)
+        v = s.get("sharpe")
+        rank = v if v is not None else _WORST
+        assert rank == 0.0
+        assert rank > _WORST
+
+    def test_zero_ev_per_trade_is_not_worst(self):
+        from optimize_strategy import _WORST
+        s = _fake_summary("ev_per_trade", 0.0)
+        v = s.get("ev_per_trade")
+        rank = v if v is not None else _WORST
+        assert rank == 0.0
+        assert rank > _WORST
+
+    def test_missing_objective_returns_worst(self):
+        """A missing key (no trades at all) must still map to _WORST."""
+        from optimize_strategy import _WORST
+        v = {}.get("total_pnl")
+        rank = v if v is not None else _WORST
+        assert rank == _WORST
+
+
 # ── _fmt_params ───────────────────────────────────────────────────────────────
 
 class TestFmtParams:
