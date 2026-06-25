@@ -347,6 +347,22 @@ export default function BacktestPage() {
     }, 15_000)
   }
 
+  async function resetWeights() {
+    if (!confirm('Reset strategy weights to defaults? This clears any self-tuner adjustments.')) return
+    try {
+      const res = await fetch('/api/optimize/reset', { method: 'POST' })
+      const d = await res.json()
+      if (d.status === 'reset') {
+        setApplyMsg({ ok: true, text: 'Strategy weights reset to defaults — self-tuner will re-learn from next trades.' })
+        load()
+      } else {
+        setApplyMsg({ ok: false, text: d.error || 'Reset failed' })
+      }
+    } catch {
+      setApplyMsg({ ok: false, text: 'Failed to reach the bot' })
+    }
+  }
+
   async function applyOptimal() {
     if (applying) return
     setApplying(true); setApplyMsg(null)
@@ -428,6 +444,13 @@ export default function BacktestPage() {
               {applying ? 'Applying...' : 'Apply to Live'}
             </button>
           )}
+          <button
+            onClick={resetWeights}
+            title="Reset self-tuner back to factory defaults (clears drifted min_score / ATR)"
+            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all bg-bear/10 border border-bear/30 text-bear hover:bg-bear/20"
+          >
+            Reset Weights
+          </button>
           <button onClick={load} disabled={loading} className="btn-ghost text-xs">
             <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
             Refresh

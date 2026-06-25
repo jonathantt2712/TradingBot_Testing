@@ -3165,6 +3165,19 @@ def apply_optimal_params():
     }
 
 
+@app.post("/api/optimize/reset", dependencies=[Depends(_verify_bot_secret)])
+def reset_strategy_weights():
+    """Reset strategy_weights.json to factory defaults.
+
+    Clears any self-tuner drift (raised min_score, tightened ATR multiples)
+    so the bot starts fresh. The self-tuner will re-learn from the next closed
+    trades automatically.
+    """
+    _save_weights(dict(DEFAULT_WEIGHTS))
+    logger.info("Strategy weights reset to defaults by operator")
+    return {"status": "reset", "weights": DEFAULT_WEIGHTS}
+
+
 @app.get("/api/optimize/applied", dependencies=[Depends(_verify_bot_secret)])
 def get_applied_params():
     """Show which tuned params are currently live (from strategy_weights.json)."""
