@@ -286,3 +286,57 @@ def test_regime_params_prev_preserved_when_insufficient(_isolate_files):
     w = _read_weights(_isolate_files)
     # risk_on block must be carried forward unchanged
     assert w["regime_params"]["risk_on"]["long_threshold"] == 62.0
+
+
+# ── _append_history ───────────────────────────────────────────────────────────
+
+def test_history_file_written_after_run(_isolate_files):
+    """A successful _run must append one JSONL line to the history file."""
+    tuner = WeightTuner({"technical": 1.0})
+    entries = [_entry("LONG", 100.0, {"technical": 60}) for _ in range(10)]
+    tuner._run(entries)
+    history_file = _isolate_files / "learning_history.jsonl"
+    assert history_file.exists()
+    lines = [l for l in history_file.read_text().splitlines() if l.strip()]
+    assert len(lines) >= 1
+
+
+def test_history_snapshot_has_required_keys(_isolate_files):
+    """Each history snapshot must carry the keys the learning dashboard needs."""
+    tuner = WeightTuner({"technical": 0.5, "fundamental": 0.5})
+    entries = [_entry("LONG", 100.0, {"technical": 60, "fundamental": 55}) for _ in range(10)]
+    tuner._run(entries)
+    history_file = _isolate_files / "learning_history.jsonl"
+    snap = json.loads(history_file.read_text().splitlines()[-1])
+    for key in ("ts", "win_rate", "bias", "long_threshold", "short_threshold",
+                "sample_size", "weights", "multipliers"):
+        assert key in snap, f"Missing key: {key}"
+
+
+def test_history_appends_each_run(_isolate_files):
+    """Calling _run N times must produce N lines in the history file."""
+    tuner = WeightTuner({"technical": 1.0})
+    for _ in range(3):
+        entries = [_entry("LONG", 100.0, {"technical": 60}) for _ in range(10)]
+        tuner._run(entries)
+    history_file = _isolate_files / "learning_history.jsonl"
+    lines = [l for l in history_file.read_text().splitlines() if l.strip()]
+    assert len(lines) == 3
+
+
+# ── rolling window (WINDOW=30) ────────────────────────────────────────────────
+
+def test_rolling_window_only_uses_last_30(_isolate_files):
+    """When more than _WINDOW trades exist the most recent win rate dominates."""
+    from core.weight_tuner import _WINDOW
+    tuner = WeightTuner({"technical": 1.0})
+
+    # First 10 trades: 100% losers (these fall outside the 30-trade window)
+    early = [_entry("LONG", -100.0, {"technical": 60}) for _ in range(10)]
+    # Next 30 trades: 100% winners (fills the rolling window)
+    recent = [_entry("LONG", 100.0, {"technical": 60}) for _ in range(_WINDOW)]
+    tuner._run(early + recent)
+
+    w = _read_weights(_isolate_files)
+    # The window contains only winners → win_rate must be 100%
+    assert w["win_rate_30d"] == pytest.approx(100.0)
