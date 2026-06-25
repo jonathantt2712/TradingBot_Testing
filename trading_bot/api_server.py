@@ -2529,20 +2529,30 @@ def get_stats():
         if str(t.get("closed_at", ""))[:10] == today_s
     )
 
-    # Sharpe: bucket per-trade PnL into daily totals, then annualise.
-    # sqrt(252) is the daily→annual factor; applying it to raw per-trade
-    # amounts (as before) gave a meaningless number because trades aren't days.
+    # Sharpe: daily returns (PnL / entry_value) bucketed by close day, annualised.
+    # Using returns (%) rather than raw dollars makes this scale-invariant.
     import numpy as _np
     from collections import defaultdict as _dd
-    _daily_pnl: dict = _dd(float)
+    _daily_ret: dict = _dd(float)
+    _daily_val: dict = _dd(float)
     for t in closed:
-        day = str(t.get("closed_at", ""))[:10]
-        if day:
-            _daily_pnl[day] += float(t.get("pnl") or t.get("realized_pnl") or 0)
+        day = str(t.get("closed_at", t.get("executed_at", "")))[:10]
+        if not day:
+            continue
+        pnl_val   = float(t.get("pnl") or t.get("realized_pnl") or 0)
+        entry_val = float(t.get("entry") or 1) * int(t.get("qty") or 1)
+        _daily_ret[day] += pnl_val
+        _daily_val[day] += entry_val
     sharpe = 0.0
-    if len(_daily_pnl) >= 2:
-        arr = _np.array(list(_daily_pnl.values()))
-        std = float(_np.std(arr))
+    # Build daily return % series
+    ret_series = []
+    for day in _daily_ret:
+        basis = _daily_val.get(day, 0)
+        if basis > 0:
+            ret_series.append(_daily_ret[day] / basis)
+    if len(ret_series) >= 2:
+        arr = _np.array(ret_series)
+        std = float(_np.std(arr, ddof=1))
         if std > 0:
             sharpe = round(float(_np.mean(arr)) / std * _np.sqrt(252), 2)
 

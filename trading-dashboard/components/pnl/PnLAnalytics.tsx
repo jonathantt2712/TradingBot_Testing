@@ -67,8 +67,8 @@ export function PnLAnalytics({ pnl, stats, trades, live, attribution, monteCarlo
     { label: 'Today',         value: formatCurrency(stats.today_pnl),    sub: 'Current session',   color: stats.today_pnl  >= 0 ? 'text-bull' : 'text-bear' },
     { label: 'Win Rate',      value: `${stats.win_rate.toFixed(1)}%`,    sub: `${wins}W / ${losses}L`, color: 'text-brand-cyan' },
     { label: 'Max Drawdown',  value: formatPct(stats.max_drawdown),      sub: 'Peak → trough',     color: 'text-bear'       },
-    { label: 'Sharpe',        value: stats.sharpe_ratio.toFixed(2),      sub: 'Risk-adj return',   color: 'text-caution',
-      tooltip: 'Sharpe ratio: annualized avg daily P&L ÷ its standard deviation. Measures risk-adjusted return — how much gain per unit of volatility. Above 1.0 is good; above 2.0 is excellent; below 0 means losing money on average.' },
+    { label: 'Sharpe',        value: stats.sharpe_ratio === 0 ? '—' : stats.sharpe_ratio.toFixed(2), sub: 'Risk-adj return', color: 'text-caution',
+      tooltip: 'Sharpe ratio: annualised daily return ÷ its volatility × √252. Above 1.0 is good; above 2.0 is excellent. "—" means not enough data yet.' },
     { label: 'Avg R/R',       value: `${stats.avg_rr.toFixed(2)}x`,      sub: 'Expected value',    color: 'text-brand-cyan' },
   ]
 

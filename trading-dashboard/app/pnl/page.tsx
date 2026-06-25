@@ -24,12 +24,26 @@ function histToPnL(h: PortfolioHistory): PnLPoint[] {
 }
 
 function computeSharpe(pnl: PnLPoint[]): number | null {
-  const vals = pnl.map(p => p.daily_pnl).filter(v => isFinite(v))
-  if (vals.length < 5) return null
-  const mean = vals.reduce((s, v) => s + v, 0) / vals.length
+  // Prefer equity-based daily returns (% change) — works regardless of account size.
+  const equities = pnl.map(p => p.equity).filter((e): e is number => e != null && e > 0)
+  let vals: number[]
+
+  if (equities.length >= 3) {
+    // Daily return = (equity[i] - equity[i-1]) / equity[i-1]
+    vals = []
+    for (let i = 1; i < equities.length; i++) {
+      vals.push((equities[i] - equities[i - 1]) / equities[i - 1])
+    }
+  } else {
+    // Fallback: dollar daily P&L (less reliable for small accounts)
+    vals = pnl.map(p => p.daily_pnl).filter(v => isFinite(v) && v !== 0)
+  }
+
+  if (vals.length < 2) return null
+  const mean     = vals.reduce((s, v) => s + v, 0) / vals.length
   const variance = vals.reduce((s, v) => s + (v - mean) ** 2, 0) / (vals.length - 1)
-  const std = Math.sqrt(variance)
-  if (std < 0.01) return null
+  const std      = Math.sqrt(variance)
+  if (std === 0) return null
   return +(mean / std * Math.sqrt(252)).toFixed(2)
 }
 
