@@ -106,6 +106,36 @@ class TestSplitCaches:
             ratio = len(is_c["X"]) / n_total
             assert 0.45 < ratio < 0.55
 
+    def test_minimum_split_boundary(self):
+        """Series just barely long enough for both halves should yield a valid split.
+
+        Minimum for frac=0.7: n > LOOKBACK_BARS/0.7 AND n*0.3 > LOOKBACK_BARS.
+        At 78 bars/day, 9 trading days (702 bars) clears both constraints;
+        8 days (624 bars) does not (OOS slice would be only 187 bars < 200).
+        """
+        barely_too_short = _trading_day_bars(8)   # 624 bars → OOS slice < LOOKBACK_BARS
+        just_enough      = _trading_day_bars(9)   # 702 bars → valid split
+
+        is_short, oos_short = _split_caches({"X": barely_too_short}, frac=SPLIT_FRAC)
+        is_long,  oos_long  = _split_caches({"X": just_enough},      frac=SPLIT_FRAC)
+
+        assert "X" not in oos_short   # too short → in-sample only
+        assert "X" in oos_long        # just enough → proper split
+
+    def test_extreme_frac_zero_goes_to_is(self):
+        """frac=0 → split=0 ≤ LOOKBACK_BARS → whole series stays in in-sample."""
+        bars = _trading_day_bars(40)
+        is_c, oos_c = _split_caches({"X": bars}, frac=0.0)
+        assert "X" in is_c
+        assert "X" not in oos_c
+
+    def test_extreme_frac_one_goes_to_is(self):
+        """frac=1 → split=n, n-split=0 ≤ LOOKBACK_BARS → whole series stays in IS."""
+        bars = _trading_day_bars(40)
+        is_c, oos_c = _split_caches({"X": bars}, frac=1.0)
+        assert "X" in is_c
+        assert "X" not in oos_c
+
 
 # ── _threshold_combos ──────────────────────────────────────────────────────────
 
