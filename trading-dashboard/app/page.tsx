@@ -3,7 +3,6 @@ export const dynamic = 'force-dynamic'
 import { AccountBar }     from '@/components/dashboard/AccountBar'
 import { HealthBanner, type HealthIssue } from '@/components/dashboard/HealthBanner'
 import { LiveDashboard }  from '@/components/dashboard/LiveDashboard'
-import { ScanButton }     from '@/components/dashboard/ScanButton'
 import { RefreshButton }  from '@/components/layout/RefreshButton'
 import {
   demoStats, demoPnL, demoRegime, demoSectors,
@@ -111,7 +110,6 @@ export default async function DashboardPage() {
             : <span className="flex items-center gap-1.5 text-xs text-caution"><span className="h-1.5 w-1.5 rounded-full bg-caution" />Demo</span>
           }
           <HealthBanner issues={issues} />
-          <ScanButton />
           <RefreshButton />
         </div>
       </div>

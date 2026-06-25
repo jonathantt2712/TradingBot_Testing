@@ -4,6 +4,7 @@ import { TradeCard }       from '@/components/trades/TradeCard'
 import { ConfirmModal }    from '@/components/trades/ConfirmModal'
 import { RationaleModal }  from '@/components/trades/RationaleModal'
 import { ExecutionModeToggle } from '@/components/trades/ExecutionModeToggle'
+import { ScanButton } from '@/components/dashboard/ScanButton'
 import { BrokerModeToggle } from '@/components/trades/BrokerModeToggle'
 import { RegimeIndicator } from '@/components/dashboard/RegimeIndicator'
 import { demoRegime, api } from '@/lib/api'
@@ -306,6 +307,7 @@ export default function TradesPage() {
               {buyingAll ? 'Buying...' : `Buy All (${active.length})`}
             </button>
           )}
+          <ScanButton />
           <button onClick={fetchData} className="btn-ghost text-xs" disabled={loading}>
             <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
           </button>
