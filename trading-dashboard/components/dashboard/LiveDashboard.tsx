@@ -38,6 +38,7 @@ interface Props {
   initialRegime:    RegimeInfo
   initialSectors:   SectorStat[]
   initialPositions: AlpacaPosition[]
+  initialScanStats: ScanStats | null
 }
 
 function relativeTime(iso: string): string {
@@ -53,14 +54,17 @@ export function LiveDashboard({
   initialRegime,
   initialSectors,
   initialPositions,
+  initialScanStats,
 }: Props) {
   const [stats,          setStats]          = useState(initialStats)
   const [pnl,            setPnl]            = useState(initialPnl)
   const [regime,         setRegime]         = useState(initialRegime)
   const [sectors,        setSectors]        = useState(initialSectors)
   const [positions,      setPositions]      = useState(initialPositions)
-  const [scanStats,      setScanStats]      = useState<ScanStats | null>(null)
-  const [circuitBreaker, setCircuitBreaker] = useState<{ halted: boolean; reason?: string } | null>(null)
+  const [scanStats,      setScanStats]      = useState<ScanStats | null>(initialScanStats)
+  const [circuitBreaker, setCircuitBreaker] = useState<{ halted: boolean; reason?: string } | null>(
+    initialScanStats?.circuit_breaker ?? null
+  )
 
   // Tracks symbols the user has closed — persists across refreshes until
   // Alpaca confirms the position is truly gone from their end.
@@ -118,10 +122,8 @@ export function LiveDashboard({
     }
   }, [])
 
-  // Initial load — run both immediately so the correct values show on first render
-  useEffect(() => { refreshFast() }, [refreshFast])
-  useEffect(() => { refreshSlow() }, [refreshSlow])
-
+  // SSR already provides fresh data on every page load — no immediate refresh needed.
+  // Polling only runs on interval so SSR values are never overwritten on mount.
   useEffect(() => {
     const fastId = setInterval(refreshFast, FAST_MS)
     return () => clearInterval(fastId)

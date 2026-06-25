@@ -15,7 +15,7 @@ import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/t
 import type { AlpacaAccount } from '@/lib/alpaca'
 
 async function loadDashboard(creds: AlpacaCreds | null) {
-  const [account, positions, history, stats, pnl, regime, sectors, health] = await Promise.allSettled([
+  const [account, positions, history, stats, pnl, regime, sectors, health, scanStats] = await Promise.allSettled([
     creds ? getAccount(creds) : Promise.reject(new Error('no creds')),
     creds ? getPositions(creds) : Promise.reject(new Error('no creds')),
     creds ? getPortfolioHistory(creds, '1A', '1D') : Promise.reject(new Error('no creds')),
@@ -24,6 +24,7 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     botGet<RegimeInfo>('/api/regime'),
     botGet<SectorStat[]>('/api/sectors'),
     botGet<{ trading?: { mode_label?: string; execute_live?: boolean; paper_mode?: boolean }; issues?: HealthIssue[] }>('/api/health'),
+    botGet<Record<string, unknown>>('/api/scan-stats'),
   ])
 
   const accountErrorDetail = account.status === 'rejected'
@@ -78,14 +79,15 @@ async function loadDashboard(creds: AlpacaCreds | null) {
     : []
 
   return {
-    stats:        resolvedStats,
-    account:      account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
-    accountError: accountErrorDetail,
-    pnl:          pnl.status      === 'fulfilled' ? pnl.value      : demoPnL(),
-    regime:       regime.status   === 'fulfilled' ? regime.value   : demoRegime(),
-    sectors:      sectors.status  === 'fulfilled' ? sectors.value  : demoSectors(),
-    positions:    positions.status === 'fulfilled' ? positions.value : [],
-    live:         account.status === 'fulfilled',
+    stats:         resolvedStats,
+    account:       account.status === 'fulfilled' ? account.value : null as AlpacaAccount | null,
+    accountError:  accountErrorDetail,
+    pnl:           pnl.status       === 'fulfilled' ? pnl.value       : demoPnL(),
+    regime:        regime.status    === 'fulfilled' ? regime.value    : demoRegime(),
+    sectors:       sectors.status   === 'fulfilled' ? sectors.value   : demoSectors(),
+    positions:     positions.status === 'fulfilled' ? positions.value : [],
+    scanStats:     scanStats.status === 'fulfilled' ? scanStats.value : null,
+    live:          account.status === 'fulfilled',
     tradingMode,
     issues,
   }
@@ -93,7 +95,7 @@ async function loadDashboard(creds: AlpacaCreds | null) {
 
 export default async function DashboardPage() {
   const creds = await getAlpacaCreds()
-  const { stats, account, accountError, pnl, regime, sectors, positions, live, tradingMode, issues } = await loadDashboard(creds)
+  const { stats, account, accountError, pnl, regime, sectors, positions, scanStats, live, tradingMode, issues } = await loadDashboard(creds)
 
   return (
     <div className="px-4 py-4 md:px-6 md:py-6 space-y-4 md:space-y-6 max-w-[1400px]">
@@ -122,6 +124,7 @@ export default async function DashboardPage() {
         initialRegime={regime}
         initialSectors={sectors}
         initialPositions={positions}
+        initialScanStats={scanStats as any}
       />
     </div>
   )
