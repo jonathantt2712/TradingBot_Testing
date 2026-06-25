@@ -195,6 +195,18 @@ class TestSimulateDayTrade:
         )
         assert pnl_slip < pnl_no
 
+    def test_empty_bars_raises(self):
+        """simulate_day_trade must raise ValueError on empty bars (caller must guard)."""
+        empty = pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+            index=pd.DatetimeIndex([], tz="UTC"),
+        )
+        with pytest.raises(ValueError, match="empty bars"):
+            simulate_day_trade(
+                empty, direction=Decision.LONG, entry=100.0,
+                stop_loss=90.0, take_profit=120.0, qty=10,
+            )
+
     def test_after_hours_bar_triggers_eod_exit(self):
         """A bar at 16:00 ET (after-hours, same calendar day) must trigger EOD_CLOSE."""
         _ET = ZoneInfo("America/New_York")

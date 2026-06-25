@@ -135,6 +135,20 @@ class TestSimulateFillShort:
 
 # ── EOD forced exit ────────────────────────────────────────────────────────────
 
+class TestSimulateFillEmpty:
+    def test_empty_bars_returns_none(self):
+        """simulate_fill must return None (not crash) when bars_after_entry is empty."""
+        empty = pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+            index=pd.DatetimeIndex([], tz="UTC"),
+        )
+        result = simulate_fill(
+            empty, direction=Decision.LONG, entry=100.0,
+            stop_loss=95.0, take_profit=105.0, qty=1,
+        )
+        assert result is None
+
+
 class TestSimulateFillEOD:
     def test_eod_exit_at_1555_et(self):
         """Bar exactly at 15:55 ET triggers intraday forced exit."""

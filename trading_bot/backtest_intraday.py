@@ -241,7 +241,9 @@ def simulate_day_trade(
     slippage_pct: float = 0.0,
 ) -> tuple[str, float, str, float, float]:
     """Walk forward bars; force exit by 15:55 ET same calendar day."""
-    entry_date = future_bars.index[0].astimezone(_ET).date() if len(future_bars) else date.today()
+    if future_bars.empty:
+        raise ValueError("simulate_day_trade received empty bars — caller must guard entry_bar_idx + 1 < n")
+    entry_date = future_bars.index[0].astimezone(_ET).date()
     mult = 1 if direction is Decision.LONG else -1
 
     for ts, bar in future_bars.iterrows():

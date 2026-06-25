@@ -140,6 +140,8 @@ def simulate_fill(
     max_bars: int = 78,  # one RTH day of 5-min bars (9:30–15:55 ET = 78 bars)
 ) -> tuple | None:
     """Walk forward bar-by-bar and check if TP or SL is hit."""
+    if bars_after_entry.empty:
+        return None
     for i, (ts, bar) in enumerate(bars_after_entry.head(max_bars).iterrows()):
         # EOD forced exit: intraday strategy must be flat by 15:55 ET (including post-market)
         bar_et = ts.astimezone(_ET)
