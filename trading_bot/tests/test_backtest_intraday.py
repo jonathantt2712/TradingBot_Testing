@@ -195,6 +195,17 @@ class TestSimulateDayTrade:
         )
         assert pnl_slip < pnl_no
 
+    def test_after_hours_bar_triggers_eod_exit(self):
+        """A bar at 16:00 ET (after-hours, same calendar day) must trigger EOD_CLOSE."""
+        _ET = ZoneInfo("America/New_York")
+        after_hours = datetime(2026, 6, 16, 16, 0, tzinfo=_ET).astimezone(timezone.utc)
+        bars = _make_bars([100.0], after_hours)
+        outcome, exit_px, _, _, _ = simulate_day_trade(
+            bars, direction=Decision.LONG, entry=100.0,
+            stop_loss=90.0, take_profit=200.0, qty=10,
+        )
+        assert outcome == "EOD_CLOSE"
+
     def test_pnl_sign_consistent_with_direction(self):
         """A winning LONG has positive pnl; a winning SHORT also has positive pnl."""
         start = _rth_start()

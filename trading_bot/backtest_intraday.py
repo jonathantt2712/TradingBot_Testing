@@ -248,8 +248,8 @@ def simulate_day_trade(
         bar_date = ts.astimezone(_ET).date()
         bar_time = ts.astimezone(_ET).time()
 
-        # Force EOD close at/after 15:55 on same day, or next day open
-        if bar_date > entry_date or (bar_date == entry_date and bar_time.hour == 15 and bar_time.minute >= 55):
+        # Force EOD close at/after 15:55 on same day (including post-market), or next day
+        if bar_date > entry_date or (bar_date == entry_date and (bar_time.hour, bar_time.minute) >= (15, 55)):
             exit_px = float(bar["open"])
             pnl = mult * (exit_px - entry) * qty
             pnl -= abs(entry) * slippage_pct * 2 * qty
