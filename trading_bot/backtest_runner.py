@@ -26,10 +26,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_ET = ZoneInfo("America/New_York")
 
 import numpy as np
 import pandas as pd
@@ -134,10 +137,19 @@ def simulate_fill(
     stop_loss: float,
     take_profit: float,
     qty: float,
-    max_bars: int = 288,  # ~1 trading day of 5-min bars
+    max_bars: int = 78,  # one RTH day of 5-min bars (9:30–15:55 ET = 78 bars)
 ) -> tuple | None:
     """Walk forward bar-by-bar and check if TP or SL is hit."""
     for i, (ts, bar) in enumerate(bars_after_entry.head(max_bars).iterrows()):
+        # EOD forced exit: intraday strategy must be flat by 15:55 ET
+        bar_et = ts.astimezone(_ET)
+        if bar_et.hour == 15 and bar_et.minute >= 55:
+            last_close = float(bar["close"])
+            mult = 1 if direction is Decision.LONG else -1
+            pnl = mult * (last_close - entry) * qty
+            pnl_pct = mult * (last_close - entry) / entry * 100
+            return "TIMEOUT", last_close, str(ts), pnl, pnl_pct
+
         high = float(bar["high"])
         low = float(bar["low"])
 
@@ -182,7 +194,7 @@ async def backtest_ticker(
     all_bars: pd.DataFrame,
     *,
     lookback: int = 200,
-    step_bars: int = 78,   # ~half day of 5-min bars between evaluations
+    step_bars: int = 78,   # one RTH trading day of 5-min bars between evaluations
 ) -> list[TradeRecord]:
     """Walk-forward: evaluate every ~half-day, simulate fills."""
     records: list[TradeRecord] = []
