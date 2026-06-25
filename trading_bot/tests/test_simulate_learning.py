@@ -1,9 +1,13 @@
-"""Unit tests for simulate_learning — trade generator and score helper."""
+"""Unit tests for simulate_learning — trade generator, score helper, and _tag_simulated."""
 from __future__ import annotations
 
+import json
 import random
 
-from simulate_learning import _build_trades, _score_for, _AGENT_SKILL
+import pytest
+
+from simulate_learning import _build_trades, _score_for, _AGENT_SKILL, _tag_simulated
+import simulate_learning as _sl_mod
 
 
 # ── _score_for ─────────────────────────────────────────────────────────────────
@@ -110,3 +114,48 @@ class TestBuildTrades:
         late_wins   = sum(1 for t in trades[-50:] if t["pnl"] > 0)
         # Drift of +0.12 across the run means late should usually beat early
         assert late_wins >= early_wins - 5   # generous tolerance for randomness
+
+
+# ── _tag_simulated ─────────────────────────────────────────────────────────────
+
+class TestTagSimulated:
+    @pytest.fixture(autouse=True)
+    def _patch_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_sl_mod, "_HISTORY_FILE", tmp_path / "h.jsonl")
+        monkeypatch.setattr(_sl_mod, "_WEIGHTS_FILE", tmp_path / "w.json")
+        self.tmp = tmp_path
+
+    def test_history_lines_get_simulated_flag(self):
+        snaps = [{"ts": f"2026-06-{i:02d}", "win_rate": 50.0} for i in range(1, 4)]
+        (self.tmp / "h.jsonl").write_text(
+            "\n".join(json.dumps(s) for s in snaps) + "\n", encoding="utf-8"
+        )
+        _tag_simulated()
+        lines = [
+            json.loads(l) for l in (self.tmp / "h.jsonl").read_text().splitlines() if l.strip()
+        ]
+        assert all(l.get("simulated") is True for l in lines)
+
+    def test_weights_file_gets_simulated_flag(self):
+        (self.tmp / "w.json").write_text(json.dumps({"win_rate_30d": 55.0}), encoding="utf-8")
+        _tag_simulated()
+        w = json.loads((self.tmp / "w.json").read_text())
+        assert w.get("simulated") is True
+
+    def test_original_data_preserved_after_tag(self):
+        snap = {"ts": "2026-06-01", "win_rate": 63.0}
+        (self.tmp / "h.jsonl").write_text(json.dumps(snap) + "\n", encoding="utf-8")
+        _tag_simulated()
+        result = json.loads((self.tmp / "h.jsonl").read_text().strip())
+        assert result["win_rate"] == 63.0
+        assert result["ts"] == "2026-06-01"
+
+    def test_malformed_history_lines_are_dropped(self):
+        content = '{"ts":"2026-06-01","win_rate":50.0}\nNOT JSON\n{"ts":"2026-06-02","win_rate":52.0}\n'
+        (self.tmp / "h.jsonl").write_text(content, encoding="utf-8")
+        _tag_simulated()
+        lines = [l for l in (self.tmp / "h.jsonl").read_text().splitlines() if l.strip()]
+        assert len(lines) == 2   # malformed line is silently dropped
+
+    def test_missing_files_are_noop(self):
+        _tag_simulated()   # no files exist — must not raise

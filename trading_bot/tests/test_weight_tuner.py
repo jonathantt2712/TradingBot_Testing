@@ -211,3 +211,78 @@ def test_single_direction_bias_defaults_to_prev(_isolate_files):
     tuner._run(entries)
     w = _read_weights(_isolate_files)
     assert w["bias"] == "neutral"   # fallback to prev_bias since short_wr is None
+
+
+# ── per-regime tuning ────────────────────────────────────────────────────────
+
+
+def _entry_regime(decision, pnl, scores, regime):
+    return {"decision": decision, "outcome_pnl": pnl, "agent_scores": scores, "regime": regime}
+
+
+def test_regime_params_written_when_enough_trades(_isolate_files):
+    """When a regime has >= _MIN_TRADES trades it gets its own tuned block."""
+    tuner = WeightTuner({"technical": 1.0})
+    entries = [_entry_regime("LONG", 100.0, {"technical": 60}, "risk_on") for _ in range(10)]
+    tuner._run(entries)
+    w = _read_weights(_isolate_files)
+    assert "regime_params" in w
+    assert "risk_on" in w["regime_params"]
+    rp = w["regime_params"]["risk_on"]
+    assert "long_threshold" in rp
+    assert "win_rate_30d" in rp
+
+
+def test_regime_params_absent_when_too_few_trades(_isolate_files):
+    """A regime with fewer than _MIN_TRADES trades must NOT produce a regime block."""
+    tuner = WeightTuner({"technical": 1.0})
+    # 9 risk_on trades (< 10) + 1 neutral to satisfy global MIN_TRADES
+    entries = [_entry_regime("LONG", 100.0, {"technical": 60}, "risk_on") for _ in range(9)]
+    entries += [_entry_regime("LONG", 100.0, {"technical": 60}, "neutral") for _ in range(1)]
+    tuner._run(entries)
+    w = _read_weights(_isolate_files)
+    # Neither regime has enough trades — regime_params must be empty or absent
+    rp = w.get("regime_params", {})
+    assert "risk_on" not in rp
+    assert "neutral" not in rp
+
+
+def test_regime_params_independent_thresholds(_isolate_files):
+    """risk_on and risk_off each get their own thresholds tuned from their own trades."""
+    tuner = WeightTuner({"technical": 1.0})
+    # risk_on: 100% win rate → thresholds loosen
+    risk_on = [_entry_regime("LONG", 100.0, {"technical": 60}, "risk_on") for _ in range(10)]
+    # risk_off: 0% win rate → thresholds tighten
+    risk_off = [_entry_regime("LONG", -100.0, {"technical": 60}, "risk_off") for _ in range(10)]
+    tuner._run(risk_on + risk_off)
+    w = _read_weights(_isolate_files)
+    rp = w["regime_params"]
+    assert rp["risk_on"]["long_threshold"] < rp["risk_off"]["long_threshold"]
+    assert rp["risk_on"]["short_threshold"] > rp["risk_off"]["short_threshold"]
+
+
+def test_regime_unknown_label_ignored(_isolate_files):
+    """Entries with unknown regime labels must not pollute regime_params."""
+    tuner = WeightTuner({"technical": 1.0})
+    entries = [_entry_regime("LONG", 100.0, {"technical": 60}, "bogus_regime") for _ in range(10)]
+    tuner._run(entries)
+    w = _read_weights(_isolate_files)
+    rp = w.get("regime_params", {})
+    assert "bogus_regime" not in rp
+
+
+def test_regime_params_prev_preserved_when_insufficient(_isolate_files):
+    """Pre-existing regime_params for a regime not seen in this run are preserved."""
+    (_isolate_files / "strategy_weights.json").write_text(json.dumps({
+        "long_threshold": 60.0, "short_threshold": 40.0, "bias": "neutral",
+        "regime_params": {
+            "risk_on": {"long_threshold": 62.0, "short_threshold": 38.0},
+        },
+    }))
+    tuner = WeightTuner({"technical": 1.0})
+    # Only neutral trades — risk_on not updated
+    entries = [_entry_regime("LONG", 100.0, {"technical": 60}, "neutral") for _ in range(10)]
+    tuner._run(entries)
+    w = _read_weights(_isolate_files)
+    # risk_on block must be carried forward unchanged
+    assert w["regime_params"]["risk_on"]["long_threshold"] == 62.0
