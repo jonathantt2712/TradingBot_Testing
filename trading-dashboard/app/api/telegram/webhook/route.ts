@@ -53,8 +53,9 @@ export async function GET() {
   const session = await auth()
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   if (!BOT_TOKEN) return NextResponse.json({ error: 'TELEGRAM_BOT_TOKEN not set' }, { status: 503 })
-  const url = process.env.NEXTJS_URL
-  if (!url)  return NextResponse.json({ error: 'NEXTJS_URL not set' }, { status: 503 })
+  const rawUrl = process.env.NEXTJS_URL
+  if (!rawUrl) return NextResponse.json({ error: 'NEXTJS_URL not set' }, { status: 503 })
+  const url = rawUrl.replace(/\/+$/, '')  // strip trailing slash
 
   const webhookBody: Record<string, string> = { url: `${url}/api/telegram/webhook` }
   if (WEBHOOK_SECRET) webhookBody.secret_token = WEBHOOK_SECRET
