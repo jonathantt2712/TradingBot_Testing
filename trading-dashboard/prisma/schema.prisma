@@ -16,6 +16,7 @@ model User {
   alpacaSecret        String
   alpacaPaper         Boolean   @default(true)
   mustChangePassword  Boolean   @default(false)
+  autoExecute         Boolean   @default(false)
   createdAt           DateTime  @default(now())
   telegramChatId      String?
   telegramToken       String?
