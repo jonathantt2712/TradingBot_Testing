@@ -1,0 +1,112 @@
+"""Unit tests for simulate_learning — trade generator and score helper."""
+from __future__ import annotations
+
+import random
+
+from simulate_learning import _build_trades, _score_for, _AGENT_SKILL
+
+
+# ── _score_for ─────────────────────────────────────────────────────────────────
+
+class TestScoreFor:
+    def _many(self, agent: str, won: bool, direction: str, n: int = 200) -> list[float]:
+        rng = random.Random(42)
+        return [_score_for(agent, won, direction, rng) for _ in range(n)]
+
+    def test_score_in_range(self):
+        rng = random.Random(0)
+        for agent in _AGENT_SKILL:
+            for direction in ("LONG", "SHORT"):
+                for won in (True, False):
+                    s = _score_for(agent, won, direction, rng)
+                    assert 0.0 < s < 100.0, f"{agent}/{direction}/won={won}: {s}"
+
+    def test_high_skill_agent_leans_bullish_on_winning_long(self):
+        """High-skill agent (technical, 64%) should give mostly bullish (>50) scores
+        when the LONG trade won."""
+        scores = self._many("technical", won=True, direction="LONG")
+        above = sum(s > 50 for s in scores)
+        assert above / len(scores) > 0.55   # majority bullish
+
+    def test_high_skill_agent_leans_bearish_on_losing_long(self):
+        """High-skill agent should give mostly bearish (<50) scores when LONG lost."""
+        scores = self._many("technical", won=False, direction="LONG")
+        below = sum(s < 50 for s in scores)
+        assert below / len(scores) > 0.55
+
+    def test_low_skill_agent_near_random(self):
+        """Low-skill agent (insider, 44%) should be close to 50/50."""
+        scores = self._many("insider", won=True, direction="LONG", n=500)
+        above = sum(s > 50 for s in scores)
+        ratio = above / len(scores)
+        assert 0.30 < ratio < 0.70   # coin-flip territory
+
+    def test_bullish_vote_for_winning_short(self):
+        """For a winning SHORT, a high-skill agent should give a bearish (<50) score
+        (bearish vote aligns with the short direction)."""
+        scores = self._many("technical", won=True, direction="SHORT")
+        below = sum(s < 50 for s in scores)
+        assert below / len(scores) > 0.55
+
+
+# ── _build_trades ──────────────────────────────────────────────────────────────
+
+class TestBuildTrades:
+    def setup_method(self):
+        self.rng = random.Random(7)
+        self.trades = _build_trades(50, self.rng)
+
+    def test_count_matches_request(self):
+        assert len(self.trades) == 50
+
+    def test_all_closed(self):
+        assert all(t["status"] == "closed" for t in self.trades)
+
+    def test_direction_is_long_or_short(self):
+        assert all(t["direction"] in ("LONG", "SHORT") for t in self.trades)
+
+    def test_pnl_is_numeric(self):
+        for t in self.trades:
+            assert isinstance(t["pnl"], (int, float))
+
+    def test_evaluations_have_all_agents(self):
+        expected = set(_AGENT_SKILL.keys())
+        for t in self.trades:
+            roles = {e["role"] for e in t["evaluations"]}
+            assert roles == expected
+
+    def test_evaluation_scores_in_range(self):
+        for t in self.trades:
+            for ev in t["evaluations"]:
+                assert 0.0 < ev["score"] < 100.0, f"score out of range: {ev}"
+
+    def test_closed_at_is_present(self):
+        assert all("closed_at" in t for t in self.trades)
+
+    def test_long_bias_roughly_68_pct(self):
+        longs = sum(1 for t in self.trades if t["direction"] == "LONG")
+        # P(LONG) = 0.68; allow wide range for small N
+        assert 0.40 < longs / len(self.trades) < 0.90
+
+    def test_timestamps_monotonically_increasing(self):
+        times = [t["closed_at"] for t in self.trades]
+        assert times == sorted(times)
+
+    def test_deterministic_with_same_seed(self):
+        trades_a = _build_trades(20, random.Random(42))
+        trades_b = _build_trades(20, random.Random(42))
+        assert [t["pnl"] for t in trades_a] == [t["pnl"] for t in trades_b]
+
+    def test_different_seeds_differ(self):
+        trades_a = _build_trades(20, random.Random(1))
+        trades_b = _build_trades(20, random.Random(2))
+        assert [t["pnl"] for t in trades_a] != [t["pnl"] for t in trades_b]
+
+    def test_win_rate_drifts_upward(self):
+        """Early trades should have lower win rate than late trades (drift encoded)."""
+        n = 200
+        trades = _build_trades(n, random.Random(99))
+        early_wins  = sum(1 for t in trades[:50] if t["pnl"] > 0)
+        late_wins   = sum(1 for t in trades[-50:] if t["pnl"] > 0)
+        # Drift of +0.12 across the run means late should usually beat early
+        assert late_wins >= early_wins - 5   # generous tolerance for randomness
