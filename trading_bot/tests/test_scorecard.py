@@ -126,3 +126,19 @@ def test_one_line_and_format_are_safe(tmp_path):
     sc = _card(tmp_path, [10, -5, 20])
     assert "Scorecard:" in one_line(sc)
     assert "STRATEGY SCORECARD" in format_scorecard(sc)
+
+
+def test_format_scorecard_only_long_trades_no_none_in_output(tmp_path):
+    """When all trades are LONG (short_win_rate=None), format must not print 'None%'."""
+    sc = _card(tmp_path, [100, -50, 80], directions=["LONG", "LONG", "LONG"])
+    out = format_scorecard(sc)
+    assert "None%" not in out
+    assert sc.short_win_rate is None          # confirm the condition being tested
+
+
+def test_format_scorecard_only_short_trades_no_none_in_output(tmp_path):
+    """When all trades are SHORT (long_win_rate=None), format must not print 'None%'."""
+    sc = _card(tmp_path, [100, -50], directions=["SHORT", "SHORT"])
+    out = format_scorecard(sc)
+    assert "None%" not in out
+    assert sc.long_win_rate is None

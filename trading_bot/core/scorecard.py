@@ -226,8 +226,9 @@ def format_scorecard(sc: Scorecard) -> str:
             f"Per-trade Sharpe: {sc.sharpe_per_trade}   (t-stat {sc.t_stat})",
         ]
         if sc.long_win_rate is not None or sc.short_win_rate is not None:
-            rows.append(
-                f"By direction    : LONG {sc.long_win_rate}% / SHORT {sc.short_win_rate}%")
+            lw = f"{sc.long_win_rate}%" if sc.long_win_rate is not None else "n/a"
+            sw = f"{sc.short_win_rate}%" if sc.short_win_rate is not None else "n/a"
+            rows.append(f"By direction    : LONG {lw} / SHORT {sw}")
     if sc.avg_slippage_bps is not None:
         rows.append(f"Avg slippage    : {sc.avg_slippage_bps:+.1f} bps   (over {sc.fills} fills)")
     rows += [
