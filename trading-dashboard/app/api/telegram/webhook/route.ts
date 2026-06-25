@@ -46,19 +46,38 @@ const INTRO = [
   '🔗 <b>To connect your account:</b> go to your <b>Profile page</b> on the dashboard and click <b>Connect Telegram</b>.',
 ].join('\n')
 
-/** Register the webhook with Telegram — call once after deploy */
+/** Register the webhook and return diagnostic info */
 export async function GET() {
   if (!BOT_TOKEN) return NextResponse.json({ error: 'TELEGRAM_BOT_TOKEN not set' }, { status: 503 })
   const url = process.env.NEXTJS_URL
   if (!url)  return NextResponse.json({ error: 'NEXTJS_URL not set' }, { status: 503 })
 
-  const res  = await fetch(`${TG_API}/setWebhook`, {
+  const webhookUrl = `${url}/api/telegram/webhook`
+
+  // Register webhook
+  const setRes  = await fetch(`${TG_API}/setWebhook`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ url: `${url}/api/telegram/webhook` }),
+    body:    JSON.stringify({ url: webhookUrl }),
   })
-  const data = await res.json()
-  return NextResponse.json(data)
+  const setData = await setRes.json()
+
+  // Get current webhook info for diagnostics
+  const infoRes  = await fetch(`${TG_API}/getWebhookInfo`)
+  const infoData = await infoRes.json()
+
+  // Get bot info
+  const meRes  = await fetch(`${TG_API}/getMe`)
+  const meData = await meRes.json()
+
+  return NextResponse.json({
+    registered:   setData,
+    webhook_info: infoData?.result,
+    bot:          meData?.result ? { username: meData.result.username, id: meData.result.id } : null,
+    target_url:   webhookUrl,
+    token_set:    !!BOT_TOKEN,
+    nextjs_url:   url,
+  })
 }
 
 /** Handle incoming Telegram update */
