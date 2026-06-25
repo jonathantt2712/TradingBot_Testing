@@ -89,6 +89,16 @@ def test_weak_edge_is_low_confidence(tmp_path):
     assert sc.confidence == "low"
 
 
+def test_medium_sized_sample_with_real_edge_is_medium_confidence(tmp_path):
+    """n in [30,100) + t >= 2 → medium confidence: real edge but needs more data."""
+    # 50 trades: 38 wins of $60, 12 losses of -$30 → expectancy ≈ $38, low variance
+    pnls = [60] * 38 + [-30] * 12
+    sc = _card(tmp_path, pnls)
+    assert 30 <= sc.trades < 100
+    assert sc.t_stat >= 2.0
+    assert sc.confidence == "medium"
+
+
 def test_strong_large_sample_is_high_confidence(tmp_path):
     # 120 trades, consistent positive expectancy, tight variance -> high.
     pnls = ([50] * 70 + [-30] * 50)   # win rate 58%, strong positive EV
