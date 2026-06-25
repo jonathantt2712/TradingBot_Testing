@@ -2402,9 +2402,7 @@ async def _background_loop() -> None:
         except Exception as exc:
             logger.debug("Regime refresh error: %s", exc)
 
-        # Backoff: after 3 consecutive errors, wait 5× longer
-        wait = 180 if consecutive_errors < 3 else 900
-        await asyncio.sleep(wait)
+        await asyncio.sleep(180)
 
         try:
             await _run_market_scan()
