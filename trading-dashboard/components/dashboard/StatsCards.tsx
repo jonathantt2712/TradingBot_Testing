@@ -49,14 +49,14 @@ export function StatsCards({ stats }: Props) {
       {cards.map((c) => {
         const a = accentMap[c.accent as keyof typeof accentMap]
         return (
-          <div key={c.label} className="card p-5 animate-slide-up">
-            <div className="flex items-start justify-between">
-              <div>
+          <div key={c.label} className="card p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
                 <p className="stat-label">{c.label}</p>
-                <p className={cn('mt-1 text-2xl font-bold tabular-nums', a.text)}>{c.value}</p>
-                <p className="mt-1 text-xs text-muted">{c.sub}</p>
+                <p className={cn('mt-0.5 text-xl font-bold tabular-nums leading-none', a.text)}>{c.value}</p>
+                <p className="mt-0.5 text-xs text-muted">{c.sub}</p>
               </div>
-              <div className={cn('flex h-9 w-9 items-center justify-center rounded-lg border', a.bg, a.border)}>
+              <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border', a.bg, a.border)}>
                 <c.icon className={cn('h-4 w-4', a.text)} />
               </div>
             </div>

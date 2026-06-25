@@ -153,24 +153,7 @@ export function LiveDashboard({
 
   return (
     <>
-      {/* Scan stats strip */}
-      {scanStats && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-bg-border bg-bg-card px-4 py-2 text-xs text-muted">
-          <span className="flex items-center gap-1.5 font-medium">
-            <span className={cn('h-2 w-2 rounded-full', scanStats.market_open ? 'bg-bull' : 'bg-bear')} />
-            {scanStats.market_open ? 'Market Open' : 'Market Closed'}
-          </span>
-          {scanStats.last_scan_at && (
-            <span>Last scan: <span className="text-subtle">{relativeTime(scanStats.last_scan_at)}</span></span>
-          )}
-          <span>Scans today: <span className="text-subtle">{scanStats.scans_today ?? '—'}</span></span>
-          <span>Tickers scanned: <span className="text-subtle">{scanStats.tickers_scanned ?? '—'}</span></span>
-          {(scanStats.scan_errors ?? 0) > 0 && (
-            <span className="text-bear font-semibold">Errors: {scanStats.scan_errors}</span>
-          )}
-        </div>
-      )}
-
+      {/* Circuit breaker — full width, above everything */}
       {circuitBreaker?.halted && (
         <div className="rounded-xl border border-bear/40 bg-bear/10 px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -190,17 +173,39 @@ export function LiveDashboard({
         </div>
       )}
 
-      <StatsCards stats={stats} />
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_220px]">
-        <PnLChart data={pnl} />
+      {/* Top section: [scan strip + stat cards] left | [market regime] right */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_240px] lg:items-start">
+        <div className="space-y-3">
+          {/* Scan stats strip */}
+          {scanStats && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-bg-border bg-bg-card px-4 py-2 text-xs text-muted">
+              <span className="flex items-center gap-1.5 font-medium">
+                <span className={cn('h-2 w-2 rounded-full', scanStats.market_open ? 'bg-bull' : 'bg-bear')} />
+                {scanStats.market_open ? 'Market Open' : 'Market Closed'}
+              </span>
+              {scanStats.last_scan_at && (
+                <span>Last scan: <span className="text-subtle">{relativeTime(scanStats.last_scan_at)}</span></span>
+              )}
+              <span>Scans today: <span className="text-subtle">{scanStats.scans_today ?? '—'}</span></span>
+              <span>Tickers scanned: <span className="text-subtle">{scanStats.tickers_scanned ?? '—'}</span></span>
+              {(scanStats.scan_errors ?? 0) > 0 && (
+                <span className="text-bear font-semibold">Errors: {scanStats.scan_errors}</span>
+              )}
+            </div>
+          )}
+          <StatsCards stats={stats} />
+        </div>
         <RegimeIndicator regime={regime} />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
+      {/* Middle: equity curve (left) | sector heat (right) */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_280px]">
+        <PnLChart data={pnl} />
         <SectorHeatmap sectors={sectors} />
-        <PositionsTable positions={positions} onClosed={handleClosed} />
       </div>
+
+      {/* Bottom: open positions full width */}
+      <PositionsTable positions={positions} onClosed={handleClosed} />
     </>
   )
 }
