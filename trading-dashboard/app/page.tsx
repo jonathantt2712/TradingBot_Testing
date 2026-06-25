@@ -110,14 +110,13 @@ export default async function DashboardPage() {
             ? <span className="flex items-center gap-1.5 text-xs text-bull"><span className="h-1.5 w-1.5 rounded-full bg-bull animate-pulse-slow" />Live</span>
             : <span className="flex items-center gap-1.5 text-xs text-caution"><span className="h-1.5 w-1.5 rounded-full bg-caution" />Demo</span>
           }
+          <HealthBanner issues={issues} />
           <ScanButton />
           <RefreshButton />
         </div>
       </div>
 
       <AccountBar account={account} error={accountError} tradingMode={tradingMode} />
-
-      <HealthBanner issues={issues} />
 
       <LiveDashboard
         initialStats={stats}
