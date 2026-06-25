@@ -26,17 +26,19 @@ export function SectorHeatmap({ sectors: initialSectors }: Props) {
         }
       } catch {}
     }
+    poll() // מיידי — גם אם SSR הגיע ריק
     const id = setInterval(poll, 3 * 60_000)
     return () => clearInterval(id)
   }, [])
 
   const sorted = [...sectors].sort((a, b) => b.score - a.score)
 
-  if (sorted.length === 0) return null
-
   return (
     <div className="card p-4">
       <p className="stat-label mb-3">Sector Heat</p>
+      {sorted.length === 0 ? (
+        <p className="text-xs text-muted">Waiting for next scan...</p>
+      ) : null}
       <div className="grid grid-cols-2 gap-1.5">
         {sorted.map(s => (
           <div
