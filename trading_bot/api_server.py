@@ -1484,9 +1484,12 @@ async def _run_market_scan_inner(force: bool = False) -> None:
                     elif score < 47:
                         direction = "SHORT"
                     else:
-                        logger.debug("%s score=%.1f in dead zone — no rec", sym, score)
-                        _rej(sym, f"Score neutral zone ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
-                        continue
+                        # Agent returned a neutral/uncertain score — fall through to
+                        # the price-momentum fallback instead of dropping the ticker.
+                        # This commonly happens when the LLM is throttled and FinBERT
+                        # gives conservative mid-range composites for most stocks.
+                        logger.debug("%s score=%.1f neutral — using price fallback", sym, score)
+                        agent_used = False
 
                     # Cap min_score at 55 so adaptive tuning can't choke all signals.
                     effective_min = min(min_score, 55)
