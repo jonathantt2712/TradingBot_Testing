@@ -1306,13 +1306,13 @@ async def _run_market_scan_inner(force: bool = False) -> None:
         return
 
     if not _is_market_open():
-        # Off-hours: throttle to one scan per hour. Each scan runs LLM agents
-        # on ~20 symbols; every 5 min all night burns quota for stale signals.
+        # Off-hours: throttle to once every 15 minutes (was 60) to keep signals
+        # reasonably fresh outside regular session while limiting LLM quota burn.
         last = _scan_stats.get("last_scan_at")
         if last and not force:
             try:
                 age_min = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.fromisoformat(last)).total_seconds() / 60
-                if age_min < 60:
+                if age_min < 15:
                     return
             except Exception:
                 pass
@@ -2402,8 +2402,8 @@ async def _background_loop() -> None:
         except Exception as exc:
             logger.debug("Regime refresh error: %s", exc)
 
-        # Backoff: after 3 consecutive errors, wait 10× longer
-        wait = 300 if consecutive_errors < 3 else 3000
+        # Backoff: after 3 consecutive errors, wait 5× longer
+        wait = 180 if consecutive_errors < 3 else 900
         await asyncio.sleep(wait)
 
         try:
