@@ -194,8 +194,18 @@ export function LiveDashboard({
                   {issue.action}
                 </div>
               ))}
+              <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-bg-border pt-3">
+                <button
+                  onClick={async () => {
+                    await fetch('/api/bot/reset-weights', { method: 'POST' })
+                  }}
+                  className="rounded-md border border-caution/30 px-2 py-0.5 text-[10px] text-caution hover:bg-caution/10 transition-colors"
+                >
+                  Reset Strategy Weights
+                </button>
+              </div>
               {scanStats && (
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-bg-border pt-3 text-[11px] text-muted">
+                <div className="flex flex-wrap gap-x-4 gap-y-1 pt-2 text-[11px] text-muted">
                   <span className="flex items-center gap-1.5">
                     <span className={cn('h-1.5 w-1.5 rounded-full', scanStats.market_open ? 'bg-bull' : 'bg-muted')} />
                     {scanStats.market_open ? 'Market Open' : 'Market Closed'}

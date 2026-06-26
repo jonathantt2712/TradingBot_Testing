@@ -292,12 +292,12 @@ def _kelly_qty(
 DEFAULT_WEIGHTS: Dict[str, Any] = {
     "chg_weight":            4.0,
     "intra_weight":          2.0,
-    "min_chg_pct":           0.3,
+    "min_chg_pct":           0.15,
     "stop_pct":              0.02,
     "tp_pct":                0.05,
     "score_floor":           20,
     "score_ceil":            80,
-    "min_score":             40,
+    "min_score":             35,
     "time_window_minutes":   45,
     "atr_stop_multiple":     2.0,
     "atr_target_multiple":   3.0,
@@ -771,12 +771,12 @@ def _update_strategy_weights() -> None:
     weights["last_updated"]   = datetime.utcnow().isoformat()
 
     if win_rate > 0.60:
-        weights["min_score"]            = max(30,  weights["min_score"] - 1)
+        weights["min_score"]            = max(30,  weights["min_score"] - 2)
         weights["time_window_minutes"]   = min(60,  weights["time_window_minutes"] + 2)
         weights["atr_target_multiple"]   = min(5.0, weights["atr_target_multiple"] * 1.03)
         weights["chg_weight"]            = min(10.0, weights["chg_weight"] * 1.02)
     elif win_rate < 0.40:
-        weights["min_score"]            = min(70,  weights["min_score"] + 2)
+        weights["min_score"]            = min(52,  weights["min_score"] + 2)
         weights["time_window_minutes"]   = max(20,  weights["time_window_minutes"] - 5)
         weights["atr_stop_multiple"]     = max(1.0, weights["atr_stop_multiple"] * 0.95)
         weights["chg_weight"]            = max(1.5, weights["chg_weight"] * 0.95)
@@ -1335,14 +1335,18 @@ async def _run_market_scan() -> None:
 
                 # Dashboard "ideas" gate is looser (55/45 + self-tuned
                 # min_score) than the bot's trade gate — keep it that way.
-                if score > 55:
+                if score > 52:
                     direction = "LONG"
-                elif score < 45:
+                elif score < 48:
                     direction = "SHORT"
                 else:
                     continue
 
-                if score < min_score:
+                # min_score gate: for LONG, score must be high enough;
+                # for SHORT, invert (score must be LOW enough — further from 100).
+                if direction == "LONG" and score < min_score:
+                    continue
+                if direction == "SHORT" and (100 - score) < min_score:
                     continue
 
                 agent_used = True
@@ -1372,9 +1376,11 @@ async def _run_market_scan() -> None:
                 chg_w   = weights.get("chg_weight", 4.0)
                 intra_w = weights.get("intra_weight", 2.0)
                 score   = min(max(50 + chg_pct * chg_w + intra_pct * intra_w, score_floor), score_ceil)
-                if score < min_score:
+                direction = "LONG" if chg_pct > 0 else "SHORT"
+                if direction == "LONG" and score < min_score:
                     continue
-                direction   = "LONG" if chg_pct > 0 else "SHORT"
+                if direction == "SHORT" and (100 - score) < min_score:
+                    continue
                 entry       = round(price, 2)
                 d           = 1 if direction == "LONG" else -1
                 stop_loss   = round(entry * (1 - d * stop_pct), 2)
@@ -2113,6 +2119,14 @@ async def reset_circuit_breaker():
     })
     logger.info("Circuit breaker manually reset")
     return {"status": "reset", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/api/reset-weights", dependencies=[Depends(_verify_bot_secret)])
+async def reset_strategy_weights():
+    """Reset strategy_weights.json to factory defaults (clears adaptive tuning)."""
+    _save_weights({**DEFAULT_WEIGHTS})
+    logger.info("Strategy weights reset to factory defaults")
+    return {"status": "reset", "weights": DEFAULT_WEIGHTS, "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.get("/api/rejections", dependencies=[Depends(_verify_bot_secret)])
