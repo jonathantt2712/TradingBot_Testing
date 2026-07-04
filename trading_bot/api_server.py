@@ -82,6 +82,13 @@ EOD_REVIEW_MIN_BEFORE     = int(os.getenv("EOD_REVIEW_MIN_BEFORE", "25"))       
 # instant a trade closes).
 STRATEGY_LOOP_INTERVAL_MIN = int(os.getenv("STRATEGY_LOOP_INTERVAL_MIN", "60"))
 
+# Nightly self-improvement: after the close, re-run the walk-forward optimizer
+# on fresh data and auto-apply the best params — ONLY when they validated
+# positive on the held-out split. Set AUTO_OPTIMIZE=false to require the
+# dashboard's manual "Apply Optimal Params" instead.
+AUTO_OPTIMIZE         = os.getenv("AUTO_OPTIMIZE", "true").lower() in ("1", "true", "yes")
+AUTO_OPTIMIZE_HOUR_ET = int(os.getenv("AUTO_OPTIMIZE_HOUR_ET", "18"))  # >= this hour ET, weekdays
+
 # Autonomous paper executor (Railway). OFF by default. When armed it places
 # Alpaca PAPER bracket orders for strong recommendations, applying the SAME
 # entry guards as /api/execute. Arm on Railway ONLY when no PC bot is running
@@ -877,7 +884,15 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
 
     if changed_ids:
         merged = await _save_trade_changes(trades, changed_ids)
+        # Learn from the freshly closed trades immediately: agent re-weighting
+        # (WeightTuner) + the win-rate self-tuner (ATR/score refinements +
+        # win_rate_30d, which also feeds Kelly sizing and the DecisionAgent's
+        # performance context).
         _drive_weight_tuner(merged)
+        try:
+            _update_strategy_weights()
+        except Exception:
+            logger.debug("self-tuner update on trade close failed", exc_info=True)
 
 
 # === Strategy weight learning ===
@@ -890,6 +905,12 @@ def _update_strategy_weights() -> None:
     recent = closed[-20:]
     if len(recent) < 15:
         return
+    # Only learn when NEW outcomes exist. update_count gates Kelly sizing
+    # ("no size-up without track record"), so it must count actual resolved
+    # trades, not how many times this function ran on unchanged data.
+    if len(closed) == weights.get("tuned_trade_count"):
+        return
+    weights["tuned_trade_count"] = len(closed)
 
     wins         = [t for t in recent if (t.get("pnl") or 0) > 0]
     long_trades  = [t for t in recent if t.get("direction") == "LONG"]
@@ -1933,6 +1954,105 @@ async def _run_optimizer() -> None:
         _optimizer_stats["running"] = False
 
 
+def _apply_optimizer_params(*, require_validated: bool, source: str) -> Dict[str, Any]:
+    """Apply the optimizer's best params to strategy_weights.json (live config).
+
+    Guards:
+      • OOS/backtest profit must be positive (always).
+      • ``require_validated=True`` (the autonomous path) additionally demands a
+        walk-forward result whose held-out split had enough trades — the bot
+        must never self-apply params that were only curve-fit in-sample.
+
+    Reads optimization_results.json from the volume when attached — the
+    optimizer writes there (volume_dir() or repo root), so reading the repo
+    root unconditionally would miss every result on Railway.
+    """
+    try:
+        data = json.loads(((_VOLUME or _REPO_ROOT) / "optimization_results.json").read_text())
+    except Exception:
+        return {"status": "error", "reason": "no optimizer results found — run the optimizer first"}
+
+    best   = data.get("best") or {}
+    params = best.get("params") or {}
+    if not params:
+        return {"status": "error", "reason": "optimizer results have no best params"}
+
+    metrics   = best.get("oos") or best        # OOS metrics when walk-forward validated
+    validated = "oos" in best and bool(best.get("validated", True))
+    if require_validated and not validated:
+        return {
+            "status": "rejected",
+            "reason": "result is not walk-forward validated (or held-out split had too few "
+                      "trades) — autonomous apply requires out-of-sample evidence",
+        }
+    oos_pnl   = metrics.get("total_pnl")
+    if oos_pnl is None:
+        return {"status": "error", "reason": "optimizer results missing profit metric"}
+    if oos_pnl <= 0:
+        return {
+            "status": "rejected",
+            "reason": f"{'out-of-sample' if validated else 'backtest'} profit is "
+                      f"${oos_pnl:.0f} (not positive) — refusing to apply params that "
+                      f"would not be profitable live. Re-run with a longer --days or wider grid.",
+        }
+
+    mapping = {
+        "LONG_THRESHOLD":      "long_threshold",
+        "SHORT_THRESHOLD":     "short_threshold",
+        "ATR_STOP_MULTIPLE":   "atr_stop_multiple",
+        "ATR_TARGET_MULTIPLE": "atr_target_multiple",
+    }
+    weights = _load_weights()
+    locked: set = set(weights.get("manual_overrides") or {})
+    applied: Dict[str, float] = {}
+    for src, dst in mapping.items():
+        if src in params and dst not in locked:
+            weights[dst] = float(params[src])
+            applied[dst] = float(params[src])
+    weights["applied_from_optimizer_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    weights["applied_by"]                = source
+    weights["applied_oos_pnl"]           = round(float(oos_pnl), 2)
+    weights["live_tuning_active"]        = True   # let the live bot honor these params
+    _save_weights(weights)
+
+    logger.info("Applied optimizer params (%s): %s (OOS PnL=$%.0f)", source, applied, oos_pnl)
+    return {
+        "status":    "applied",
+        "applied":   applied,
+        "oos_pnl":   round(float(oos_pnl), 2),
+        "validated": validated,
+        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+    }
+
+
+async def _auto_improve_cycle() -> None:
+    """One nightly self-improvement pass: re-optimize on fresh data, then apply
+    the winner ONLY if it survived walk-forward validation with positive
+    held-out profit. The applied thresholds/ATR multiples reach the live bot
+    without a restart (strategy_refresh_loop / PortfolioManager re-read
+    strategy_weights.json), and the WeightTuner keeps re-weighting agents from
+    every closed trade — together this is the always-on learning loop.
+    """
+    await _run_optimizer()
+    if _optimizer_stats.get("last_status") != "ok":
+        logger.info("Auto-improve: optimizer did not finish cleanly — nothing applied")
+        return
+    result = _apply_optimizer_params(require_validated=True, source="auto")
+    status = result.get("status")
+    if status == "applied":
+        msg = (f"Auto-improve: applied walk-forward-validated params "
+               f"{result.get('applied')} (OOS PnL=${result.get('oos_pnl', 0):.0f})")
+        logger.info(msg)
+        if _telegram is not None and _telegram.enabled:
+            try:
+                await _telegram.send_alert([msg])
+            except Exception:
+                logger.debug("auto-improve telegram notify failed", exc_info=True)
+    else:
+        logger.info("Auto-improve: params NOT applied (%s) — %s",
+                    status, result.get("reason", ""))
+
+
 async def _eod_snapshot(session: aiohttp.ClientSession) -> None:
     """Record daily P&L vs SPY/QQQ benchmark at ~15:55 ET."""
     try:
@@ -2409,6 +2529,7 @@ async def _background_loop() -> None:
     consecutive_errors = 0
     last_day = ""
     last_backtest_day = ""
+    last_optimize_day = ""
     last_snapshot_day  = ""
     last_premarket_day = ""
     last_eod_extend_day = ""
@@ -2445,6 +2566,16 @@ async def _background_loop() -> None:
                     and now_et.hour >= 17):
                 last_backtest_day = today
                 asyncio.create_task(_run_backtest())
+
+        # Nightly self-improvement: optimizer + validated auto-apply, once per
+        # weekday evening (staggered after the 17:00 backtest — both are heavy).
+        if _ET is not None and AUTO_OPTIMIZE:
+            now_et = datetime.now(_ET)
+            if (today != last_optimize_day
+                    and now_et.weekday() < 5
+                    and now_et.hour >= AUTO_OPTIMIZE_HOUR_ET):
+                last_optimize_day = today
+                asyncio.create_task(_auto_improve_cycle())
 
         # Pre-market gap scanner: runs once between 9:00–9:25 ET on weekdays
         if _ET is not None and _ALPACA_KEY and _ALPACA_SECRET:
@@ -3375,59 +3506,11 @@ def get_optimizer_log():
 def apply_optimal_params():
     """Apply the optimizer's best params to LIVE trading — no redeploy.
 
-    Writes the tuned LONG/SHORT thresholds + ATR multiples into
-    strategy_weights.json, which the live RiskAgent and PortfolioManager read at
-    runtime. Guard: refuses to apply params whose out-of-sample (held-out) profit
-    is not positive — those would not be expected to make money live.
+    Manual (dashboard) apply: honors the OOS-positive guard but, like before,
+    also accepts a full-window (unvalidated) positive result — the operator is
+    in the loop to judge it.
     """
-    try:
-        data = json.loads((_REPO_ROOT / "optimization_results.json").read_text())
-    except Exception:
-        return {"status": "error", "reason": "no optimizer results found — run the optimizer first"}
-
-    best   = data.get("best") or {}
-    params = best.get("params") or {}
-    if not params:
-        return {"status": "error", "reason": "optimizer results have no best params"}
-
-    metrics   = best.get("oos") or best        # OOS metrics when walk-forward validated
-    validated = "oos" in best
-    oos_pnl   = metrics.get("total_pnl")
-    if oos_pnl is None:
-        return {"status": "error", "reason": "optimizer results missing profit metric"}
-    if oos_pnl <= 0:
-        return {
-            "status": "rejected",
-            "reason": f"{'out-of-sample' if validated else 'backtest'} profit is "
-                      f"${oos_pnl:.0f} (not positive) — refusing to apply params that "
-                      f"would not be profitable live. Re-run with a longer --days or wider grid.",
-        }
-
-    mapping = {
-        "LONG_THRESHOLD":      "long_threshold",
-        "SHORT_THRESHOLD":     "short_threshold",
-        "ATR_STOP_MULTIPLE":   "atr_stop_multiple",
-        "ATR_TARGET_MULTIPLE": "atr_target_multiple",
-    }
-    weights = _load_weights()
-    applied: Dict[str, float] = {}
-    for src, dst in mapping.items():
-        if src in params:
-            weights[dst] = float(params[src])
-            applied[dst] = float(params[src])
-    weights["applied_from_optimizer_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-    weights["applied_oos_pnl"]           = round(float(oos_pnl), 2)
-    weights["live_tuning_active"]        = True   # let the live bot honor these params
-    _save_weights(weights)
-
-    logger.info("Applied optimizer params to live config: %s (OOS PnL=$%.0f)", applied, oos_pnl)
-    return {
-        "status":    "applied",
-        "applied":   applied,
-        "oos_pnl":   round(float(oos_pnl), 2),
-        "validated": validated,
-        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-    }
+    return _apply_optimizer_params(require_validated=False, source="operator")
 
 
 @app.post("/api/optimize/reset", dependencies=[Depends(_verify_bot_secret)])
