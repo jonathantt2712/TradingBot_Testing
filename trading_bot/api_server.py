@@ -823,9 +823,13 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
                 continue
 
             # ── Real Alpaca bracket order ──────────────────────────────────
+            # nested=true is required for Alpaca to include the bracket's
+            # child legs — without it "legs" is absent and TP/SL exits are
+            # never detected here.
             async with session.get(
                 f"{_BROKER_BASE}/v2/orders/{order_id}",
                 headers=_ALPACA_HEADERS,
+                params={"nested": "true"},
                 timeout=aiohttp.ClientTimeout(total=8),
             ) as r:
                 if r.status != 200:
@@ -893,6 +897,165 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             _update_strategy_weights()
         except Exception:
             logger.debug("self-tuner update on trade close failed", exc_info=True)
+
+
+# === Broker ↔ trades.json reconciliation ===
+
+RECONCILE_INTERVAL_MIN = int(os.getenv("RECONCILE_INTERVAL_MIN", "10"))
+
+_TERMINAL_UNFILLED = ("canceled", "cancelled", "expired", "rejected", "done_for_day")
+
+
+def _classify_reconciliation(trade: dict, broker_symbols: set,
+                             order_status: Optional[dict]) -> str:
+    """Pure drift decision for one JSON-open trade vs the actual broker book.
+
+    Returns:
+      "keep"   — no action (still held, simulated, or evidence inconclusive)
+      "cancel" — entry never filled and the order is terminally dead
+      "close"  — entry filled but the broker is flat (manual close, EOD
+                 flatten via close_all, broker-side liquidation): the exit
+                 monitor can't see these because no bracket leg "fills".
+
+    Never guesses: an unknown/pending order state keeps the trade open.
+    """
+    order_id = str(trade.get("order_id") or "")
+    if not order_id or order_id.startswith("PAPER-"):
+        return "keep"                      # simulated — no broker book to compare
+    sym = str(trade.get("ticker", "")).upper()
+    if sym in broker_symbols:
+        return "keep"                      # still held — healthy
+
+    if not order_status:
+        return "keep"                      # can't verify the entry order — don't guess
+    status = str(order_status.get("status") or "").lower()
+    filled = float(order_status.get("filled_qty") or 0)
+    if status in _TERMINAL_UNFILLED and filled <= 0:
+        return "cancel"
+    if status == "filled" or filled > 0:
+        return "close"
+    return "keep"
+
+
+async def _reconcile_trades(session: aiohttp.ClientSession) -> None:
+    """Detect and repair drift between trades.json and the actual broker book.
+
+    Repairs only the safe direction (JSON says open, broker verifiably flat).
+    The opposite direction — broker positions nobody is tracking (orphaned
+    bracket, manual trade on the shared account) — is REPORTED on the health
+    board, never auto-closed: it may be a human's position.
+    """
+    from core import health
+
+    # Actual broker book. On failure skip the cycle — never reconcile blind.
+    try:
+        async with session.get(
+            f"{_BROKER_BASE}/v2/positions",
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status != 200:
+                return
+            positions = await r.json()
+    except Exception:
+        return
+    broker_symbols = {str(p.get("symbol", "")).upper()
+                      for p in (positions if isinstance(positions, list) else [])}
+
+    trades = _load(TRADES_FILE, [])
+    if not isinstance(trades, list):
+        return
+    open_trades = [t for t in trades if t.get("status") == "open"]
+
+    changed_ids: set = set()
+    for trade in open_trades:
+        order_id = str(trade.get("order_id") or "")
+        sym = str(trade.get("ticker", "")).upper()
+        if not order_id or order_id.startswith("PAPER-") or sym in broker_symbols:
+            continue
+
+        # Verify the entry order before deciding anything.
+        order_status = None
+        try:
+            async with session.get(
+                f"{_BROKER_BASE}/v2/orders/{order_id}",
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as r:
+                if r.status == 200:
+                    order_status = await r.json()
+        except Exception:
+            pass
+
+        action = _classify_reconciliation(trade, broker_symbols, order_status)
+        if action == "cancel":
+            trade["status"] = "cancelled"
+            trade["closed_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+            trade["exit_reason"] = "reconciled_never_filled"
+            changed_ids.add(_trade_key(trade))
+            logger.info("Reconcile: %s entry %s never filled — marked cancelled", sym, order_id)
+        elif action == "close":
+            # Best-effort exit price: current snapshot, falling back to entry.
+            price = 0.0
+            try:
+                async with session.get(
+                    f"{_DATA_BASE}/v2/stocks/snapshots?symbols={sym}",
+                    headers=_ALPACA_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as r:
+                    snap = (await r.json()).get(sym, {}) if r.status == 200 else {}
+                price = float((snap.get("latestTrade") or {}).get("p")
+                              or (snap.get("dailyBar") or {}).get("c") or 0)
+            except Exception:
+                pass
+            if price <= 0:
+                price = float(trade.get("entry") or 0)
+            _close_simulated_trade(trade, price, "reconciled_flat")
+            _update_agent_attribution(trade)
+            changed_ids.add(_trade_key(trade))
+            logger.warning("Reconcile: %s open in trades.json but flat at broker — "
+                           "closed @ %.2f (P&L approximate)", sym, price)
+
+    if changed_ids:
+        merged = await _save_trade_changes(trades, changed_ids)
+        _drive_weight_tuner(merged)
+        try:
+            _update_strategy_weights()
+        except Exception:
+            logger.debug("self-tuner update after reconcile failed", exc_info=True)
+
+    # Broker positions nobody tracks — surface, never touch.
+    tracked = {str(t.get("ticker", "")).upper() for t in open_trades
+               if not str(t.get("order_id") or "").startswith("PAPER-")}
+    untracked = sorted(broker_symbols - tracked)
+    if untracked:
+        health.report_issue(
+            "reconcile:untracked_positions",
+            f"Broker holds positions not tracked in trade history: {', '.join(untracked)}.",
+            remediation="If these are manual trades, ignore. If a bot bracket was "
+                        "orphaned (order placed but recording rejected), close it in "
+                        "Alpaca or record it manually — the bot will not manage it.",
+            severity="warning",
+        )
+    else:
+        health.resolve("reconcile:untracked_positions")
+
+
+async def _reconcile_loop() -> None:
+    """Periodic broker↔history reconciliation during (and just after) market hours."""
+    if not _ALPACA_KEY or not _ALPACA_SECRET:
+        return
+    interval = max(120, RECONCILE_INTERVAL_MIN * 60)
+    await asyncio.sleep(30)   # let startup scans settle first
+    while True:
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+            ) as session:
+                await _reconcile_trades(session)
+        except Exception as exc:
+            logger.warning("Reconcile loop error: %s", exc)
+        await asyncio.sleep(interval)
 
 
 # === Strategy weight learning ===
@@ -2688,13 +2851,11 @@ async def lifespan(app: FastAPI):
     eod_rev  = asyncio.create_task(_eod_position_review_loop())
     strat    = asyncio.create_task(_strategy_improvement_loop())
     autox    = asyncio.create_task(_auto_execute_loop())
+    recon    = asyncio.create_task(_reconcile_loop())
     yield
-    task.cancel()
-    trail.cancel()
-    eod_rev.cancel()
-    strat.cancel()
-    autox.cancel()
-    for t in [task, trail, eod_rev, strat, autox]:
+    for t in [task, trail, eod_rev, strat, autox, recon]:
+        t.cancel()
+    for t in [task, trail, eod_rev, strat, autox, recon]:
         try:
             await t
         except asyncio.CancelledError:
