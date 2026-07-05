@@ -153,7 +153,8 @@ def test_cancel_order_missing_returns_false():
 
 
 def test_get_positions_enriched_with_pnl():
-    pos = SimpleNamespace(contract=SimpleNamespace(symbol="NVDA"), position=10.0)
+    pos = SimpleNamespace(contract=SimpleNamespace(symbol="NVDA"), position=10.0,
+                          avgCost=100.0)
     item = SimpleNamespace(contract=SimpleNamespace(symbol="NVDA"),
                            marketValue=1010.0, unrealizedPNL=10.0)
 
@@ -170,6 +171,7 @@ def test_get_positions_enriched_with_pnl():
     assert out == [{
         "symbol": "NVDA", "qty": 10.0, "side": "long",
         "market_value": 1010.0, "unrealized_pl": 10.0,
+        "avg_entry_price": 100.0,
     }]
 
 
@@ -253,3 +255,31 @@ def test_broker_switch_watch_returns_on_change(monkeypatch):
     # current_mode is alpaca; the watcher sees ibkr -> returns promptly.
     asyncio.run(asyncio.wait_for(
         live_runner._broker_switch_watch(load_settings(), "alpaca"), timeout=2.0))
+
+
+def test_replace_order_stop_modifies_in_place():
+    placed = []
+    order = SimpleNamespace(orderId=77, action="SELL", orderType="STP", auxPrice=95.0)
+    trade = SimpleNamespace(contract=SimpleNamespace(symbol="NVDA"), order=order)
+    b = IBKRBroker()
+    b._ib = SimpleNamespace(
+        isConnected=lambda: True,
+        openTrades=lambda: [trade],
+        placeOrder=lambda c, o: placed.append((c, o)),
+    )
+    assert asyncio.run(b.replace_order_stop("77", 100.0)) == "77"
+    assert order.auxPrice == 100.0            # trigger moved to breakeven
+    assert placed and placed[0][1] is order   # SAME order re-placed (keeps OCA)
+
+
+def test_replace_order_stop_refuses_non_stop_orders():
+    order = SimpleNamespace(orderId=78, action="SELL", orderType="LMT", auxPrice=0.0)
+    trade = SimpleNamespace(contract=SimpleNamespace(symbol="NVDA"), order=order)
+    b = IBKRBroker()
+    b._ib = SimpleNamespace(
+        isConnected=lambda: True,
+        openTrades=lambda: [trade],
+        placeOrder=lambda c, o: (_ for _ in ()).throw(AssertionError("must not place")),
+    )
+    assert asyncio.run(b.replace_order_stop("78", 100.0)) is None
+    assert asyncio.run(b.replace_order_stop("999", 100.0)) is None   # not found

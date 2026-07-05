@@ -316,6 +316,9 @@ class IBKRBroker(BaseBroker):
                 "side":   "long" if p.position > 0 else "short",
                 "market_value":  mv,
                 "unrealized_pl": upnl,
+                # For stocks avgCost is per-share cost basis — same meaning as
+                # Alpaca's avg_entry_price, which the breakeven lock relies on.
+                "avg_entry_price": float(getattr(p, "avgCost", 0.0) or 0.0),
             })
         return out
 
@@ -332,6 +335,37 @@ class IBKRBroker(BaseBroker):
             }
             for t in trades
         ]
+
+    async def replace_order_stop(self, order_id: str, stop_price: float) -> Optional[str]:
+        """Modify an existing stop order's trigger price in place.
+
+        ib_insync modifies by re-placing the SAME order object (same orderId)
+        with an updated auxPrice — the order keeps its identity and OCA group,
+        so the bracket's TP leg is untouched (mirrors Alpaca's PATCH replace).
+        Returns the order_id on success, None when the order isn't found or
+        the modification fails (caller then leaves the original stop alone).
+        """
+        self._require()
+        try:
+            oid = int(order_id)
+        except (TypeError, ValueError):
+            return None
+        for trade in self._ib.openTrades():
+            if trade.order.orderId != oid:
+                continue
+            if str(trade.order.orderType).upper() not in ("STP", "STP LMT"):
+                logger.warning("replace_order_stop(%s): order is %s, not a stop",
+                               order_id, trade.order.orderType)
+                return None
+            try:
+                trade.order.auxPrice = round(stop_price, 2)
+                self._ib.placeOrder(trade.contract, trade.order)
+                logger.info("IBKR stop %s moved to %.2f", order_id, stop_price)
+                return order_id
+            except Exception as exc:
+                logger.warning("replace_order_stop(%s) failed: %s", order_id, exc)
+                return None
+        return None
 
     async def get_order(self, symbol_or_id: str) -> Optional[dict]:
         """Return entry-order state for fill/slippage tracking.
