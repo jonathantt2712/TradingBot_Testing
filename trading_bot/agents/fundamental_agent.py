@@ -110,8 +110,12 @@ class FundamentalAgent(BaseAgent):
             )
 
         if self._llm.has_llm:
+            from core.textsafe import sanitize_snippet
+            # External text is attacker-writable: bound it to one line per
+            # article so a crafted headline can't fake new prompt sections.
             news_text = "\n".join(
-                f"- {a.get('headline', a.get('title', ''))}: {a.get('summary', '')[:120]}"
+                f"- {sanitize_snippet(a.get('headline', a.get('title', '')), max_len=160)}: "
+                f"{sanitize_snippet(a.get('summary', ''), max_len=120)}"
                 for a in articles[:self.max_articles]
             )
             user_msg = f"Ticker: {ctx.ticker}\n\nRecent news:\n{news_text}"

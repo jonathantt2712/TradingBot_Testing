@@ -78,9 +78,10 @@ def _format_agent_block(ev: AgentEvaluation) -> str:
     elif ev.role is AgentRole.FUNDAMENTAL and "headlines_sample" in r:
         headlines = r["headlines_sample"][:2]
         if headlines:
+            from core.textsafe import sanitize_snippet
             lines.append("  Headlines:")
             for h in headlines:
-                lines.append(f"    • {h}")
+                lines.append(f"    • {sanitize_snippet(h, max_len=160)}")
 
     elif ev.role is AgentRole.VISION and "pattern_identified" in r:
         lines.append(f"  Pattern: {r['pattern_identified']}")

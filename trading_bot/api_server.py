@@ -3080,6 +3080,15 @@ def _win_rate_from_fills(fills: list) -> "tuple[float, int] | None":
     return (round(wins / total * 100, 1), total) if total > 0 else None
 
 
+def _slippage_summary_safe():
+    """Measured execution-cost summary for the dashboard, or None."""
+    try:
+        from core.slippage import slippage_summary
+        return slippage_summary()
+    except Exception:
+        return None
+
+
 @app.get("/api/stats", dependencies=[Depends(_verify_bot_secret)])
 def get_stats():
     all_trades = _load(HISTORY_FILE, [])
@@ -3188,6 +3197,7 @@ def get_stats():
         "strategy_version": weights.get("update_count", 0),
         "win_rate_30d":    weights.get("win_rate_30d"),
         "bias":            weights.get("bias", "neutral"),
+        "slippage":        _slippage_summary_safe(),
         "agents_active":   _AGENTS_AVAILABLE,
     }
 
