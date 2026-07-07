@@ -49,6 +49,8 @@ class TelegramPublisher:
                     if r.status not in (200, 201):
                         body = await r.text()
                         logger.warning("Telegram notify failed %d: %s", r.status, body[:200])
+                    else:
+                        logger.info("Telegram notify OK: type=%s", payload.get("type"))
         except Exception as exc:
             logger.warning("Telegram notify error: %s", exc)
 

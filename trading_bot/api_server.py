@@ -143,6 +143,9 @@ _Decision          = None
 _EXIT_DECISIONS: list = []  # rolling log of exit-monitor and EOD review decisions
 _MAX_EXIT_LOG     = 500
 _telegram          = None   # TelegramPublisher — optional push notifications
+# Tracks last strategy-alert per ticker: {ticker: (unix_ts, score)} — prevents
+# the same strong signal from spamming Telegram on every 3-minute scan.
+_strategy_alerted: dict = {}
 
 try:
     import pandas as pd
@@ -875,6 +878,8 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             changed_ids.add(_trade_key(trade))
             _update_agent_attribution(trade)
             if _telegram is not None:
+                logger.info("Telegram: sending trade_exit for %s %s via %s pnl=%.2f",
+                            direction, trade["ticker"], exit_reason, pnl)
                 asyncio.create_task(_telegram.send_trade_exit(trade, exit_price, exit_reason, pnl))
             logger.info("Closed %s %s via %s: exit=%.2f PnL=$%.2f (%.2f%%)",
                         direction, trade["ticker"], exit_reason, exit_price, pnl, pnl_pct)
@@ -1098,6 +1103,7 @@ def _reset_scan_stats_if_needed() -> None:
             "last_scan_at":     None,
             "market_closed_skips": 0,
         })
+        _strategy_alerted.clear()
 
 
 def _cb_reset_cutoff() -> str:
@@ -1752,9 +1758,25 @@ async def _run_market_scan_inner(force: bool = False) -> None:
 
         # Push high-conviction signals to Telegram
         if _telegram is not None and recs:
-            strong_hits = [r for r in recs if r["composite_score"] > 60]
-            if strong_hits:
-                asyncio.create_task(_telegram.send_strategy_alert(strong_hits))
+            import time as _time
+            now_ts = _time.time()
+            new_hits = []
+            for r in recs:
+                score  = r.get("composite_score", 0)
+                ticker = r.get("ticker", "")
+                if score <= 60:
+                    continue
+                prev = _strategy_alerted.get(ticker)
+                if prev is None:
+                    new_hits.append(r)
+                    _strategy_alerted[ticker] = (now_ts, score)
+                else:
+                    prev_ts, prev_score = prev
+                    if now_ts - prev_ts >= 4 * 3600 or score >= prev_score + 10:
+                        new_hits.append(r)
+                        _strategy_alerted[ticker] = (now_ts, score)
+            if new_hits:
+                asyncio.create_task(_telegram.send_strategy_alert(new_hits))
 
         scanned_n = len(symbols_raw)
         skipped_n = scanned_n - len(recs)
@@ -3054,6 +3076,7 @@ async def execute_trade(body: ExecuteBody):
     if reason:
         raise HTTPException(status_code=409, detail=reason)
     if _telegram is not None and trade:
+        logger.info("Telegram: sending trade_entry for %s %s", trade.get("direction"), trade.get("ticker"))
         asyncio.create_task(_telegram.send_trade_entry(trade))
     return {"status": "recorded", "trade_id": trade["id"]}
 
