@@ -70,10 +70,16 @@ logger = logging.getLogger("bt30")
 RESULTS_FILE = (volume_dir() or Path(__file__).parent.parent) / "backtest_results.json"
 
 # -- Slippage model ------------------------------------------------------------
-SLIPPAGE_PCT = float(os.getenv("BACKTEST_SLIPPAGE_PCT", "0.0005"))  # 0.05% per side
+# Priority: explicit env override -> the venue's own MEASURED median entry
+# slippage (recorded on real closed trades) -> 0.05%/side default. Simulations
+# and the optimizer are thus costed at what fills actually cost here.
+from core.slippage import measured_slippage_pct  # noqa: E402
+_ENV_SLIPPAGE = os.getenv("BACKTEST_SLIPPAGE_PCT", "")
+SLIPPAGE_PCT = float(_ENV_SLIPPAGE) if _ENV_SLIPPAGE else measured_slippage_pct(0.0005)
 
-# -- Strategy weights file -----------------------------------------------------
-_WEIGHTS_FILE = Path(__file__).parent / "data" / "strategy_weights.json"
+# -- Strategy weights file (volume-aware — same file every component uses) -----
+from core.paths import data_dir as _data_dir  # noqa: E402
+_WEIGHTS_FILE = _data_dir() / "strategy_weights.json"
 
 
 def _load_current_weights() -> dict:

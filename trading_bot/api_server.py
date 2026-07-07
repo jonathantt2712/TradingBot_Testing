@@ -878,6 +878,15 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             trade["pnl"]         = round(pnl, 2)
             trade["pnl_pct"]     = round(pnl_pct, 2)
             trade["closed_at"]   = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+            # Measured entry slippage: parent fill vs intended entry. Feeds the
+            # backtests' slippage assumption (core.slippage) so simulations are
+            # costed at what fills ACTUALLY cost, not a hardcoded guess.
+            entry_fill = float(order.get("filled_avg_price") or 0)
+            if entry_fill > 0 and entry > 0:
+                side_sign = 1.0 if direction == "LONG" else -1.0
+                slip_bps = (entry_fill - entry) / entry * 10_000 * side_sign
+                trade["fill_price"] = round(entry_fill, 4)
+                trade["entry_slippage_bps"] = round(slip_bps, 2)
             changed_ids.add(_trade_key(trade))
             _update_agent_attribution(trade)
             logger.info("Closed %s %s via %s: exit=%.2f PnL=$%.2f (%.2f%%)",
