@@ -103,6 +103,31 @@ class UniverseScanner:
 
         logger.info("Universe raw candidates: %d symbols", len(candidates))
 
+        # most_actives items carry ONLY symbol+volume — without price/%change
+        # the filters silently skip them and their momentum score is 0, so the
+        # highest-liquidity names could never actually make the cut. Enrich
+        # from one batched snapshots call so every candidate is filtered and
+        # scored on the same fields.
+        need = [s for s, d in candidates.items()
+                if not (d.get("price") or d.get("close") or d.get("last_price"))
+                or not (d.get("percent_change") or d.get("change_percent"))]
+        if need:
+            snaps = await self._fetch_snapshots(need[:150])
+            for sym, snap in snaps.items():
+                d = candidates.get(sym)
+                if d is None:
+                    continue
+                daily = snap.get("dailyBar") or {}
+                prev  = snap.get("prevDailyBar") or {}
+                price = (snap.get("latestTrade") or {}).get("p") or daily.get("c") or 0
+                if price and not (d.get("price") or d.get("close")):
+                    d["price"] = float(price)
+                if daily.get("v") and not d.get("volume"):
+                    d["volume"] = int(daily["v"])
+                prev_c = float(prev.get("c") or 0)
+                if prev_c > 0 and price and not (d.get("percent_change") or d.get("change_percent")):
+                    d["percent_change"] = (float(price) / prev_c - 1.0) * 100.0
+
         # Apply filters
         filtered = []
         for sym, data in candidates.items():
@@ -170,6 +195,26 @@ class UniverseScanner:
         return [sym for sym, _ in candidates[:top]]
 
     # ── Alpaca endpoints ──────────────────────────────────────────────────────
+
+    async def _fetch_snapshots(self, symbols: list[str]) -> dict:
+        """Batched GET /v2/stocks/snapshots for filter/score enrichment."""
+        if not symbols:
+            return {}
+        url = f"{_DATA_BASE}/stocks/snapshots"
+        try:
+            async with aiohttp.ClientSession(headers=self._headers) as session:
+                async with session.get(
+                    url, params={"symbols": ",".join(symbols)},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning("snapshots HTTP %d", resp.status)
+                        return {}
+                    data = await resp.json()
+                    return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            logger.warning("snapshots fetch failed: %s", exc)
+            return {}
 
     async def _fetch_most_active(
         self, session: aiohttp.ClientSession, top: int = 50
