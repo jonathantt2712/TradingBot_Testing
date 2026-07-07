@@ -261,29 +261,38 @@ def simulate_day_trade(
             pnl -= abs(entry) * slippage_pct * 2 * qty
             return "EOD_CLOSE", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
 
-        high = float(bar["high"])
-        low  = float(bar["low"])
+        high     = float(bar["high"])
+        low      = float(bar["low"])
+        open_px  = float(bar["open"])
 
         if direction is Decision.LONG:
             sl_hit = low  <= stop_loss
             tp_hit = high >= take_profit
+            # Gap realism: a bar that OPENS through the stop fills at the open
+            # (worse than the stop price); a bar that opens through the target
+            # fills the limit at the open (better). Assuming exact stop-price
+            # fills flatters losses and biases the optimizer.
+            sl_px  = min(stop_loss,   open_px) if sl_hit else stop_loss
+            tp_px  = max(take_profit, open_px) if tp_hit else take_profit
         else:
             sl_hit = high >= stop_loss
             tp_hit = low  <= take_profit
+            sl_px  = max(stop_loss,   open_px) if sl_hit else stop_loss
+            tp_px  = min(take_profit, open_px) if tp_hit else take_profit
 
         if tp_hit and sl_hit:
             # Both triggered same bar -> worst case SL
-            exit_px = stop_loss
+            exit_px = sl_px
             pnl = mult * (exit_px - entry) * qty
             pnl -= abs(entry) * slippage_pct * 2 * qty
             return "SL_HIT", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
         elif tp_hit:
-            exit_px = take_profit
+            exit_px = tp_px
             pnl = mult * (exit_px - entry) * qty
             pnl -= abs(entry) * slippage_pct * 2 * qty
             return "TP_HIT", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
         elif sl_hit:
-            exit_px = stop_loss
+            exit_px = sl_px
             pnl = mult * (exit_px - entry) * qty
             pnl -= abs(entry) * slippage_pct * 2 * qty
             return "SL_HIT", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
