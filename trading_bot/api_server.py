@@ -364,6 +364,37 @@ async def _save_trade_changes(snapshot: list, changed_ids: set) -> list:
 
 
 
+_TRADES_CAP  = int(os.getenv("TRADES_CAP",  "3000"))   # compact when above this
+_TRADES_KEEP = int(os.getenv("TRADES_KEEP", "2000"))   # newest non-open records kept
+
+
+async def _compact_trades() -> None:
+    """Bound trades.json: keep ALL open trades + the newest closed/cancelled.
+
+    Every monitor loop re-reads this file each cycle; unbounded growth makes
+    each read slower forever. Learning windows only use recent history
+    (win-rate: last 20-30, tuner: last 30, slippage: last 100), so trimming
+    to the newest ~2000 resolved records loses nothing the bot still uses.
+    """
+    async with _trades_lock:
+        trades = _load(TRADES_FILE, [])
+        if not isinstance(trades, list) or len(trades) <= _TRADES_CAP:
+            return
+        resolved_seen = sum(1 for t in trades if t.get("status") != "open")
+        to_drop = resolved_seen - _TRADES_KEEP
+        if to_drop <= 0:
+            return
+        out: list = []
+        dropped = 0
+        for t in trades:                       # file order == chronological
+            if t.get("status") != "open" and dropped < to_drop:
+                dropped += 1
+                continue
+            out.append(t)
+        _save(TRADES_FILE, out)
+        logger.info("Compacted trades.json: %d → %d records", len(trades), len(out))
+
+
 def _load_trade_mode() -> Dict[str, Any]:
     """Read the runtime auto-execute toggle.
 
@@ -2774,6 +2805,7 @@ async def _background_loop() -> None:
                            IMPROVEMENT_LOG,
                            _HERE.parent / "logs" / "decisions.jsonl"):
                     trim_jsonl(_f)
+                await _compact_trades()
             except Exception:
                 logger.debug("log rotation failed", exc_info=True)
             last_day = today
