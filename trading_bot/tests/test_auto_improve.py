@@ -15,9 +15,10 @@ import api_server  # noqa: E402
 
 @pytest.fixture
 def opt_env(tmp_path, monkeypatch):
-    """Point the results file and weights file at a temp dir."""
+    """Point the results, weights, and improvement-log files at a temp dir."""
     monkeypatch.setattr(api_server, "_VOLUME", tmp_path)
     monkeypatch.setattr(api_server, "WEIGHTS_FILE", tmp_path / "strategy_weights.json")
+    monkeypatch.setattr(api_server, "IMPROVEMENT_LOG", tmp_path / "improvement_history.jsonl")
     return tmp_path
 
 
@@ -155,3 +156,21 @@ def test_operator_apply_skips_randomization_screen(opt_env):
 
     res = api_server._apply_optimizer_params(require_validated=False, source="operator")
     assert res["status"] == "applied"             # operator judgment allowed
+
+
+def test_every_decision_lands_in_the_improvement_log(opt_env):
+    import json as _json
+    _write_results(opt_env, _GOOD_BEST)
+    api_server._apply_optimizer_params(require_validated=True, source="auto")
+
+    best = dict(_GOOD_BEST)
+    best["oos"] = {"total_pnl": -50.0, "total_trades": 12}
+    _write_results(opt_env, best)
+    api_server._apply_optimizer_params(require_validated=True, source="auto")
+
+    lines = (opt_env / "improvement_history.jsonl").read_text().strip().splitlines()
+    records = [_json.loads(l) for l in lines]
+    assert [r["status"] for r in records] == ["applied", "rejected"]
+    assert records[0]["source"] == "auto"
+    assert records[0]["applied"]["long_threshold"] == 62.0
+    assert "not positive" in records[1]["reason"]

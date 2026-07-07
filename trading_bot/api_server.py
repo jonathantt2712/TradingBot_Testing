@@ -278,6 +278,9 @@ AGENT_SCORECARDS_FILE = DATA_DIR / "agent_scorecards.json"
 # Circuit-breaker acknowledgement: losses closed at/before this timestamp are
 # excluded from the breaker's counters (written by /api/reset-circuit-breaker).
 CB_RESET_FILE = DATA_DIR / "circuit_breaker_reset.json"
+# Every optimizer apply/reject decision (auto and operator) — the dashboard's
+# self-improvement timeline reads this.
+IMPROVEMENT_LOG = DATA_DIR / "improvement_history.jsonl"
 EARNINGS_CACHE: Dict[str, Any] = {"blacklist": set(), "updated_at": None}
 
 
@@ -2129,7 +2132,28 @@ async def _run_optimizer() -> None:
         _optimizer_stats["running"] = False
 
 
+def _record_improvement(source: str, result: Dict[str, Any]) -> None:
+    """Append an optimizer apply/reject decision to the improvement timeline."""
+    try:
+        entry = {
+            "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+            "source": source,
+            **{k: result.get(k) for k in
+               ("status", "reason", "applied", "oos_pnl", "validated", "p_value")},
+        }
+        with open(IMPROVEMENT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        logger.debug("improvement history write failed", exc_info=True)
+
+
 def _apply_optimizer_params(*, require_validated: bool, source: str) -> Dict[str, Any]:
+    result = _apply_optimizer_params_inner(require_validated=require_validated, source=source)
+    _record_improvement(source, result)
+    return result
+
+
+def _apply_optimizer_params_inner(*, require_validated: bool, source: str) -> Dict[str, Any]:
     """Apply the optimizer's best params to strategy_weights.json (live config).
 
     Guards:
@@ -2747,6 +2771,7 @@ async def _background_loop() -> None:
             try:
                 from core.logrotate import trim_jsonl
                 for _f in (REJECT_LOG, SNAPSHOT_LOG, LEARNING_HISTORY_FILE,
+                           IMPROVEMENT_LOG,
                            _HERE.parent / "logs" / "decisions.jsonl"):
                     trim_jsonl(_f)
             except Exception:
@@ -3972,6 +3997,40 @@ def get_agent_attribution():
             "total_pnl": round(stats.get("total_pnl", 0.0), 2),
         }
     return result
+
+
+@app.get("/api/improvement-history", dependencies=[Depends(_verify_bot_secret)])
+def get_improvement_history(limit: int = 50):
+    """Timeline of optimizer apply/reject decisions (auto + operator).
+
+    Answers "what did the bot change about itself, when, and why" — applied
+    params, held-out profit, luck-screen p-value, and every refusal reason —
+    without reading server logs."""
+    limit = max(1, min(limit, 500))
+    records: list = []
+    try:
+        if IMPROVEMENT_LOG.exists():
+            for line in IMPROVEMENT_LOG.read_text(encoding="utf-8").splitlines()[-limit:]:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        logger.debug("improvement history read failed", exc_info=True)
+    weights = _load_weights()
+    return {
+        "history": list(reversed(records)),
+        "live_tuning_active": bool(weights.get("live_tuning_active")),
+        "current": {
+            "long_threshold":      weights.get("long_threshold"),
+            "short_threshold":     weights.get("short_threshold"),
+            "atr_stop_multiple":   weights.get("atr_stop_multiple"),
+            "atr_target_multiple": weights.get("atr_target_multiple"),
+            "applied_by":          weights.get("applied_by"),
+            "applied_at":          weights.get("applied_from_optimizer_at"),
+        },
+        "auto_optimize_enabled": AUTO_OPTIMIZE,
+    }
 
 
 @app.get("/api/learning", dependencies=[Depends(_verify_bot_secret)])

@@ -185,3 +185,30 @@ export interface ValidationData {
   drawdown:            number[]
   sample_warning?:     string | null
 }
+
+// Self-improvement timeline (optimizer apply/reject decisions)
+export interface ImprovementEvent {
+  ts:        string
+  source:    'auto' | 'operator' | string
+  status:    'applied' | 'rejected' | 'error' | string
+  reason?:   string | null
+  applied?:  Record<string, number> | null
+  oos_pnl?:  number | null
+  validated?: boolean | null
+  p_value?:  number | null
+}
+
+export interface ImprovementData {
+  history:               ImprovementEvent[]
+  live_tuning_active?:   boolean
+  auto_optimize_enabled?: boolean
+  bot_offline?:          boolean
+  current?: {
+    long_threshold?:      number | null
+    short_threshold?:     number | null
+    atr_stop_multiple?:   number | null
+    atr_target_multiple?: number | null
+    applied_by?:          string | null
+    applied_at?:          string | null
+  }
+}
