@@ -88,6 +88,9 @@ STRATEGY_LOOP_INTERVAL_MIN = int(os.getenv("STRATEGY_LOOP_INTERVAL_MIN", "60"))
 # dashboard's manual "Apply Optimal Params" instead.
 AUTO_OPTIMIZE         = os.getenv("AUTO_OPTIMIZE", "true").lower() in ("1", "true", "yes")
 AUTO_OPTIMIZE_HOUR_ET = int(os.getenv("AUTO_OPTIMIZE_HOUR_ET", "18"))  # >= this hour ET, weekdays
+# Randomization-test screen for autonomous applies: reject params whose
+# held-out edge has p > this (sign-flip test on OOS per-trade P&L).
+AUTO_APPLY_MAX_P      = float(os.getenv("AUTO_APPLY_MAX_P", "0.20"))
 
 # Autonomous paper executor (Railway). OFF by default. When armed it places
 # Alpaca PAPER bracket orders for strong recommendations, applying the SAME
@@ -2160,6 +2163,34 @@ def _apply_optimizer_params(*, require_validated: bool, source: str) -> Dict[str
     oos_pnl   = metrics.get("total_pnl")
     if oos_pnl is None:
         return {"status": "error", "reason": "optimizer results missing profit metric"}
+
+    # Statistical screen (autonomous path only): sign-flip randomization on the
+    # held-out per-trade P&L. If noise universes match the real edge too often,
+    # the "edge" is likely luck — refuse to self-apply. A screen, not proof
+    # (permutation destroys autocorrelation); the p threshold is deliberately
+    # loose and env-tunable.
+    perm_p: Optional[float] = None
+    if require_validated:
+        pnls = best.get("oos_trade_pnls") or []
+        if len(pnls) >= 6:
+            try:
+                import numpy as _np
+                from validation.permutation import returns_randomization_test
+                res = returns_randomization_test(
+                    pnls, n=2000, stat=lambda x: float(_np.mean(x)), seed=42,
+                )
+                perm_p = float(res["p_value"])
+                if perm_p > AUTO_APPLY_MAX_P:
+                    return {
+                        "status": "rejected",
+                        "reason": (f"held-out edge not distinguishable from luck "
+                                   f"(randomization p={perm_p:.2f} > {AUTO_APPLY_MAX_P:.2f}) "
+                                   f"— refusing autonomous apply"),
+                        "p_value": perm_p,
+                    }
+            except Exception:
+                logger.debug("randomization screen failed — proceeding without it",
+                             exc_info=True)
     if oos_pnl <= 0:
         return {
             "status": "rejected",
@@ -2193,6 +2224,7 @@ def _apply_optimizer_params(*, require_validated: bool, source: str) -> Dict[str
         "applied":   applied,
         "oos_pnl":   round(float(oos_pnl), 2),
         "validated": validated,
+        "p_value":   perm_p,
         "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
@@ -2707,10 +2739,18 @@ async def _background_loop() -> None:
     last_eod_extend_day = ""
     last_weekly_summary_day = ""
     while True:
-        # Reset daily scan stats at midnight
+        # Reset daily scan stats at midnight; bound the append-only logs so
+        # they can't grow into multi-MB files that slow every tailing read.
         today = str(date.today())
         if today != last_day:
             _reset_scan_stats_if_needed()
+            try:
+                from core.logrotate import trim_jsonl
+                for _f in (REJECT_LOG, SNAPSHOT_LOG, LEARNING_HISTORY_FILE,
+                           _HERE.parent / "logs" / "decisions.jsonl"):
+                    trim_jsonl(_f)
+            except Exception:
+                logger.debug("log rotation failed", exc_info=True)
             last_day = today
 
         # EoD benchmark snapshot at ~15:55 ET (before backtest at 17:00+)

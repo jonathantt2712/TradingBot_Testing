@@ -124,3 +124,34 @@ def test_self_tuner_skips_when_no_new_outcomes(tmp_path, monkeypatch):
     api_server._update_strategy_weights()
     again = json.loads(api_server.WEIGHTS_FILE.read_text())
     assert again["update_count"] == 1
+
+
+def test_auto_apply_rejects_edge_indistinguishable_from_luck(opt_env):
+    best = dict(_GOOD_BEST)
+    # Perfectly symmetric P&L: mean 0 — sign-flip universes match it constantly.
+    best["oos_trade_pnls"] = [50.0, -50.0] * 10
+    _write_results(opt_env, best)
+
+    res = api_server._apply_optimizer_params(require_validated=True, source="auto")
+    assert res["status"] == "rejected"
+    assert "luck" in res["reason"]
+
+
+def test_auto_apply_accepts_consistent_edge(opt_env):
+    best = dict(_GOOD_BEST)
+    # 18 wins / 2 small losses: a sign-flip null almost never beats this.
+    best["oos_trade_pnls"] = [40.0] * 18 + [-10.0] * 2
+    _write_results(opt_env, best)
+
+    res = api_server._apply_optimizer_params(require_validated=True, source="auto")
+    assert res["status"] == "applied"
+    assert res["p_value"] is not None and res["p_value"] < 0.05
+
+
+def test_operator_apply_skips_randomization_screen(opt_env):
+    best = dict(_GOOD_BEST)
+    best["oos_trade_pnls"] = [50.0, -50.0] * 10   # luck-like — auto would reject
+    _write_results(opt_env, best)
+
+    res = api_server._apply_optimizer_params(require_validated=False, source="operator")
+    assert res["status"] == "applied"             # operator judgment allowed
