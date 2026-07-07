@@ -328,6 +328,28 @@ def preflight_checks(settings: Settings) -> None:
         logger.info("Telegram not configured — alerts/EOD reports will only appear in the log.")
 
 
+async def heartbeat_loop(*, execute: bool, broker_name: str,
+                         active_tickers: list[str], interval_s: int = 60) -> None:
+    """Prove the live runner is alive: write a heartbeat file once a minute.
+
+    api_server (same machine in the standard setup) surfaces a health issue
+    when the heartbeat goes stale during market hours — a crashed live_runner
+    otherwise fails SILENT: no trades, no errors, nothing on the dashboard.
+    """
+    hb_file = _data_dir() / "live_heartbeat.json"
+    while True:
+        try:
+            hb_file.write_text(json.dumps({
+                "ts": datetime.now(ZoneInfo("UTC")).replace(tzinfo=None).isoformat(),
+                "execute": execute,
+                "broker": broker_name,
+                "tickers": len(active_tickers),
+            }), encoding="utf-8")
+        except Exception:
+            logger.debug("heartbeat write failed", exc_info=True)
+        await asyncio.sleep(interval_s)
+
+
 async def health_alert_loop(settings: Settings, *, interval_min: int = 10) -> None:
     """Push newly-reported issues to Telegram so the operator is told promptly.
 

@@ -3960,10 +3960,48 @@ def health():
     }
 
 
+# Heartbeat considered dead after this many seconds without a write (the
+# live runner writes every 60s; allow a few missed beats for GC/network).
+HEARTBEAT_STALE_S = int(os.getenv("HEARTBEAT_STALE_S", "300"))
+
+
+def _check_live_heartbeat() -> None:
+    """Surface a health issue when the live runner's heartbeat goes stale.
+
+    Only meaningful when live_runner shares this machine's data dir (the
+    standard PC setup). If no heartbeat file has EVER been written here
+    (e.g. Railway-only deployment), stays silent — absence is not failure.
+    """
+    from core import health
+    hb_file = DATA_DIR / "live_heartbeat.json"
+    if not hb_file.exists():
+        return
+    if not _is_market_open():
+        health.resolve("live_runner:heartbeat")
+        return
+    try:
+        hb = json.loads(hb_file.read_text(encoding="utf-8"))
+        last = datetime.fromisoformat(str(hb.get("ts")))
+        age = (datetime.now(timezone.utc).replace(tzinfo=None) - last).total_seconds()
+    except Exception:
+        return
+    if age > HEARTBEAT_STALE_S:
+        health.report_issue(
+            "live_runner:heartbeat",
+            f"Live runner heartbeat is {age/60:.0f} min old during market hours — "
+            "the trading bot has likely crashed or lost its network.",
+            remediation="Check the live_runner window/process on the trading PC and "
+                        "restart it (START.bat). No trades are being evaluated until then.",
+        )
+    else:
+        health.resolve("live_runner:heartbeat")
+
+
 def _health_issues() -> list:
     """Actionable issues the operator needs to fix (rejected key, no equity, …)."""
     try:
         from core import health
+        _check_live_heartbeat()
         return [
             {
                 "key":         i.key,

@@ -31,8 +31,8 @@ from zoneinfo import ZoneInfo
 import bootstrap  # loads .env files on import — keep first
 from bootstrap import (
     active_broker, build_broker, build_manager, correlation_refresh_loop,
-    eod_flatten_loop, eod_report_loop, health_alert_loop, preflight_checks,
-    refresh_market_context,
+    eod_flatten_loop, eod_report_loop, health_alert_loop, heartbeat_loop,
+    preflight_checks, refresh_market_context,
 )
 from config.settings import load_settings
 from core.models import AnalysisContext
@@ -489,6 +489,8 @@ async def _run_session(settings, tickers: Sequence[str], *, execute: bool) -> bo
             strategy_refresh_loop(pm, interval_min=STRATEGY_REFRESH_MIN),
             eod_report_loop(settings),
             health_alert_loop(settings),
+            heartbeat_loop(execute=execute, broker_name=active_mode,
+                           active_tickers=active_tickers),
             correlation_refresh_loop(
                 pm, broker, active_tickers,
                 interval_min=CORRELATION_REFRESH_MIN,
