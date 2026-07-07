@@ -9,8 +9,8 @@ import type { NextAuthConfig } from 'next-auth'
 export const authConfig: NextAuthConfig = {
   session: {
     strategy:  'jwt',
-    maxAge:    30 * 60, // 30 minutes
-    updateAge: 5 * 60,  // refresh the cookie every 5 minutes of activity
+    maxAge:    8 * 60 * 60, // 8 hours
+    updateAge: 5 * 60,      // refresh the cookie every 5 minutes of activity
   },
   pages: {
     signIn: '/login',
