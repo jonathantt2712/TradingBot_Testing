@@ -93,6 +93,10 @@ export async function POST(req: Request) {
 
   const passwordHash = await bcrypt.hash(password, 10)
 
+  // First account on a fresh install is the operator; everyone invited later
+  // is a viewer (owner can promote via the database if needed).
+  const userCount = await prisma.user.count()
+
   await prisma.user.create({
     data: {
       email,
@@ -101,6 +105,7 @@ export async function POST(req: Request) {
       alpacaKeyId:  encrypt(alpacaKeyId),
       alpacaSecret: encrypt(alpacaSecret),
       alpacaPaper:  paper,
+      role:         userCount === 0 ? 'owner' : 'viewer',
     },
   })
 

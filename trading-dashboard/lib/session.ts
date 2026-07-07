@@ -33,3 +33,13 @@ export async function getAlpacaCreds(): Promise<AlpacaCreds | null> {
     return null
   }
 }
+
+/**
+ * True when the signed-in user may change SHARED bot state (auto-execute
+ * toggle, broker switch, optimizer apply/reset, circuit-breaker reset).
+ * Viewers keep read access and trade their own Alpaca account only.
+ */
+export async function isOwner(): Promise<boolean> {
+  const session = await auth()
+  return session?.user?.role === 'owner'
+}
