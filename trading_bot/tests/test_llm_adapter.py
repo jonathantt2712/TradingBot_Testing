@@ -83,3 +83,36 @@ def test_disable_is_shared_across_instances_for_same_key():
 
 def test_no_keys_means_no_llm():
     assert LLMAdapter(gemini_key="", anthropic_key="").has_llm is False
+
+
+# ── quota alarm lifecycle ────────────────────────────────────────────────────
+
+def test_quota_alarm_resolves_on_next_success(monkeypatch):
+    """A 429 blip must not leave a permanent 'quota reached' warning: the next
+    successful call resolves it."""
+    import asyncio
+    from types import SimpleNamespace
+    from core import health
+    from core.llm_adapter import LLMAdapter
+
+    health.resolve("llm_quota:anthropic")
+    adapter = LLMAdapter(anthropic_key="sk-test")
+
+    # Simulate the throttle report a failed call would have made.
+    adapter._report_quota("anthropic", "429 too many requests")
+    assert "llm_quota:anthropic" in {i.key for i in health.active_issues()}
+
+    class _FakeMessages:
+        async def create(self, **kwargs):
+            return SimpleNamespace(content=[SimpleNamespace(text=' {"score": 60} ', type="text")])
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.messages = _FakeMessages()
+
+    import anthropic
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeClient)
+
+    out = asyncio.run(adapter._anthropic_chat("hello", ""))
+    assert out is not None
+    assert "llm_quota:anthropic" not in {i.key for i in health.active_issues()}
