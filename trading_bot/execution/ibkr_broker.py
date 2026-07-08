@@ -476,6 +476,19 @@ class IBKRBroker(BaseBroker):
         sl         = round(plan.stop_loss,   2)
         tp         = round(plan.take_profit, 2)
 
+        # Pre-flight bracket sanity (mirrors AlpacaBroker.submit_bracket): for a
+        # LONG the stop must be below entry and the target above it; for a
+        # SHORT it's the mirror. An inverted bracket would submit three
+        # unwind-resistant IBKR orders instead of being rejected outright.
+        entry = plan.entry
+        valid = (sl < entry < tp) if action == "BUY" else (tp < entry < sl)
+        if not valid:
+            logger.error(
+                "%s bracket invalid (%s): SL=%.4f entry=%.4f TP=%.4f — order not sent",
+                decision.ticker, action, sl, entry, tp,
+            )
+            return None
+
         try:
             contract = Stock(decision.ticker, "SMART", "USD")
             self._ib.qualifyContracts(contract)
