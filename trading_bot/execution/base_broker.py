@@ -36,6 +36,15 @@ class BaseBroker(ABC):
     ) -> pd.DataFrame:
         """Return OHLCV DataFrame with a DatetimeIndex."""
 
+    async def get_quote(self, symbol: str) -> Optional[dict]:
+        """Latest NBBO quote as {'bid': float, 'ask': float}, or None.
+
+        Used by the spread veto. Brokers without quote data return None —
+        callers treat a missing quote as "cannot check" (fail-open: the veto
+        is opportunistic cost protection, not a safety gate).
+        """
+        return None
+
     @abstractmethod
     async def get_account(self) -> dict:
         """Return account info dict with at least 'equity' and 'buying_power'.

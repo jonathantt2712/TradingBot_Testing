@@ -513,6 +513,29 @@ class PortfolioManager:
             )
             return False
 
+        # Spread veto: a wide bid-ask spread is a cost paid TWICE (entry and
+        # exit) that the composite score knows nothing about — on a 2:1 R/R
+        # day trade a 40bps spread erases most of the expected edge. Fail-open
+        # when no quote is available: this is cost protection, not a safety gate.
+        max_spread = self.settings.risk.max_spread_bps
+        if max_spread > 0:
+            try:
+                quote = await self.broker.get_quote(symbol)
+            except Exception:
+                quote = None
+            if quote:
+                bid, ask = quote["bid"], quote["ask"]
+                mid = (bid + ask) / 2.0
+                if mid > 0:
+                    spread_bps = (ask - bid) / mid * 10_000
+                    if spread_bps > max_spread:
+                        logger.info(
+                            "%s entry skipped: spread %.0f bps > %.0f bps cap "
+                            "(bid %.2f / ask %.2f)",
+                            ticker, spread_bps, max_spread, bid, ask,
+                        )
+                        return False
+
         # Concentration cap: limit simultaneous positions that co-move with the
         # candidate. Prefer the data-derived correlation graph when it covers the
         # symbol; otherwise fall back to the static correlation groups.
@@ -555,6 +578,9 @@ class PortfolioManager:
         open_t  = now.replace(hour=9, minute=30, second=0, microsecond=0)
         close_t = now.replace(hour=16, minute=0, second=0, microsecond=0)
         margin_min = self.settings.eod_flatten_min_before if self.settings.eod_flatten else 0
+        # Late-entry cutoff: match the backtest, which has never entered in
+        # the final stretch — a fresh 3xATR target there is an EOD coin-flip.
+        margin_min = max(margin_min, self.settings.risk.entry_cutoff_min)
         return open_t <= now < close_t - timedelta(minutes=margin_min)
 
     async def execute(self, decision: TradeDecision) -> Optional[OrderReceipt]:

@@ -512,3 +512,52 @@ def test_vix_scaling_skips_vixy_proxy():
                           qqq_vs_vwap=None, qqq_day_chg=None,
                           rationale="test", vix_is_proxy=True)
     assert _decide_qty(_mk_decide_pm(snap)) >= 100.0
+
+
+# ── spread veto ───────────────────────────────────────────────────────────────
+
+class QuoteBroker(FakeBroker):
+    def __init__(self, bid=None, ask=None, **kw):
+        super().__init__(**kw)
+        self._bid, self._ask = bid, ask
+
+    async def get_quote(self, symbol):
+        if self._bid is None:
+            return None
+        return {"bid": self._bid, "ask": self._ask}
+
+
+def test_wide_spread_blocks_entry():
+    pm = make_pm(max_spread_bps=30)
+    pm.broker = QuoteBroker(bid=99.50, ask=100.50)     # ~100 bps spread
+    assert _allowed(pm, "WIDE") is False
+
+
+def test_tight_spread_allows_entry():
+    pm = make_pm(max_spread_bps=30)
+    pm.broker = QuoteBroker(bid=99.99, ask=100.01)     # ~2 bps
+    assert _allowed(pm, "TIGHT") is True
+
+
+def test_missing_quote_fails_open():
+    # Cost protection, not a safety gate — no quote must not block trading.
+    pm = make_pm(max_spread_bps=30)
+    pm.broker = QuoteBroker(bid=None)
+    assert _allowed(pm, "NOQUOTE") is True
+
+
+def test_spread_veto_disabled_when_zero():
+    pm = make_pm(max_spread_bps=0)
+    pm.broker = QuoteBroker(bid=99.0, ask=101.0)
+    assert _allowed(pm, "WIDE") is True
+
+
+# ── late-entry cutoff parity with the backtest ───────────────────────────────
+
+def test_entry_cutoff_blocks_final_hour(monkeypatch):
+    pm = make_pm(entry_cutoff_min=60)
+    _freeze_pm_clock(monkeypatch, datetime(2026, 7, 1, 15, 10, tzinfo=_ET))
+    assert pm._entry_window_open() is False            # inside last hour
+
+    _freeze_pm_clock(monkeypatch, datetime(2026, 7, 1, 14, 30, tzinfo=_ET))
+    assert pm._entry_window_open() is True             # before the cutoff

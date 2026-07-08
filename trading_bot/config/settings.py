@@ -84,6 +84,21 @@ class RiskConfig:
     # snapshot) and refuses to trade. Set to 0 to disable. Live-only (backtests
     # evaluate historical bars, which are "stale" by wall-clock definition).
     max_bar_age_factor:         float = field(default_factory=lambda: _env_float("MAX_BAR_AGE_FACTOR", 3.0))
+    # Late-entry cutoff: no NEW entries in the last N minutes of the session.
+    # A 3xATR target opened at 15:20 almost never resolves — it becomes an EOD
+    # coin-flip minus costs. The backtest has always refused entries after
+    # ~15:00 ET, so live must match or it trades setups the optimizer never
+    # evaluated. 0 disables (the EOD-flatten margin still applies).
+    entry_cutoff_min:           int   = field(default_factory=lambda: int(_env_float("ENTRY_CUTOFF_MIN", 60)))
+    # Bid-ask spread veto: skip entries whose quoted spread exceeds this many
+    # basis points of the mid. A 2:1 day-trade edge is ~2x the stop distance;
+    # paying a wide spread twice erases it. 0 disables.
+    max_spread_bps:             float = field(default_factory=lambda: _env_float("MAX_SPREAD_BPS", 30.0))
+    # Time-stop: exit a trade that has made NO meaningful progress (< 0.25x
+    # stop distance in our favor) after this many 5-min bars. 0 = off. Meant
+    # to be TUNED BY THE OPTIMIZER (walk-forward validated) rather than set by
+    # hand — stagnant trades tie up position slots and roll the EOD dice.
+    time_stop_bars:             int   = field(default_factory=lambda: int(_env_float("TIME_STOP_BARS", 0)))
 
 
 @dataclass(slots=True)

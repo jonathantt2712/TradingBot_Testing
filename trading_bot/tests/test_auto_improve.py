@@ -174,3 +174,15 @@ def test_every_decision_lands_in_the_improvement_log(opt_env):
     assert records[0]["source"] == "auto"
     assert records[0]["applied"]["long_threshold"] == 62.0
     assert "not positive" in records[1]["reason"]
+
+
+def test_apply_maps_time_stop_bars(opt_env):
+    best = dict(_GOOD_BEST)
+    best["params"] = {**best["params"], "TIME_STOP_BARS": 12}
+    _write_results(opt_env, best)
+
+    res = api_server._apply_optimizer_params(require_validated=True, source="auto")
+    assert res["status"] == "applied"
+    assert res["applied"]["time_stop_bars"] == 12
+    saved = json.loads(api_server.WEIGHTS_FILE.read_text())
+    assert saved["time_stop_bars"] == 12               # live time-stop now armed

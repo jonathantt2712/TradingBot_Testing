@@ -150,6 +150,9 @@ THRESHOLD_GRID = {
 ATR_GRID = {
     "ATR_STOP_MULTIPLE":   [1.5, 2.0, 2.5, 3.0],
     "ATR_TARGET_MULTIPLE": [2.5, 3.0, 4.0, 5.0],
+    # Stagnation time-stop (5-min bars; 0 = off, 12 = 1 hour). Walk-forward
+    # decides whether cutting dead trades early actually improves expectancy.
+    "TIME_STOP_BARS":      [0, 12],
 }
 
 _FALLBACK_TICKERS = ["NVDA", "TSLA", "AAPL", "MSFT", "AMD", "META", "AMZN"]

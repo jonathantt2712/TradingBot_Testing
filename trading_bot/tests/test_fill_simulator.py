@@ -90,3 +90,38 @@ def test_slippage_charged_on_both_sides():
     )
     # Raw $40 minus 2 × 0.1% × $100 × 10 shares = $2
     assert pnl == pytest.approx(40 - 2)
+
+
+# ── stagnation time-stop ─────────────────────────────────────────────────────
+
+def test_time_stop_closes_stagnant_trade():
+    # 6 flat bars around entry — with time_stop_bars=4 the 4th bar closes it.
+    rows = [(100, 100.3, 99.8, 100.1)] * 6
+    outcome, exit_px, _, _, _ = simulate_day_trade(
+        _bars(rows), direction=Decision.LONG, entry=100.0,
+        stop_loss=98.0, take_profit=104.0, qty=10, time_stop_bars=4,
+    )
+    assert outcome == "TIME_STOP"
+    assert exit_px == 100.1                            # 4th bar's close
+
+
+def test_time_stop_spares_working_trade():
+    # Price grinding up: +0.25x stop distance (0.5) reached — no time-stop,
+    # trade runs on to its target.
+    rows = [(100, 100.4, 99.9, 100.3), (100.3, 100.8, 100.2, 100.7),
+            (100.7, 101.2, 100.6, 101.1), (101.1, 101.6, 101.0, 101.5),
+            (101.5, 104.5, 101.4, 104.2)]
+    outcome, *_ = simulate_day_trade(
+        _bars(rows), direction=Decision.LONG, entry=100.0,
+        stop_loss=98.0, take_profit=104.0, qty=10, time_stop_bars=4,
+    )
+    assert outcome == "TP_HIT"
+
+
+def test_time_stop_disabled_by_default():
+    rows = [(100, 100.3, 99.8, 100.1)] * 6
+    outcome, *_ = simulate_day_trade(
+        _bars(rows), direction=Decision.LONG, entry=100.0,
+        stop_loss=98.0, take_profit=104.0, qty=10,
+    )
+    assert outcome == "EOD_CLOSE"                      # falls through to last close

@@ -144,6 +144,21 @@ class AlpacaBroker(BaseBroker):
             logger.warning("get_bars(%s) failed: %s", symbol, exc)
             return pd.DataFrame()
 
+    async def get_quote(self, symbol: str) -> Optional[dict]:
+        """Latest NBBO quote for the spread veto. None on any failure."""
+        try:
+            data = await self._get(
+                f"{_DATA_BASE}/v2/stocks/{symbol}/quotes/latest",
+                {"feed": self._feed},
+            )
+            q = data.get("quote") or {}
+            bid, ask = float(q.get("bp") or 0), float(q.get("ap") or 0)
+            if bid > 0 and ask >= bid:
+                return {"bid": bid, "ask": ask}
+        except Exception as exc:
+            logger.debug("get_quote(%s) failed: %s", symbol, exc)
+        return None
+
     async def get_account(self) -> dict:
         try:
             data = await self._get(f"{self._base}/v2/account")

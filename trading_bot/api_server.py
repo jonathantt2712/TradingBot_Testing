@@ -71,6 +71,8 @@ MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
 DAILY_LOSS_LIMIT_PCT    = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))   # 2% daily drawdown halt
 MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 3 consecutive losses halt
 TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", "0.05"))  # 5% trailing distance
+MAX_SPREAD_BPS   = float(os.getenv("MAX_SPREAD_BPS", "30"))   # reject recs with wider quoted spread
+ENTRY_CUTOFF_MIN = int(os.getenv("ENTRY_CUTOFF_MIN", "60"))   # no auto entries in last N min of RTH
 PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "5.0"))  # max net |beta| across open positions
 
 # End-of-day position review
@@ -504,6 +506,7 @@ DEFAULT_WEIGHTS: Dict[str, Any] = {
     "time_window_minutes":   45,
     "atr_stop_multiple":     2.0,
     "atr_target_multiple":   3.0,
+    "time_stop_bars":        0,
     "update_count":          0,
     "win_rate_30d":          None,
     "long_win_rate":         None,
@@ -1114,6 +1117,77 @@ async def _reconcile_loop() -> None:
         except Exception as exc:
             logger.warning("Reconcile loop error: %s", exc)
         await asyncio.sleep(interval)
+
+
+async def _check_time_stops(session: aiohttp.ClientSession) -> None:
+    """Close stagnant open trades once the OPTIMIZER has validated a time-stop.
+
+    Inactive until the nightly walk-forward loop (or a manual Apply) writes a
+    non-zero, live-tuning-activated ``time_stop_bars`` into
+    strategy_weights.json — the exit rule ships dark and only turns on with
+    out-of-sample evidence behind it. Mirrors simulate_day_trade's rule: after
+    N 5-min bars with favorable progress < 0.25x the stop distance, exit.
+    """
+    if not _is_market_open():
+        return
+    w = _load_weights()
+    if not w.get("live_tuning_active"):
+        return
+    try:
+        time_stop_bars = int(w.get("time_stop_bars") or 0)
+    except (TypeError, ValueError):
+        return
+    if time_stop_bars <= 0:
+        return
+    min_age = timedelta(minutes=time_stop_bars * 5)
+
+    trades = _load(TRADES_FILE, [])
+    if not isinstance(trades, list):
+        return
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    changed_ids: set = set()
+    for trade in trades:
+        if trade.get("status") != "open":
+            continue
+        try:
+            opened = datetime.fromisoformat(str(trade.get("executed_at")))
+        except (TypeError, ValueError):
+            continue
+        if now - opened < min_age:
+            continue
+        ticker    = str(trade.get("ticker", "")).upper()
+        direction = trade.get("direction", "LONG")
+        entry     = float(trade.get("entry") or 0)
+        stop      = float(trade.get("stop_loss") or (trade.get("risk") or {}).get("stop_loss") or 0)
+        if entry <= 0 or stop <= 0:
+            continue
+        try:
+            async with session.get(
+                f"{_DATA_BASE}/v2/stocks/snapshots?symbols={ticker}",
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                snap = (await r.json()).get(ticker, {}) if r.status == 200 else {}
+        except Exception:
+            continue
+        price = float((snap.get("latestTrade") or {}).get("p")
+                      or (snap.get("dailyBar") or {}).get("c") or 0)
+        if price <= 0:
+            continue
+        mult = 1.0 if direction == "LONG" else -1.0
+        stop_dist = abs(entry - stop)
+        if mult * (price - entry) >= 0.25 * stop_dist:
+            continue    # trade is working — leave it alone
+        ok = await _do_exit_position(
+            trade, price,
+            f"time_stop: no progress after {time_stop_bars} bars", session,
+        )
+        if ok:
+            changed_ids.add(_trade_key(trade))
+
+    if changed_ids:
+        merged = await _save_trade_changes(trades, changed_ids)
+        _drive_weight_tuner(merged)
 
 
 # === Strategy weight learning ===
@@ -1829,6 +1903,16 @@ async def _run_market_scan_inner(force: bool = False) -> None:
                 _rej(sym, f"Price out of range (${price:.2f})", price=price)
                 continue
 
+            # Spread veto: a wide bid-ask is a round-trip cost the composite
+            # score never sees; it silently erases the 2:1 day-trade edge.
+            latest_q = snap.get("latestQuote") or {}
+            bid, ask = float(latest_q.get("bp") or 0), float(latest_q.get("ap") or 0)
+            if MAX_SPREAD_BPS > 0 and bid > 0 and ask > bid:
+                spread_bps = (ask - bid) / ((ask + bid) / 2) * 10_000
+                if spread_bps > MAX_SPREAD_BPS:
+                    _rej(sym, f"Spread too wide ({spread_bps:.0f} bps)", price=price)
+                    continue
+
             chg_pct   = (price - prev_close) / prev_close * 100 if prev_close else 0
             intra_pct = (price - day_open)   / day_open   * 100 if day_open   else 0
 
@@ -2287,6 +2371,7 @@ def _apply_optimizer_params_inner(*, require_validated: bool, source: str) -> Di
         "SHORT_THRESHOLD":     "short_threshold",
         "ATR_STOP_MULTIPLE":   "atr_stop_multiple",
         "ATR_TARGET_MULTIPLE": "atr_target_multiple",
+        "TIME_STOP_BARS":      "time_stop_bars",
     }
     weights = _load_weights()
     locked: set = set(weights.get("manual_overrides") or {})
@@ -2971,6 +3056,7 @@ async def _background_loop() -> None:
                 )
             ) as session:
                 await _check_and_close_trades(session)
+                await _check_time_stops(session)
                 await _revalidate_expired_recs(session)
         except Exception as exc:
             logger.error("Trade-check error: %s", exc)
@@ -3670,6 +3756,12 @@ async def _auto_execute_loop() -> None:
         last_reason = ""
         if not _is_market_open():
             continue
+        # Late-entry cutoff (same knob as live_runner and the backtest): a
+        # fresh 3xATR target in the final hour is an EOD coin-flip.
+        if _ET is not None and ENTRY_CUTOFF_MIN > 0:
+            _now = datetime.now(_ET)
+            if _now.hour * 60 + _now.minute >= 16 * 60 - ENTRY_CUTOFF_MIN:
+                continue
         try:
             placed = await _run_auto_executor()
             if placed:
