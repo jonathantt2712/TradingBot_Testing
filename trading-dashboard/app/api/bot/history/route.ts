@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server'
 import { botGet } from '@/lib/bot-api'
 import { getOrders } from '@/lib/alpaca'
 import { getAlpacaCreds } from '@/lib/session'
-import { demoHistory } from '@/lib/api'
 import type { TradeRecord } from '@/types/trading'
 
 /** Best available timestamp for an Alpaca order (for sorting / comparisons). */
@@ -93,9 +92,9 @@ export async function GET() {
     console.log('[history] merged:', merged.length,
       'with pnl:', merged.filter(t => t.pnl != null).length)
 
-    return NextResponse.json(merged.length ? merged : demoHistory())
+    return NextResponse.json(merged)   // empty is honest — no demo data
   } catch (err) {
     console.error('[history] fatal:', err)
-    return NextResponse.json(demoHistory())
+    return NextResponse.json([])
   }
 }

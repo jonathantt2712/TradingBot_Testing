@@ -29,9 +29,12 @@ interface ScanStats {
 interface Props {
   initialStats:     PortfolioStats
   initialPnl:       PnLPoint[]
-  initialRegime:    RegimeInfo
+  // Optional: the desktop layout renders the regime card in the page's right
+  // column instead; the mobile card inside this component self-fetches.
+  initialRegime?:   RegimeInfo | null
   initialSectors:   SectorStat[]
   initialPositions: AlpacaPosition[]
+  initialScanStats?: ScanStats | null
 }
 
 function relativeTime(iso: string): string {
@@ -47,13 +50,14 @@ export function LiveDashboard({
   initialRegime,
   initialSectors,
   initialPositions,
+  initialScanStats,
 }: Props) {
   const [stats,          setStats]          = useState(initialStats)
   const [pnl,            setPnl]            = useState(initialPnl)
-  const [regime,         setRegime]         = useState(initialRegime)
+  const [regime,         setRegime]         = useState<RegimeInfo | null>(initialRegime ?? null)
   const [sectors,        setSectors]        = useState(initialSectors)
   const [positions,      setPositions]      = useState(initialPositions)
-  const [scanStats,      setScanStats]      = useState<ScanStats | null>(null)
+  const [scanStats,      setScanStats]      = useState<ScanStats | null>(initialScanStats ?? null)
   const [circuitBreaker, setCircuitBreaker] = useState<{ halted: boolean; reason?: string } | null>(null)
 
   // Symbols the user closed this session — shown with "pending close" badge
@@ -215,7 +219,7 @@ export function LiveDashboard({
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_220px]">
         <PnLChart data={pnl} />
-        <RegimeIndicator regime={regime} />
+        {regime && <RegimeIndicator regime={regime} />}
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
