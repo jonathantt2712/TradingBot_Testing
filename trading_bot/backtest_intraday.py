@@ -700,9 +700,9 @@ def print_summary(all_trades: list[TradeResult]) -> dict:
 
 # -- Weight learning -----------------------------------------------------------
 
-def _update_weights_from_backtest(backtest_trades: list) -> None:
+def _update_weights_from_backtest(backtest_trades: list, *, live_trades_file: Optional[Path] = None) -> None:
     """Combine backtest results with live closed trades and update strategy weights."""
-    live_trades_file = Path(__file__).parent / "data" / "trades.json"
+    live_trades_file = live_trades_file or (Path(__file__).parent / "data" / "trades.json")
     live_closed: list = []
     if live_trades_file.exists():
         try:
@@ -720,9 +720,15 @@ def _update_weights_from_backtest(backtest_trades: list) -> None:
     ]
 
     # Combined dataset: live trades counted 3x (recency bonus) + all backtest
-    combined = bt_dicts + live_closed[-20:] + live_closed[-20:] + live_closed[-20:]
-    if len(combined) < 10:
-        logger.info("Not enough data for weight update (%d trades)", len(combined))
+    recent_live = live_closed[-20:]
+    combined = bt_dicts + recent_live + recent_live + recent_live
+    # Gate the minimum-sample check on DISTINCT trades, not the 3x-duplicated
+    # list: the recency weighting is meant to bias the win-rate/PF stats
+    # toward recent form, not to let a handful of live trades pass as if they
+    # were 3x as much independent evidence for the "do we trust this" gate.
+    distinct_n = len(bt_dicts) + len(recent_live)
+    if distinct_n < 10:
+        logger.info("Not enough distinct data for weight update (%d trades)", distinct_n)
         return
 
     pnls   = [t.get("pnl", 0) or 0 for t in combined]
