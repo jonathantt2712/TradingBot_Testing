@@ -928,7 +928,13 @@ class PortfolioManager:
         base_short = short_base if short_base is not None else self._thresholds.short_below
         long_thr  = base_long  + retail_surcharge
         short_thr = base_short - retail_surcharge
-        if self._regime is not None:
+        # Regime heuristic delta: skip when the regime's own threshold has
+        # already been LEARNED (regime_params[regime].long/short_threshold) —
+        # _effective_thresholds already substituted that calibrated absolute
+        # value into long_base/short_base, so adding the static heuristic
+        # delta on top would double-count the regime's effect. Mirrors the
+        # analogous skip in _composite() for agent weights.
+        if self._regime is not None and not self._regime_block():
             long_thr  += self._regime.long_delta
             short_thr += self._regime.short_delta
         if composite >= long_thr:

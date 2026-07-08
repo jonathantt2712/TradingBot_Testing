@@ -190,6 +190,35 @@ def test_direction_risk_off_regime_shifts_both_bars():
     assert pm._direction(33.0) is Decision.SHORT
 
 
+def test_direction_learned_regime_threshold_is_not_double_counted(tmp_path, monkeypatch):
+    # regime_params carries a threshold the tuner already calibrated FOR this
+    # regime from its own trade history. The static +8/-6 RISK_OFF heuristic
+    # delta must NOT also apply on top of it, or the regime's effect on the
+    # entry bar is counted twice.
+    import json, execution.portfolio_manager as pm_mod
+    weights_file = tmp_path / "strategy_weights.json"
+    weights_file.write_text(json.dumps({
+        "live_tuning_active": True,
+        "regime_params": {
+            "risk_off": {
+                "agent_weights": {"technical": 0.4},
+                "long_threshold": 68.0,
+                "short_threshold": 34.0,
+            },
+        },
+    }))
+    monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
+    pm = make_pm()
+    pm._tuned_weights_ts = 0.0
+    pm.set_regime(_regime(MarketRegime.RISK_OFF))
+    long_base, short_base = pm._effective_thresholds(backtest_mode=False)
+    assert long_base == pytest.approx(68.0)
+    assert short_base == pytest.approx(34.0)
+    # Without the fix these would need composite>=76 (68+8) / <=28 (34-6).
+    assert pm._direction(69.0, long_base=long_base, short_base=short_base) is Decision.LONG
+    assert pm._direction(33.0, long_base=long_base, short_base=short_base) is Decision.SHORT
+
+
 # ── daily-loss kill switch ───────────────────────────────────────────────────
 
 def test_kill_switch_trips_after_daily_loss():
