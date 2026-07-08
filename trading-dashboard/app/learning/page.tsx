@@ -1,6 +1,7 @@
 'use client'
 import { useState, useCallback, useMemo } from 'react'
 import { usePolling } from '@/lib/usePolling'
+import type { ImprovementData } from '@/types/trading'
 import {
   LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, ReferenceLine,
@@ -41,6 +42,7 @@ function StatCard({ label, value, tone }: { label: string; value: string; tone?:
 
 export default function LearningPage() {
   const [data,    setData]    = useState<LearningData | null>(null)
+  const [improve, setImprove] = useState<ImprovementData | null>(null)
   const [live,    setLive]    = useState(false)
   const [loading, setLoading] = useState(true)
   const [simulating, setSimulating] = useState(false)
@@ -68,6 +70,11 @@ export default function LearningPage() {
       setLive(false)
     } finally {
       setLoading(false)
+    }
+    try {
+      setImprove(await api.improvement())
+    } catch {
+      /* panel shows empty state */
     }
   }, [])
 
@@ -251,6 +258,66 @@ export default function LearningPage() {
           </div>
         </>
       )}
+
+      {/* Self-improvement timeline: what the bot changed about itself */}
+      <div className="card p-5">
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="text-sm font-semibold text-primary">Self-Improvement Timeline</h2>
+          <div className="flex items-center gap-2">
+            {improve?.auto_optimize_enabled
+              ? <span className="rounded-full border border-bull/30 bg-bull/10 px-2 py-0.5 text-[10px] font-bold text-bull">NIGHTLY AUTO-OPTIMIZE ON</span>
+              : <span className="rounded-full border border-bg-border px-2 py-0.5 text-[10px] font-bold text-muted">MANUAL APPLY ONLY</span>}
+            {improve?.live_tuning_active &&
+              <span className="rounded-full border border-brand-cyan/30 bg-brand-cyan/10 px-2 py-0.5 text-[10px] font-bold text-brand-cyan">TUNED PARAMS LIVE</span>}
+          </div>
+        </div>
+        <p className="text-xs text-muted mb-3">
+          Every nightly optimizer decision — applied parameter changes with their held-out profit and
+          luck-screen p-value, and every refusal with its reason.
+        </p>
+        {(improve?.history?.length ?? 0) === 0 ? (
+          <p className="text-xs text-muted py-4 text-center">
+            No optimizer decisions recorded yet — the first nightly run writes its outcome here.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-muted border-b border-bg-border">
+                  <th className="py-1.5 pr-3 font-medium">When</th>
+                  <th className="py-1.5 pr-3 font-medium">Source</th>
+                  <th className="py-1.5 pr-3 font-medium">Outcome</th>
+                  <th className="py-1.5 pr-3 font-medium">OOS P&L</th>
+                  <th className="py-1.5 pr-3 font-medium">Luck p</th>
+                  <th className="py-1.5 font-medium">Change / Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {improve!.history.slice(0, 20).map((ev, i) => (
+                  <tr key={i} className="border-b border-bg-border/50 align-top">
+                    <td className="py-1.5 pr-3 whitespace-nowrap text-subtle">{new Date(ev.ts + 'Z').toLocaleString()}</td>
+                    <td className="py-1.5 pr-3 uppercase text-subtle">{ev.source}</td>
+                    <td className="py-1.5 pr-3">
+                      <span className={
+                        ev.status === 'applied' ? 'text-bull font-semibold'
+                        : ev.status === 'rejected' ? 'text-caution font-semibold'
+                        : 'text-bear font-semibold'
+                      }>{ev.status?.toUpperCase()}</span>
+                    </td>
+                    <td className="py-1.5 pr-3 whitespace-nowrap">{ev.oos_pnl != null ? `$${ev.oos_pnl.toFixed(0)}` : '—'}</td>
+                    <td className="py-1.5 pr-3">{ev.p_value != null ? ev.p_value.toFixed(3) : '—'}</td>
+                    <td className="py-1.5 text-subtle">
+                      {ev.status === 'applied' && ev.applied
+                        ? Object.entries(ev.applied).map(([k, v]) => `${k}=${v}`).join('  ')
+                        : (ev.reason ?? '—')}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

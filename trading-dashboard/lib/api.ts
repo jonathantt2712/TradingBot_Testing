@@ -9,6 +9,7 @@ import type {
   ExecuteRequest,
   ExecuteResponse,
   LearningData,
+  ImprovementData,
   ValidationData,
   OhlcBar,
 } from '@/types/trading'
@@ -50,6 +51,7 @@ export const api = {
   snapshots:       (syms: string[])                     => clientGet(`/api/alpaca/snapshots?symbols=${syms.join(',')}`),
   scanResults:     (): Promise<ScanResults>                        => clientGet('/api/bot/scan-results'),
   learning:        (): Promise<LearningData>                       => clientGet('/api/bot/learning'),
+  improvement:     (): Promise<ImprovementData>                     => clientGet('/api/bot/improvement'),
   validation:      (): Promise<ValidationData>                     => clientGet('/api/bot/validation'),
   bars:            (symbol: string, timeframe = '5Min', limit = 200): Promise<Record<string, OhlcBar[]>> =>
                      clientGet(`/api/alpaca/bars?symbols=${encodeURIComponent(symbol)}&timeframe=${timeframe}&limit=${limit}`),

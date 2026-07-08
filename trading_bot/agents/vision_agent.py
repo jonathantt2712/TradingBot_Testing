@@ -110,6 +110,12 @@ class VisionAgent(BaseAgent):
             # (e.g. once a transient quota limit clears).
             if self._cache_ttl > 0:
                 self._cache[ctx.ticker.upper()] = (time.monotonic(), result)
+                # Evict expired entries so a rotating universe can't grow the
+                # cache without bound over a long session.
+                if len(self._cache) > 200:
+                    now = time.monotonic()
+                    self._cache = {k: v for k, v in self._cache.items()
+                                   if now - v[0] < self._cache_ttl}
             return result
         except Exception as exc:
             logger.warning("VisionAgent failed for %s: %s", ctx.ticker, exc)

@@ -24,6 +24,7 @@ export const authConfig: NextAuthConfig = {
     async jwt({ token, user, trigger, session }) {
       if (user) {
         token.userId = user.id as string
+        token.role   = (user as unknown as { role?: string }).role ?? 'viewer'
         token.mustChangePassword = (user as unknown as { mustChangePassword: boolean }).mustChangePassword
       }
       if (trigger === 'update' && session?.mustChangePassword === false) {
@@ -33,6 +34,7 @@ export const authConfig: NextAuthConfig = {
     },
     async session({ session, token }) {
       session.user.id = token.userId
+      session.user.role = token.role ?? 'viewer'
       session.user.mustChangePassword = token.mustChangePassword
       return session
     },

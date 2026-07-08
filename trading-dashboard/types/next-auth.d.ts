@@ -4,12 +4,14 @@ declare module 'next-auth' {
   interface Session {
     user: {
       id: string
+      role: string
       mustChangePassword: boolean
     } & DefaultSession['user']
   }
 
   interface User {
     alpacaPaper:        boolean
+    role:               string
     mustChangePassword: boolean
   }
 }
@@ -18,6 +20,7 @@ declare module 'next-auth' {
 declare module '@auth/core/jwt' {
   interface JWT {
     userId: string
+    role?: string
     mustChangePassword: boolean
   }
 }

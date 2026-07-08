@@ -56,6 +56,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           id:                 user.id,
           email:              user.email,
           alpacaPaper:        user.alpacaPaper,
+          role:               user.role,
           mustChangePassword,
         }
       },

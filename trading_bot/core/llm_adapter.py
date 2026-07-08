@@ -212,6 +212,7 @@ class LLMAdapter:
                 )
                 text = (resp.text or "").strip()
                 if text:
+                    health.resolve("llm_quota:gemini")   # throttle (if any) has lifted
                     return text
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (attempt + 1))
@@ -244,6 +245,7 @@ class LLMAdapter:
                 )
                 text = (resp.text or "").strip()
                 if text:
+                    health.resolve("llm_quota:gemini")
                     return text
                 if attempt < 2:
                     await asyncio.sleep(1.0 * (attempt + 1))
@@ -273,6 +275,7 @@ class LLMAdapter:
             if system:
                 kwargs["system"] = system
             resp = await client.messages.create(**kwargs)
+            health.resolve("llm_quota:anthropic")
             return resp.content[0].text.strip()
         except Exception as exc:
             if _is_auth_error(exc):
@@ -299,7 +302,9 @@ class LLMAdapter:
                     ],
                 }],
             )
-            return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+            out = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+            health.resolve("llm_quota:anthropic")
+            return out
         except Exception as exc:
             if _is_auth_error(exc):
                 self._disable("anthropic", exc)
