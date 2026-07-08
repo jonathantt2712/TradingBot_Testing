@@ -182,7 +182,7 @@ class FundamentalAgent(BaseAgent):
         "record", "strong", "strength", "solid",
         # Analyst / valuation
         "upgrade", "upgraded", "outperform", "buy", "overweight",
-        "bullish", "initiate", "positive surprise",
+        "bullish", "initiate",
         # Growth / momentum
         "growth", "accelerating", "expansion", "surge", "surges", "rally", "rallies",
         "breakout",
@@ -190,7 +190,9 @@ class FundamentalAgent(BaseAgent):
         "acquisition", "buyback", "dividend", "approved", "approval", "cleared",
         "partnership", "contract", "deal", "awarded",
         # FDA / biotech
-        "efficacy", "trial success", "positive data",
+        "efficacy",
+        # "positive surprise", "trial success", "positive data" are scored via
+        # _BULL_PHRASES (worth 2 hits) — not repeated here to avoid double-counting.
     }
     _BEAR = {
         # Earnings / guidance
@@ -198,15 +200,17 @@ class FundamentalAgent(BaseAgent):
         "weak", "weakness", "soft", "deceleration",
         # Analyst / valuation
         "downgrade", "downgraded", "underperform", "sell", "underweight",
-        "bearish", "negative surprise",
+        "bearish",
         # Losses / risk
         "loss", "losses", "plunge", "plunges", "collapse", "warning", "cautious",
         "concern", "probe", "investigation", "lawsuit", "recall",
         "restatement", "fraud", "default", "bankruptcy",
         # FDA / biotech
-        "failed", "failure", "trial failure",
+        "failed", "failure",
         # Macro / regulatory
         "tariff", "sanction", "delisted", "delisting",
+        # "negative surprise", "trial failure" are scored via _BEAR_PHRASES
+        # (worth 2 hits) — not repeated here to avoid double-counting.
     }
     # Multi-word phrases worth double-weight (more specific = more signal)
     _BULL_PHRASES = frozenset({

@@ -76,6 +76,16 @@ def test_phrases_weighted_double():
     assert ev.score > 50.0
 
 
+def test_phrase_not_also_double_counted_as_single_keyword():
+    # "trial success" is a _BULL_PHRASES entry (worth 2 hits). It must not ALSO
+    # sit in the plain _BULL word set, or a headline containing it would score
+    # 1 (word) + 2 (phrase) = 3 hits instead of the intended 2.
+    ev = _run(_agent([_article("Drug trial success announced")]))
+    assert ev.reasoning["bull_phrases_matched"] == ["trial success"]
+    assert ev.reasoning["bull_signals"] == 2
+    assert ev.reasoning["bear_signals"] == 0
+
+
 def test_keyword_confidence_capped():
     # pile on signals — confidence must stay <= 0.45 per the fallback cap
     headline = " ".join(["beat", "upgrade", "record", "surge", "growth", "rally",
