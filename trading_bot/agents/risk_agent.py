@@ -306,7 +306,11 @@ class RiskAgent(BaseAgent):
         return min(atr_dist, room)
 
     def _viability_score(self, plan: RiskParameters, ctx: AnalysisContext) -> float:
-        rr_score = np.interp(plan.risk_reward, [1.0, self.cfg.min_risk_reward, 3.0], [20, 55, 95])
+        # np.interp requires its breakpoints strictly increasing; clamp the
+        # configured min_risk_reward into (1.0, 3.0) so an env override at or
+        # outside the outer bounds can't silently produce garbage scores.
+        mid_rr = min(2.9, max(1.1, self.cfg.min_risk_reward))
+        rr_score = np.interp(plan.risk_reward, [1.0, mid_rr, 3.0], [20, 55, 95])
         size_ok = 60.0 if plan.qty > 0 else 1.0
         vol = self._atr(ctx.bars) / max(ctx.last_price or 1.0, 1e-9)
         vol_score = float(np.interp(vol, [0.005, 0.03, 0.08], [85, 55, 15]))
