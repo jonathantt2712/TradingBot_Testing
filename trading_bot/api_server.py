@@ -153,6 +153,9 @@ _Decision          = None
 _EXIT_DECISIONS: list = []  # rolling log of exit-monitor and EOD review decisions
 _MAX_EXIT_LOG     = 500
 _telegram          = None   # TelegramPublisher — optional push notifications
+# Tracks last strategy-alert per ticker: {ticker: (unix_ts, score)} — prevents
+# the same strong signal from spamming Telegram on every 3-minute scan.
+_strategy_alerted: dict = {}
 
 try:
     import pandas as pd
@@ -492,12 +495,12 @@ def _kelly_qty(
 DEFAULT_WEIGHTS: Dict[str, Any] = {
     "chg_weight":            4.0,
     "intra_weight":          2.0,
-    "min_chg_pct":           0.3,
+    "min_chg_pct":           0.15,
     "stop_pct":              0.02,
     "tp_pct":                0.05,
     "score_floor":           20,
     "score_ceil":            80,
-    "min_score":             40,
+    "min_score":             35,
     "time_window_minutes":   45,
     "atr_stop_multiple":     2.0,
     "atr_target_multiple":   3.0,
@@ -932,6 +935,8 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             changed_ids.add(_trade_key(trade))
             _update_agent_attribution(trade)
             if _telegram is not None:
+                logger.info("Telegram: sending trade_exit for %s %s via %s pnl=%.2f",
+                            direction, trade["ticker"], exit_reason, pnl)
                 asyncio.create_task(_telegram.send_trade_exit(trade, exit_price, exit_reason, pnl))
             logger.info("Closed %s %s via %s: exit=%.2f PnL=$%.2f (%.2f%%)",
                         direction, trade["ticker"], exit_reason, exit_price, pnl, pnl_pct)
@@ -1153,7 +1158,7 @@ def _update_strategy_weights() -> None:
 
     if win_rate > 0.60:
         if "min_score"          not in locked:
-            weights["min_score"]          = max(30,  weights["min_score"] - 1)
+            weights["min_score"]          = max(30,  weights["min_score"] - 2)
         if "time_window_minutes" not in locked:
             weights["time_window_minutes"] = min(60,  weights["time_window_minutes"] + 2)
         if "atr_target_multiple" not in locked:
@@ -1162,7 +1167,7 @@ def _update_strategy_weights() -> None:
             weights["chg_weight"]          = min(10.0, weights["chg_weight"] * 1.02)
     elif win_rate < 0.40:
         if "min_score"          not in locked:
-            weights["min_score"]          = min(70,  weights["min_score"] + 2)
+            weights["min_score"]          = min(52,  weights["min_score"] + 2)
         if "time_window_minutes" not in locked:
             weights["time_window_minutes"] = max(20,  weights["time_window_minutes"] - 5)
         if "atr_stop_multiple"  not in locked:
@@ -1328,6 +1333,7 @@ def _reset_scan_stats_if_needed() -> None:
             "last_scan_at":     None,
             "market_closed_skips": 0,
         })
+        _strategy_alerted.clear()
 
 
 def _cb_reset_cutoff() -> str:
@@ -1912,10 +1918,13 @@ async def _run_market_scan_inner(force: bool = False) -> None:
                 chg_w   = weights.get("chg_weight", 4.0)
                 intra_w = weights.get("intra_weight", 2.0)
                 score   = min(max(50 + chg_pct * chg_w + intra_pct * intra_w, score_floor), score_ceil)
-                if score < min_score:
+                direction = "LONG" if chg_pct > 0 else "SHORT"
+                if direction == "LONG" and score < min_score:
                     _rej(sym, f"Fallback score too low ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
                     continue
-                direction   = "LONG" if chg_pct > 0 else "SHORT"
+                if direction == "SHORT" and (100 - score) < min_score:
+                    _rej(sym, f"Fallback score too low ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
+                    continue
                 entry       = round(price, 2)
                 d           = 1 if direction == "LONG" else -1
                 stop_loss   = round(entry * (1 - d * stop_pct), 2)
@@ -1979,9 +1988,25 @@ async def _run_market_scan_inner(force: bool = False) -> None:
 
         # Push high-conviction signals to Telegram
         if _telegram is not None and recs:
-            strong_hits = [r for r in recs if r["composite_score"] > 60]
-            if strong_hits:
-                asyncio.create_task(_telegram.send_strategy_alert(strong_hits))
+            import time as _time
+            now_ts = _time.time()
+            new_hits = []
+            for r in recs:
+                score  = r.get("composite_score", 0)
+                ticker = r.get("ticker", "")
+                if score <= 60:
+                    continue
+                prev = _strategy_alerted.get(ticker)
+                if prev is None:
+                    new_hits.append(r)
+                    _strategy_alerted[ticker] = (now_ts, score)
+                else:
+                    prev_ts, prev_score = prev
+                    if now_ts - prev_ts >= 4 * 3600 or score >= prev_score + 10:
+                        new_hits.append(r)
+                        _strategy_alerted[ticker] = (now_ts, score)
+            if new_hits:
+                asyncio.create_task(_telegram.send_strategy_alert(new_hits))
 
         scanned_n = len(symbols_raw)
         skipped_n = scanned_n - len(recs)
@@ -3459,6 +3484,7 @@ async def execute_trade(body: ExecuteBody):
     if reason:
         raise HTTPException(status_code=409, detail=reason)
     if _telegram is not None and trade:
+        logger.info("Telegram: sending trade_entry for %s %s", trade.get("direction"), trade.get("ticker"))
         asyncio.create_task(_telegram.send_trade_entry(trade))
     return {"status": "recorded", "trade_id": trade["id"]}
 
@@ -3677,6 +3703,14 @@ async def reset_circuit_breaker():
     })
     logger.info("Circuit breaker manually reset — losses before %s acknowledged", now_iso)
     return {"status": "reset", "timestamp": now_iso}
+
+
+@app.post("/api/reset-weights", dependencies=[Depends(_verify_bot_secret)])
+async def reset_strategy_weights():
+    """Reset strategy_weights.json to factory defaults (clears adaptive tuning)."""
+    _save_weights({**DEFAULT_WEIGHTS})
+    logger.info("Strategy weights reset to factory defaults")
+    return {"status": "reset", "weights": DEFAULT_WEIGHTS, "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.get("/api/rejections", dependencies=[Depends(_verify_bot_secret)])

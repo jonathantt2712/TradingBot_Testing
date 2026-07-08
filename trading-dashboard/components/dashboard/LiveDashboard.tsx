@@ -1,19 +1,15 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
-import dynamic from 'next/dynamic'
-import { StatsCards }     from './StatsCards'
-import { PositionsTable } from './PositionsTable'
+import React, { useEffect, useState, useCallback } from 'react'
+import { AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react'
+import { StatsCards }      from './StatsCards'
+import { PnLChart }        from './PnLChart'
+import { RegimeIndicator } from './RegimeIndicator'
+import { SectorHeatmap }   from './SectorHeatmap'
+import { PositionsTable }  from './PositionsTable'
 import { cn } from '@/lib/utils'
-import type { PortfolioStats, PnLPoint, SectorStat } from '@/types/trading'
+import type { PortfolioStats, PnLPoint, RegimeInfo, SectorStat } from '@/types/trading'
 import type { AlpacaPosition } from '@/lib/alpaca'
-
-// Charts pull in recharts (~115 kB). Defer it so the dashboard shell (stats,
-// regime, positions) paints first and the chart hydrates client-side after.
-const PnLChart = dynamic(() => import('./PnLChart').then(m => m.PnLChart), {
-  ssr: false,
-  loading: () => <div className="h-64 w-full animate-pulse rounded-lg bg-bg-elev" />,
-})
 
 // Positions and recommendations: refresh every 30s
 const FAST_MS = 30_000
@@ -33,9 +29,9 @@ interface ScanStats {
 interface Props {
   initialStats:     PortfolioStats
   initialPnl:       PnLPoint[]
+  initialRegime:    RegimeInfo
   initialSectors:   SectorStat[]
   initialPositions: AlpacaPosition[]
-  initialScanStats: ScanStats | null
 }
 
 function relativeTime(iso: string): string {
@@ -48,32 +44,22 @@ function relativeTime(iso: string): string {
 export function LiveDashboard({
   initialStats,
   initialPnl,
+  initialRegime,
   initialSectors,
   initialPositions,
-  initialScanStats,
 }: Props) {
   const [stats,          setStats]          = useState(initialStats)
   const [pnl,            setPnl]            = useState(initialPnl)
+  const [regime,         setRegime]         = useState(initialRegime)
   const [sectors,        setSectors]        = useState(initialSectors)
   const [positions,      setPositions]      = useState(initialPositions)
-  const [scanStats,      setScanStats]      = useState<ScanStats | null>(initialScanStats)
-  const [circuitBreaker, setCircuitBreaker] = useState<{ halted: boolean; reason?: string } | null>(
-    initialScanStats?.circuit_breaker ?? null
-  )
+  const [scanStats,      setScanStats]      = useState<ScanStats | null>(null)
+  const [circuitBreaker, setCircuitBreaker] = useState<{ halted: boolean; reason?: string } | null>(null)
 
-  // Tracks symbols the user has closed — persists across refreshes until
-  // Alpaca confirms the position is truly gone from their end.
-  const pendingClose = useRef<Set<string>>(new Set())
-
-  const applyPositions = useCallback((raw: AlpacaPosition[]) => {
-    const filtered = raw.filter(p => !pendingClose.current.has(p.symbol))
-    // Once Alpaca stops returning a symbol, remove it from pendingClose
-    const alpacaSymbols = new Set(raw.map(p => p.symbol))
-    for (const sym of pendingClose.current) {
-      if (!alpacaSymbols.has(sym)) pendingClose.current.delete(sym)
-    }
-    return filtered
-  }, [])
+  // Symbols the user closed this session — shown with "pending close" badge
+  // until Alpaca confirms they're gone on next refresh.
+  const [pendingClose,   setPendingClose]   = useState<Set<string>>(new Set())
+  const [alertsOpen,     setAlertsOpen]     = useState(false)
 
   // Fast: positions + stats (30s)
   const refreshFast = useCallback(async () => {
@@ -82,49 +68,44 @@ export function LiveDashboard({
       fetch('/api/bot/sectors').then(res => res.ok ? res.json() : null),
       fetch('/api/bot/stats').then(res => res.ok ? res.json() : null),
     ])
-    const rawPositions  = pos.status === 'fulfilled' && Array.isArray(pos.value) ? pos.value as AlpacaPosition[] : null
-    const newPositions  = rawPositions ? applyPositions(rawPositions) : null
-    if (newPositions !== null)                                         setPositions(newPositions)
+    const rawPositions = pos.status === 'fulfilled' && Array.isArray(pos.value) ? pos.value as AlpacaPosition[] : null
+    if (rawPositions !== null) {
+      // Clear pendingClose for symbols Alpaca no longer reports (confirmed closed)
+      setPendingClose(prev => {
+        const next = new Set(prev)
+        for (const sym of prev) {
+          if (!rawPositions.some(p => p.symbol === sym)) next.delete(sym)
+        }
+        return next.size === prev.size ? prev : next
+      })
+      setPositions(rawPositions)
+    }
     if (sec.status === 'fulfilled' && Array.isArray(sec.value))       setSectors(sec.value)
     if (s.status   === 'fulfilled' && s.value && !s.value.error) {
-      setStats(prev => {
-        const next = { ...s.value }
-        next.open_positions = newPositions !== null ? newPositions.length : s.value.open_positions
-        // Preserve Alpaca-computed values when the bot returns its 0 defaults.
-        // These are set server-side from the equity curve and the bot has no
-        // access to Alpaca history, so its values are always less accurate.
-        if (!next.sharpe_ratio  && prev.sharpe_ratio)  next.sharpe_ratio  = prev.sharpe_ratio
-        if (!next.max_drawdown  && prev.max_drawdown)  next.max_drawdown  = prev.max_drawdown
-        if (!next.total_pnl     && prev.total_pnl)     next.total_pnl     = prev.total_pnl
-        if (!next.today_pnl     && prev.today_pnl)     next.today_pnl     = prev.today_pnl
-        if (!next.win_rate      && prev.win_rate)      next.win_rate      = prev.win_rate
-        if (!next.total_trades  && prev.total_trades)  next.total_trades  = prev.total_trades
-        return next
-      })
-    }
-  }, [applyPositions])
-
-  // Slow: scan-stats only (5 min).
-  // PnL is historical daily data — SSR loads it fresh on each page load,
-  // no need to poll and risk overwriting with empty/wrong data mid-session.
-  const refreshSlow = useCallback(async () => {
-    const ss = await fetch('/api/bot/scan-stats').then(r => r.ok ? r.json() : null).catch(() => null)
-    if (ss) {
-      setScanStats(ss)
-      setCircuitBreaker(ss.circuit_breaker ?? null)
+      const newStats = { ...s.value }
+      newStats.open_positions = rawPositions !== null ? rawPositions.length : s.value.open_positions
+      setStats(newStats)
     }
   }, [])
 
-  // ⚠️  DO NOT add an immediate useEffect(() => { refreshFast/Slow() }, [...]) here.
-  //
-  // This component receives all its data as fresh SSR props (fetched server-side
-  // on every page load). Firing a client-side fetch on mount overwrites those
-  // Alpaca-computed values (Sharpe, Max DD, total P&L, regime) with the bot's
-  // cached/default values ~500ms later, causing a visible flicker.
-  //
-  // Polling starts AFTER the first interval so SSR data is never clobbered.
-  // If you need data not covered by SSR, add it to loadDashboard() in app/page.tsx
-  // and pass it as an initial* prop — then use skipInitialRun: true in usePolling.
+  // Slow: PnL chart, regime, scan-stats (5 min)
+  const refreshSlow = useCallback(async () => {
+    const [p, r, ss] = await Promise.allSettled([
+      fetch('/api/bot/pnl').then(res => res.ok ? res.json() : null),
+      fetch('/api/bot/regime').then(res => res.ok ? res.json() : null),
+      fetch('/api/bot/scan-stats').then(res => res.ok ? res.json() : null),
+    ])
+    if (p.status  === 'fulfilled' && Array.isArray(p.value))  setPnl(p.value)
+    if (r.status  === 'fulfilled' && r.value?.regime)          setRegime(r.value)
+    if (ss.status === 'fulfilled' && ss.value) {
+      setScanStats(ss.value)
+      setCircuitBreaker(ss.value.circuit_breaker ?? null)
+    }
+  }, [])
+
+  // Initial load of slow data
+  useEffect(() => { refreshSlow() }, [refreshSlow])
+
   useEffect(() => {
     const fastId = setInterval(refreshFast, FAST_MS)
     return () => clearInterval(fastId)
@@ -136,62 +117,111 @@ export function LiveDashboard({
   }, [refreshSlow])
 
   function handleClosed(symbol: string) {
-    // Mark as pending close — survives every future Alpaca refresh
-    pendingClose.current.add(symbol)
-    // Remove immediately from every piece of state that mentions positions
-    setPositions(prev => prev.filter(p => p.symbol !== symbol))
-    setStats(prev => ({ ...prev, open_positions: Math.max(0, (prev.open_positions ?? 1) - 1) }))
+    setPendingClose(prev => new Set([...prev, symbol]))
+  }
+
+  // Build issues list from scan stats + circuit breaker
+  const issues: { id: string; label: string; detail?: string; action?: React.ReactNode }[] = []
+  if (circuitBreaker?.halted) {
+    issues.push({
+      id: 'cb',
+      label: 'Circuit Breaker Active',
+      detail: circuitBreaker.reason?.replace(/_/g, ' '),
+      action: (
+        <button
+          onClick={async () => {
+            await fetch('/api/bot/reset-circuit-breaker', { method: 'POST' })
+            setCircuitBreaker(null)
+          }}
+          className="rounded-md border border-bear/30 px-2 py-0.5 text-[10px] text-bear hover:bg-bear/10 transition-colors"
+        >
+          Reset
+        </button>
+      ),
+    })
+  }
+  if ((scanStats?.scan_errors ?? 0) > 0) {
+    issues.push({
+      id: 'scan-err',
+      label: `${scanStats!.scan_errors} scan error${(scanStats!.scan_errors ?? 0) > 1 ? 's' : ''}`,
+      detail: scanStats?.last_scan_at ? `Last scan: ${relativeTime(scanStats.last_scan_at)}` : undefined,
+    })
+  }
+  if (scanStats && !scanStats.market_open && (scanStats.scans_today ?? 0) === 0) {
+    issues.push({ id: 'no-scans', label: 'No scans today', detail: 'Market may be closed or bot offline' })
   }
 
   return (
     <>
-      {/* Circuit breaker — full width, above everything */}
-      {circuitBreaker?.halted && (
-        <div className="rounded-xl border border-bear/40 bg-bear/10 px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-bear animate-pulse" />
-            <span className="text-sm font-semibold text-bear">Circuit Breaker Active</span>
-            <span className="text-xs text-muted">{circuitBreaker.reason?.replace(/_/g, ' ')}</span>
-          </div>
+      {/* Compact alerts bar — only shown when there are issues */}
+      {issues.length > 0 && (
+        <div className={cn(
+          'rounded-lg border transition-colors',
+          issues.some(i => i.id === 'cb') ? 'border-bear/40 bg-bear/5' : 'border-caution/40 bg-caution/5',
+        )}>
+          {/* Header — always visible */}
           <button
-            onClick={async () => {
-              await fetch('/api/bot/reset-circuit-breaker', { method: 'POST' })
-              setCircuitBreaker(null)
-            }}
-            className="text-xs text-muted hover:text-primary transition-colors"
+            onClick={() => setAlertsOpen(v => !v)}
+            className="flex w-full items-center gap-2 px-4 py-2 text-left"
           >
-            Reset
+            <AlertTriangle className={cn(
+              'h-3.5 w-3.5 shrink-0',
+              issues.some(i => i.id === 'cb') ? 'text-bear' : 'text-caution',
+            )} />
+            <span className={cn(
+              'text-xs font-semibold',
+              issues.some(i => i.id === 'cb') ? 'text-bear' : 'text-caution',
+            )}>
+              {issues.length === 1 ? issues[0].label : `${issues.length} התראות`}
+            </span>
+            {alertsOpen
+              ? <ChevronUp className="ml-auto h-3.5 w-3.5 text-muted" />
+              : <ChevronDown className="ml-auto h-3.5 w-3.5 text-muted" />
+            }
           </button>
-        </div>
-      )}
 
-      {/* Scan stats strip */}
-      {scanStats && (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border border-bg-border bg-bg-card px-4 py-2 text-xs text-muted">
-          <span className="flex items-center gap-1.5 font-medium">
-            <span className={cn('h-2 w-2 rounded-full', scanStats.market_open ? 'bg-bull' : 'bg-bear')} />
-            {scanStats.market_open ? 'Market Open' : 'Market Closed'}
-          </span>
-          {scanStats.last_scan_at && (
-            <span>Last scan: <span className="text-subtle">
-              {relativeTime(scanStats.last_scan_at)}
-              {' '}
-              <span className="text-muted">({new Date(scanStats.last_scan_at + (scanStats.last_scan_at.endsWith('Z') ? '' : 'Z')).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})</span>
-            </span></span>
-          )}
-          <span>Scans today: <span className="text-subtle">{scanStats.scans_today ?? '—'}</span></span>
-          <span>Tickers scanned: <span className="text-subtle">{scanStats.tickers_scanned ?? '—'}</span></span>
-          {(scanStats.scan_errors ?? 0) > 0 && (
-            <span className="text-bear font-semibold">Errors: {scanStats.scan_errors}</span>
+          {/* Expanded detail */}
+          {alertsOpen && (
+            <div className="border-t border-bg-border px-4 py-3 space-y-2">
+              {issues.map(issue => (
+                <div key={issue.id} className="flex items-start justify-between gap-3">
+                  <div>
+                    <span className="text-xs font-semibold text-primary">{issue.label}</span>
+                    {issue.detail && (
+                      <p className="text-[11px] text-muted mt-0.5">{issue.detail}</p>
+                    )}
+                  </div>
+                  {issue.action}
+                </div>
+              ))}
+              {scanStats && (
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-bg-border pt-3 text-[11px] text-muted">
+                  <span className="flex items-center gap-1.5">
+                    <span className={cn('h-1.5 w-1.5 rounded-full', scanStats.market_open ? 'bg-bull' : 'bg-muted')} />
+                    {scanStats.market_open ? 'Market Open' : 'Market Closed'}
+                  </span>
+                  {scanStats.last_scan_at && <span>Last scan: {relativeTime(scanStats.last_scan_at)}</span>}
+                  <span>Scans today: {scanStats.scans_today ?? '—'}</span>
+                  <span>Tickers: {scanStats.tickers_scanned ?? '—'}</span>
+                  <span>Signals generated: {scanStats.recs_generated ?? '—'}</span>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
 
       <StatsCards stats={stats} />
 
-      <PnLChart data={pnl} />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_220px]">
+        <PnLChart data={pnl} />
+        <RegimeIndicator regime={regime} />
+      </div>
 
-      <PositionsTable positions={positions} onClosed={handleClosed} />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
+        <SectorHeatmap sectors={sectors} />
+        <PositionsTable positions={positions} onClosed={handleClosed} pendingClose={pendingClose} />
+      </div>
     </>
   )
 }
