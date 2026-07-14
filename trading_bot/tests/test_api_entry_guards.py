@@ -41,17 +41,17 @@ def _closed_trade(ticker: str, *, pnl: float = -50.0) -> dict:
 
 # ── circuit breaker ──────────────────────────────────────────────────────────
 
-def test_circuit_breaker_blocks_on_consecutive_losses(tmp_path, monkeypatch):
+def test_circuit_breaker_advisory_on_consecutive_losses(tmp_path, monkeypatch):
+    # Breaker is advisory: entry guard clears, but dashboard state shows halted.
     trades = [_closed_trade("AAA", pnl=-10) for _ in range(3)]
     monkeypatch.setattr(_srv, "MAX_CONSECUTIVE_LOSSES", 3)
     monkeypatch.setattr(_srv, "TRADES_FILE", tmp_path / "nonexistent.json")
 
-    # Patch _consecutive_losses to return 3 without reading disk
     with patch.object(_srv, "_consecutive_losses", return_value=3), \
          patch.object(_srv, "_daily_pnl_pct", return_value=0.0):
         reason = _srv._entry_guard_reason("NVDA", "LONG", 70.0, 1.0, trades)
-    assert reason is not None
-    assert "consecutive" in reason.lower() or "loss" in reason.lower()
+    assert reason is None                               # entry proceeds
+    assert _srv._circuit_breaker["halted"] is True      # dashboard shows advisory
 
 
 def test_circuit_breaker_clears_on_no_losses(tmp_path, monkeypatch):

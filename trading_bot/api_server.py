@@ -1091,6 +1091,24 @@ _circuit_breaker: Dict[str, Any] = {
     "daily_pnl_pct":   0.0,
 }
 
+# Wall-clock timestamp of the last successfully recorded trade entry.
+# Used to compute trading drought duration for adaptive threshold lowering.
+# Initialized from trades.json on first access; updated on every new entry.
+def _init_last_trade_ts() -> Optional[datetime]:
+    try:
+        trades = _load(TRADES_FILE, [])
+        if not isinstance(trades, list):
+            return None
+        executed = [t.get("executed_at") for t in trades if t.get("executed_at")]
+        if not executed:
+            return None
+        latest = max(executed)
+        return datetime.fromisoformat(latest)
+    except Exception:
+        return None
+
+_last_trade_placed_at: Optional[datetime] = None  # set lazily on first use
+
 
 def _reset_scan_stats_if_needed() -> None:
     today = str(date.today())
@@ -1191,24 +1209,37 @@ def _consecutive_losses() -> int:
 
 
 def _check_circuit_breaker() -> Optional[str]:
-    """Return a halt reason string if trading should be stopped, None if clear."""
-    # Consecutive loss check
+    """Update circuit-breaker dashboard state. Advisory only — never blocks entries.
+
+    The bot adapts to adverse conditions (lowers thresholds, widens search) rather
+    than halting. The dashboard banner still shows when thresholds are breached so
+    the operator is informed, but no entry is ever refused on this basis alone.
+    """
     consec = _consecutive_losses()
     _circuit_breaker["consecutive_losses"] = consec
     if consec >= MAX_CONSECUTIVE_LOSSES:
-        reason = f"{consec} consecutive losses — trading halted until manual reset"
-        _circuit_breaker.update({"halted": True, "reason": "consecutive_losses",
-                                  "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()})
-        return reason
+        logger.warning(
+            "Circuit-breaker advisory: %d consecutive losses (non-blocking — bot continues with adapted thresholds)",
+            consec,
+        )
+        _circuit_breaker.update({
+            "halted": True, "reason": "consecutive_losses",
+            "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        })
+        return None  # advisory only
 
-    # Daily P&L check
     daily_loss = _daily_pnl_pct()
     _circuit_breaker["daily_pnl_pct"] = round(daily_loss * 100, 2)
     if daily_loss <= -DAILY_LOSS_LIMIT_PCT:
-        reason = f"Daily loss limit hit ({daily_loss*100:.1f}%) — trading halted for today"
-        _circuit_breaker.update({"halted": True, "reason": "daily_loss",
-                                  "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()})
-        return reason
+        logger.warning(
+            "Circuit-breaker advisory: daily loss %.1f%% (non-blocking — bot continues with adapted thresholds)",
+            daily_loss * 100,
+        )
+        _circuit_breaker.update({
+            "halted": True, "reason": "daily_loss",
+            "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        })
+        return None  # advisory only
 
     _circuit_breaker["halted"] = False
     _circuit_breaker["reason"] = None
@@ -1430,6 +1461,9 @@ async def _run_market_scan_inner(force: bool = False) -> None:
     if _AGENTS_AVAILABLE and _pm is not None:
         _pm.risk.cfg.atr_stop_multiple   = weights.get("atr_stop_multiple",   2.0)
         _pm.risk.cfg.atr_target_multiple = weights.get("atr_target_multiple", 3.0)
+        # Proactively lower the R/R floor so the Risk Agent doesn't veto viable
+        # setups. Default 1.0 (was 1.5 from env) — tuner can raise it in weights.
+        _pm.risk.cfg.min_risk_reward     = weights.get("min_risk_reward",      1.0)
 
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())) as session:
@@ -3011,6 +3045,10 @@ async def _record_executed_trade(body: ExecuteBody) -> tuple[Optional[str], Opti
         history.append(trade)
         _save(HISTORY_FILE, history)
 
+    # Reset drought counter — a new entry resets the adaptive threshold
+    global _last_trade_placed_at
+    _last_trade_placed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
     # Store TP/SL context for auto-close detection
     ctx_data = _load(CONTEXT_FILE, {})
     if not isinstance(ctx_data, dict):
@@ -3083,12 +3121,42 @@ def _auto_exec_disarmed_reason() -> Optional[str]:
     return None
 
 
+def _adaptive_exec_min_score() -> float:
+    """Auto-exec conviction threshold, adaptively lowered during trading droughts.
+
+    Baseline: AUTO_EXEC_MIN_SCORE (env var, default 60).
+    Every 4 market-hours without a completed trade: -3 points (floor: 45).
+
+    Market hours approximation: 6.5h/day × 5 days/week ≈ 27% of calendar time.
+    We use elapsed calendar hours × 0.27 to estimate drought in market-hours.
+    """
+    global _last_trade_placed_at
+    if _last_trade_placed_at is None:
+        _last_trade_placed_at = _init_last_trade_ts()
+
+    if _last_trade_placed_at is None:
+        # No trade ever recorded — apply moderate initial reduction
+        drought_market_hours = 16.0
+    else:
+        elapsed_h = (datetime.now(timezone.utc).replace(tzinfo=None) - _last_trade_placed_at).total_seconds() / 3600
+        drought_market_hours = elapsed_h * 0.27  # calendar → market-hours approximation
+
+    reductions = int(drought_market_hours / 4)
+    effective = max(45.0, AUTO_EXEC_MIN_SCORE - reductions * 3)
+    if effective < AUTO_EXEC_MIN_SCORE:
+        logger.debug(
+            "Adaptive exec threshold: %.0f (drought ~%.1fh market-hours, %d reductions)",
+            effective, drought_market_hours, reductions,
+        )
+    return effective
+
+
 def _auto_exec_candidates(recs: list, now_iso: str) -> list:
     """Strong, fresh, sized recommendations eligible for autonomous entry.
 
-    Conviction is symmetric: a LONG needs composite_score >= AUTO_EXEC_MIN_SCORE,
-    a SHORT needs it <= 100 - AUTO_EXEC_MIN_SCORE. Expired or unsizable (qty<=0)
-    recs are skipped."""
+    Conviction threshold adapts downward during droughts (see _adaptive_exec_min_score).
+    Expired or unsizable (qty<=0) recs are always skipped."""
+    min_score = _adaptive_exec_min_score()
     out: list = []
     for r in recs:
         if not isinstance(r, dict):
@@ -3097,8 +3165,8 @@ def _auto_exec_candidates(recs: list, now_iso: str) -> list:
         score = r.get("composite_score")
         if score is None or direction not in ("LONG", "SHORT"):
             continue
-        strong = (score >= AUTO_EXEC_MIN_SCORE) if direction == "LONG" \
-            else (score <= 100 - AUTO_EXEC_MIN_SCORE)
+        strong = (score >= min_score) if direction == "LONG" \
+            else (score <= 100 - min_score)
         if not strong:
             continue
         exp = r.get("expires_at")
