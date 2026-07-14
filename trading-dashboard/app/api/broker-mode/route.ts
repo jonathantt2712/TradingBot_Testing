@@ -9,6 +9,7 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
 import { botGet, botPost } from '@/lib/bot-api'
+import { isOwner } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
 
@@ -26,6 +27,13 @@ export async function GET() {
 export async function POST(req: Request) {
   const session = await auth()
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!(await isOwner())) {
+    return NextResponse.json(
+      { error: 'Owner role required — this changes the shared bot for everyone' },
+      { status: 403 },
+    )
+  }
+
   let body: { broker?: string }
   try {
     body = await req.json()

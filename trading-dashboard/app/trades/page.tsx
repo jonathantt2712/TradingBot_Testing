@@ -265,6 +265,7 @@ export default function TradesPage() {
 
   const active = trades
     .filter(t => !executedIds.has(tradeKey(t)))
+    .filter(t => !t.expires_at || new Date(t.expires_at).getTime() > Date.now())
     .filter(t => filter === 'all' || t.direction === filter)
 
   // For the empty state: explain why nothing qualified and surface the nearest

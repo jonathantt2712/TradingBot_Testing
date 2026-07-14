@@ -71,6 +71,8 @@ MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
 DAILY_LOSS_LIMIT_PCT    = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.02"))   # 2% daily drawdown halt
 MAX_CONSECUTIVE_LOSSES  = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))       # 3 consecutive losses halt
 TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", "0.05"))  # 5% trailing distance
+MAX_SPREAD_BPS   = float(os.getenv("MAX_SPREAD_BPS", "30"))   # reject recs with wider quoted spread
+ENTRY_CUTOFF_MIN = int(os.getenv("ENTRY_CUTOFF_MIN", "60"))   # no auto entries in last N min of RTH
 PORTFOLIO_BETA_CAP = float(os.getenv("PORTFOLIO_BETA_CAP", "5.0"))  # max net |beta| across open positions
 
 # End-of-day position review
@@ -81,6 +83,16 @@ EOD_REVIEW_MIN_BEFORE     = int(os.getenv("EOD_REVIEW_MIN_BEFORE", "25"))       
 # per-agent scorecard, so learning keeps adapting on a cadence (not only the
 # instant a trade closes).
 STRATEGY_LOOP_INTERVAL_MIN = int(os.getenv("STRATEGY_LOOP_INTERVAL_MIN", "60"))
+
+# Nightly self-improvement: after the close, re-run the walk-forward optimizer
+# on fresh data and auto-apply the best params — ONLY when they validated
+# positive on the held-out split. Set AUTO_OPTIMIZE=false to require the
+# dashboard's manual "Apply Optimal Params" instead.
+AUTO_OPTIMIZE         = os.getenv("AUTO_OPTIMIZE", "true").lower() in ("1", "true", "yes")
+AUTO_OPTIMIZE_HOUR_ET = int(os.getenv("AUTO_OPTIMIZE_HOUR_ET", "18"))  # >= this hour ET, weekdays
+# Randomization-test screen for autonomous applies: reject params whose
+# held-out edge has p > this (sign-flip test on OOS per-trade P&L).
+AUTO_APPLY_MAX_P      = float(os.getenv("AUTO_APPLY_MAX_P", "0.20"))
 
 # Autonomous paper executor (Railway). OFF by default. When armed it places
 # Alpaca PAPER bracket orders for strong recommendations, applying the SAME
@@ -143,7 +155,11 @@ _Decision          = None
 _EXIT_DECISIONS: list = []  # rolling log of exit-monitor and EOD review decisions
 _MAX_EXIT_LOG     = 500
 _telegram          = None   # TelegramPublisher — optional push notifications
-_bg_tasks: set     = set()  # keep references so GC doesn't collect running tasks
+_bg_tasks: set = set()  # retain references so GC doesn't collect running tasks
+# Tracks last strategy-alert per ticker: {ticker: (unix_ts, score)} — prevents
+# the same strong signal from spamming Telegram on every 3-minute scan.
+_strategy_alerted: dict = {}
+
 
 def _fire(coro) -> None:
     """Schedule a background coroutine and retain a reference to prevent GC."""
@@ -278,6 +294,9 @@ AGENT_SCORECARDS_FILE = DATA_DIR / "agent_scorecards.json"
 # Circuit-breaker acknowledgement: losses closed at/before this timestamp are
 # excluded from the breaker's counters (written by /api/reset-circuit-breaker).
 CB_RESET_FILE = DATA_DIR / "circuit_breaker_reset.json"
+# Every optimizer apply/reject decision (auto and operator) — the dashboard's
+# self-improvement timeline reads this.
+IMPROVEMENT_LOG = DATA_DIR / "improvement_history.jsonl"
 EARNINGS_CACHE: Dict[str, Any] = {"blacklist": set(), "updated_at": None}
 
 
@@ -359,6 +378,37 @@ async def _save_trade_changes(snapshot: list, changed_ids: set) -> list:
         _save(TRADES_FILE, merged)
     return merged
 
+
+
+_TRADES_CAP  = int(os.getenv("TRADES_CAP",  "3000"))   # compact when above this
+_TRADES_KEEP = int(os.getenv("TRADES_KEEP", "2000"))   # newest non-open records kept
+
+
+async def _compact_trades() -> None:
+    """Bound trades.json: keep ALL open trades + the newest closed/cancelled.
+
+    Every monitor loop re-reads this file each cycle; unbounded growth makes
+    each read slower forever. Learning windows only use recent history
+    (win-rate: last 20-30, tuner: last 30, slippage: last 100), so trimming
+    to the newest ~2000 resolved records loses nothing the bot still uses.
+    """
+    async with _trades_lock:
+        trades = _load(TRADES_FILE, [])
+        if not isinstance(trades, list) or len(trades) <= _TRADES_CAP:
+            return
+        resolved_seen = sum(1 for t in trades if t.get("status") != "open")
+        to_drop = resolved_seen - _TRADES_KEEP
+        if to_drop <= 0:
+            return
+        out: list = []
+        dropped = 0
+        for t in trades:                       # file order == chronological
+            if t.get("status") != "open" and dropped < to_drop:
+                dropped += 1
+                continue
+            out.append(t)
+        _save(TRADES_FILE, out)
+        logger.info("Compacted trades.json: %d → %d records", len(trades), len(out))
 
 
 def _load_trade_mode() -> Dict[str, Any]:
@@ -455,15 +505,16 @@ def _kelly_qty(
 DEFAULT_WEIGHTS: Dict[str, Any] = {
     "chg_weight":            4.0,
     "intra_weight":          2.0,
-    "min_chg_pct":           0.3,
+    "min_chg_pct":           0.15,
     "stop_pct":              0.02,
     "tp_pct":                0.05,
     "score_floor":           20,
     "score_ceil":            80,
-    "min_score":             40,
+    "min_score":             35,
     "time_window_minutes":   45,
     "atr_stop_multiple":     2.0,
     "atr_target_multiple":   3.0,
+    "time_stop_bars":        0,
     "update_count":          0,
     "win_rate_30d":          None,
     "long_win_rate":         None,
@@ -828,9 +879,13 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
                 continue
 
             # ── Real Alpaca bracket order ──────────────────────────────────
+            # nested=true is required for Alpaca to include the bracket's
+            # child legs — without it "legs" is absent and TP/SL exits are
+            # never detected here.
             async with session.get(
                 f"{_BROKER_BASE}/v2/orders/{order_id}",
                 headers=_ALPACA_HEADERS,
+                params={"nested": "true"},
                 timeout=aiohttp.ClientTimeout(total=8),
             ) as r:
                 if r.status != 200:
@@ -879,15 +934,264 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
             trade["pnl"]         = round(pnl, 2)
             trade["pnl_pct"]     = round(pnl_pct, 2)
             trade["closed_at"]   = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+            # Measured entry slippage: parent fill vs intended entry. Feeds the
+            # backtests' slippage assumption (core.slippage) so simulations are
+            # costed at what fills ACTUALLY cost, not a hardcoded guess.
+            entry_fill = float(order.get("filled_avg_price") or 0)
+            if entry_fill > 0 and entry > 0:
+                side_sign = 1.0 if direction == "LONG" else -1.0
+                slip_bps = (entry_fill - entry) / entry * 10_000 * side_sign
+                trade["fill_price"] = round(entry_fill, 4)
+                trade["entry_slippage_bps"] = round(slip_bps, 2)
             changed_ids.add(_trade_key(trade))
             _update_agent_attribution(trade)
             if _telegram is not None:
-                _fire(_telegram.send_trade_exit(trade, exit_price, exit_reason, pnl))
+                logger.info("Telegram: sending trade_exit for %s %s via %s pnl=%.2f",
+                            direction, trade["ticker"], exit_reason, pnl)
+                asyncio.create_task(_telegram.send_trade_exit(trade, exit_price, exit_reason, pnl))
             logger.info("Closed %s %s via %s: exit=%.2f PnL=$%.2f (%.2f%%)",
                         direction, trade["ticker"], exit_reason, exit_price, pnl, pnl_pct)
 
         except Exception as exc:
             logger.debug("Could not check order %s: %s", trade.get("order_id"), exc)
+
+    if changed_ids:
+        merged = await _save_trade_changes(trades, changed_ids)
+        # Learn from the freshly closed trades immediately: agent re-weighting
+        # (WeightTuner) + the win-rate self-tuner (ATR/score refinements +
+        # win_rate_30d, which also feeds Kelly sizing and the DecisionAgent's
+        # performance context).
+        _drive_weight_tuner(merged)
+        try:
+            _update_strategy_weights()
+        except Exception:
+            logger.debug("self-tuner update on trade close failed", exc_info=True)
+
+
+# === Broker ↔ trades.json reconciliation ===
+
+RECONCILE_INTERVAL_MIN = int(os.getenv("RECONCILE_INTERVAL_MIN", "10"))
+
+_TERMINAL_UNFILLED = ("canceled", "cancelled", "expired", "rejected", "done_for_day")
+
+
+def _classify_reconciliation(trade: dict, broker_symbols: set,
+                             order_status: Optional[dict]) -> str:
+    """Pure drift decision for one JSON-open trade vs the actual broker book.
+
+    Returns:
+      "keep"   — no action (still held, simulated, or evidence inconclusive)
+      "cancel" — entry never filled and the order is terminally dead
+      "close"  — entry filled but the broker is flat (manual close, EOD
+                 flatten via close_all, broker-side liquidation): the exit
+                 monitor can't see these because no bracket leg "fills".
+
+    Never guesses: an unknown/pending order state keeps the trade open.
+    """
+    order_id = str(trade.get("order_id") or "")
+    if not order_id or order_id.startswith("PAPER-"):
+        return "keep"                      # simulated — no broker book to compare
+    sym = str(trade.get("ticker", "")).upper()
+    if sym in broker_symbols:
+        return "keep"                      # still held — healthy
+
+    if not order_status:
+        return "keep"                      # can't verify the entry order — don't guess
+    status = str(order_status.get("status") or "").lower()
+    filled = float(order_status.get("filled_qty") or 0)
+    if status in _TERMINAL_UNFILLED and filled <= 0:
+        return "cancel"
+    if status == "filled" or filled > 0:
+        return "close"
+    return "keep"
+
+
+async def _reconcile_trades(session: aiohttp.ClientSession) -> None:
+    """Detect and repair drift between trades.json and the actual broker book.
+
+    Repairs only the safe direction (JSON says open, broker verifiably flat).
+    The opposite direction — broker positions nobody is tracking (orphaned
+    bracket, manual trade on the shared account) — is REPORTED on the health
+    board, never auto-closed: it may be a human's position.
+    """
+    from core import health
+
+    # Actual broker book. On failure skip the cycle — never reconcile blind.
+    try:
+        async with session.get(
+            f"{_BROKER_BASE}/v2/positions",
+            headers=_ALPACA_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            if r.status != 200:
+                return
+            positions = await r.json()
+    except Exception:
+        return
+    broker_symbols = {str(p.get("symbol", "")).upper()
+                      for p in (positions if isinstance(positions, list) else [])}
+
+    trades = _load(TRADES_FILE, [])
+    if not isinstance(trades, list):
+        return
+    open_trades = [t for t in trades if t.get("status") == "open"]
+
+    changed_ids: set = set()
+    for trade in open_trades:
+        order_id = str(trade.get("order_id") or "")
+        sym = str(trade.get("ticker", "")).upper()
+        if not order_id or order_id.startswith("PAPER-") or sym in broker_symbols:
+            continue
+
+        # Verify the entry order before deciding anything.
+        order_status = None
+        try:
+            async with session.get(
+                f"{_BROKER_BASE}/v2/orders/{order_id}",
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as r:
+                if r.status == 200:
+                    order_status = await r.json()
+        except Exception:
+            pass
+
+        action = _classify_reconciliation(trade, broker_symbols, order_status)
+        if action == "cancel":
+            trade["status"] = "cancelled"
+            trade["closed_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+            trade["exit_reason"] = "reconciled_never_filled"
+            changed_ids.add(_trade_key(trade))
+            logger.info("Reconcile: %s entry %s never filled — marked cancelled", sym, order_id)
+        elif action == "close":
+            # Best-effort exit price: current snapshot, falling back to entry.
+            price = 0.0
+            try:
+                async with session.get(
+                    f"{_DATA_BASE}/v2/stocks/snapshots?symbols={sym}",
+                    headers=_ALPACA_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as r:
+                    snap = (await r.json()).get(sym, {}) if r.status == 200 else {}
+                price = float((snap.get("latestTrade") or {}).get("p")
+                              or (snap.get("dailyBar") or {}).get("c") or 0)
+            except Exception:
+                pass
+            if price <= 0:
+                price = float(trade.get("entry") or 0)
+            _close_simulated_trade(trade, price, "reconciled_flat")
+            _update_agent_attribution(trade)
+            changed_ids.add(_trade_key(trade))
+            logger.warning("Reconcile: %s open in trades.json but flat at broker — "
+                           "closed @ %.2f (P&L approximate)", sym, price)
+
+    if changed_ids:
+        merged = await _save_trade_changes(trades, changed_ids)
+        _drive_weight_tuner(merged)
+        try:
+            _update_strategy_weights()
+        except Exception:
+            logger.debug("self-tuner update after reconcile failed", exc_info=True)
+
+    # Broker positions nobody tracks — surface, never touch.
+    tracked = {str(t.get("ticker", "")).upper() for t in open_trades
+               if not str(t.get("order_id") or "").startswith("PAPER-")}
+    untracked = sorted(broker_symbols - tracked)
+    if untracked:
+        health.report_issue(
+            "reconcile:untracked_positions",
+            f"Broker holds positions not tracked in trade history: {', '.join(untracked)}.",
+            remediation="If these are manual trades, ignore. If a bot bracket was "
+                        "orphaned (order placed but recording rejected), close it in "
+                        "Alpaca or record it manually — the bot will not manage it.",
+            severity="warning",
+        )
+    else:
+        health.resolve("reconcile:untracked_positions")
+
+
+async def _reconcile_loop() -> None:
+    """Periodic broker↔history reconciliation during (and just after) market hours."""
+    if not _ALPACA_KEY or not _ALPACA_SECRET:
+        return
+    interval = max(120, RECONCILE_INTERVAL_MIN * 60)
+    await asyncio.sleep(30)   # let startup scans settle first
+    while True:
+        try:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+            ) as session:
+                await _reconcile_trades(session)
+        except Exception as exc:
+            logger.warning("Reconcile loop error: %s", exc)
+        await asyncio.sleep(interval)
+
+
+async def _check_time_stops(session: aiohttp.ClientSession) -> None:
+    """Close stagnant open trades once the OPTIMIZER has validated a time-stop.
+
+    Inactive until the nightly walk-forward loop (or a manual Apply) writes a
+    non-zero, live-tuning-activated ``time_stop_bars`` into
+    strategy_weights.json — the exit rule ships dark and only turns on with
+    out-of-sample evidence behind it. Mirrors simulate_day_trade's rule: after
+    N 5-min bars with favorable progress < 0.25x the stop distance, exit.
+    """
+    if not _is_market_open():
+        return
+    w = _load_weights()
+    if not w.get("live_tuning_active"):
+        return
+    try:
+        time_stop_bars = int(w.get("time_stop_bars") or 0)
+    except (TypeError, ValueError):
+        return
+    if time_stop_bars <= 0:
+        return
+    min_age = timedelta(minutes=time_stop_bars * 5)
+
+    trades = _load(TRADES_FILE, [])
+    if not isinstance(trades, list):
+        return
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    changed_ids: set = set()
+    for trade in trades:
+        if trade.get("status") != "open":
+            continue
+        try:
+            opened = datetime.fromisoformat(str(trade.get("executed_at")))
+        except (TypeError, ValueError):
+            continue
+        if now - opened < min_age:
+            continue
+        ticker    = str(trade.get("ticker", "")).upper()
+        direction = trade.get("direction", "LONG")
+        entry     = float(trade.get("entry") or 0)
+        stop      = float(trade.get("stop_loss") or (trade.get("risk") or {}).get("stop_loss") or 0)
+        if entry <= 0 or stop <= 0:
+            continue
+        try:
+            async with session.get(
+                f"{_DATA_BASE}/v2/stocks/snapshots?symbols={ticker}",
+                headers=_ALPACA_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                snap = (await r.json()).get(ticker, {}) if r.status == 200 else {}
+        except Exception:
+            continue
+        price = float((snap.get("latestTrade") or {}).get("p")
+                      or (snap.get("dailyBar") or {}).get("c") or 0)
+        if price <= 0:
+            continue
+        mult = 1.0 if direction == "LONG" else -1.0
+        stop_dist = abs(entry - stop)
+        if mult * (price - entry) >= 0.25 * stop_dist:
+            continue    # trade is working — leave it alone
+        ok = await _do_exit_position(
+            trade, price,
+            f"time_stop: no progress after {time_stop_bars} bars", session,
+        )
+        if ok:
+            changed_ids.add(_trade_key(trade))
 
     if changed_ids:
         merged = await _save_trade_changes(trades, changed_ids)
@@ -904,6 +1208,12 @@ def _update_strategy_weights() -> None:
     recent = closed[-20:]
     if len(recent) < 15:
         return
+    # Only learn when NEW outcomes exist. update_count gates Kelly sizing
+    # ("no size-up without track record"), so it must count actual resolved
+    # trades, not how many times this function ran on unchanged data.
+    if len(closed) == weights.get("tuned_trade_count"):
+        return
+    weights["tuned_trade_count"] = len(closed)
 
     wins         = [t for t in recent if (t.get("pnl") or 0) > 0]
     long_trades  = [t for t in recent if t.get("direction") == "LONG"]
@@ -930,7 +1240,7 @@ def _update_strategy_weights() -> None:
 
     if win_rate > 0.60:
         if "min_score"          not in locked:
-            weights["min_score"]          = max(30,  weights["min_score"] - 1)
+            weights["min_score"]          = max(30,  weights["min_score"] - 2)
         if "time_window_minutes" not in locked:
             weights["time_window_minutes"] = min(60,  weights["time_window_minutes"] + 2)
         if "atr_target_multiple" not in locked:
@@ -939,7 +1249,7 @@ def _update_strategy_weights() -> None:
             weights["chg_weight"]          = min(10.0, weights["chg_weight"] * 1.02)
     elif win_rate < 0.40:
         if "min_score"          not in locked:
-            weights["min_score"]          = min(70,  weights["min_score"] + 2)
+            weights["min_score"]          = min(52,  weights["min_score"] + 2)
         if "time_window_minutes" not in locked:
             weights["time_window_minutes"] = max(20,  weights["time_window_minutes"] - 5)
         if "atr_stop_multiple"  not in locked:
@@ -1123,6 +1433,7 @@ def _reset_scan_stats_if_needed() -> None:
             "last_scan_at":     None,
             "market_closed_skips": 0,
         })
+        _strategy_alerted.clear()
 
 
 def _cb_reset_cutoff() -> str:
@@ -1634,6 +1945,16 @@ async def _run_market_scan_inner(force: bool = False) -> None:
                 _rej(sym, f"Price out of range (${price:.2f})", price=price)
                 continue
 
+            # Spread veto: a wide bid-ask is a round-trip cost the composite
+            # score never sees; it silently erases the 2:1 day-trade edge.
+            latest_q = snap.get("latestQuote") or {}
+            bid, ask = float(latest_q.get("bp") or 0), float(latest_q.get("ap") or 0)
+            if MAX_SPREAD_BPS > 0 and bid > 0 and ask > bid:
+                spread_bps = (ask - bid) / ((ask + bid) / 2) * 10_000
+                if spread_bps > MAX_SPREAD_BPS:
+                    _rej(sym, f"Spread too wide ({spread_bps:.0f} bps)", price=price)
+                    continue
+
             chg_pct   = (price - prev_close) / prev_close * 100 if prev_close else 0
             intra_pct = (price - day_open)   / day_open   * 100 if day_open   else 0
 
@@ -1723,10 +2044,13 @@ async def _run_market_scan_inner(force: bool = False) -> None:
                 chg_w   = weights.get("chg_weight", 4.0)
                 intra_w = weights.get("intra_weight", 2.0)
                 score   = min(max(50 + chg_pct * chg_w + intra_pct * intra_w, score_floor), score_ceil)
-                if score < min_score:
+                direction = "LONG" if chg_pct > 0 else "SHORT"
+                if direction == "LONG" and score < min_score:
                     _rej(sym, f"Fallback score too low ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
                     continue
-                direction   = "LONG" if chg_pct > 0 else "SHORT"
+                if direction == "SHORT" and (100 - score) < min_score:
+                    _rej(sym, f"Fallback score too low ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
+                    continue
                 entry       = round(price, 2)
                 d           = 1 if direction == "LONG" else -1
                 stop_loss   = round(entry * (1 - d * stop_pct), 2)
@@ -1790,9 +2114,25 @@ async def _run_market_scan_inner(force: bool = False) -> None:
 
         # Push high-conviction signals to Telegram
         if _telegram is not None and recs:
-            strong_hits = [r for r in recs if r["composite_score"] > 60]
-            if strong_hits:
-                _fire(_telegram.send_strategy_alert(strong_hits))
+            import time as _time
+            now_ts = _time.time()
+            new_hits = []
+            for r in recs:
+                score  = r.get("composite_score", 0)
+                ticker = r.get("ticker", "")
+                if score <= 60:
+                    continue
+                prev = _strategy_alerted.get(ticker)
+                if prev is None:
+                    new_hits.append(r)
+                    _strategy_alerted[ticker] = (now_ts, score)
+                else:
+                    prev_ts, prev_score = prev
+                    if now_ts - prev_ts >= 4 * 3600 or score >= prev_score + 10:
+                        new_hits.append(r)
+                        _strategy_alerted[ticker] = (now_ts, score)
+            if new_hits:
+                asyncio.create_task(_telegram.send_strategy_alert(new_hits))
 
         scanned_n = len(symbols_raw)
         skipped_n = scanned_n - len(recs)
@@ -1975,6 +2315,156 @@ async def _run_optimizer() -> None:
         })
     finally:
         _optimizer_stats["running"] = False
+
+
+def _record_improvement(source: str, result: Dict[str, Any]) -> None:
+    """Append an optimizer apply/reject decision to the improvement timeline."""
+    try:
+        entry = {
+            "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+            "source": source,
+            **{k: result.get(k) for k in
+               ("status", "reason", "applied", "oos_pnl", "validated", "p_value")},
+        }
+        with open(IMPROVEMENT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        logger.debug("improvement history write failed", exc_info=True)
+
+
+def _apply_optimizer_params(*, require_validated: bool, source: str) -> Dict[str, Any]:
+    result = _apply_optimizer_params_inner(require_validated=require_validated, source=source)
+    _record_improvement(source, result)
+    return result
+
+
+def _apply_optimizer_params_inner(*, require_validated: bool, source: str) -> Dict[str, Any]:
+    """Apply the optimizer's best params to strategy_weights.json (live config).
+
+    Guards:
+      • OOS/backtest profit must be positive (always).
+      • ``require_validated=True`` (the autonomous path) additionally demands a
+        walk-forward result whose held-out split had enough trades — the bot
+        must never self-apply params that were only curve-fit in-sample.
+
+    Reads optimization_results.json from the volume when attached — the
+    optimizer writes there (volume_dir() or repo root), so reading the repo
+    root unconditionally would miss every result on Railway.
+    """
+    try:
+        data = json.loads(((_VOLUME or _REPO_ROOT) / "optimization_results.json").read_text())
+    except Exception:
+        return {"status": "error", "reason": "no optimizer results found — run the optimizer first"}
+
+    best   = data.get("best") or {}
+    params = best.get("params") or {}
+    if not params:
+        return {"status": "error", "reason": "optimizer results have no best params"}
+
+    metrics   = best.get("oos") or best        # OOS metrics when walk-forward validated
+    validated = "oos" in best and bool(best.get("validated", True))
+    if require_validated and not validated:
+        return {
+            "status": "rejected",
+            "reason": "result is not walk-forward validated (or held-out split had too few "
+                      "trades) — autonomous apply requires out-of-sample evidence",
+        }
+    oos_pnl   = metrics.get("total_pnl")
+    if oos_pnl is None:
+        return {"status": "error", "reason": "optimizer results missing profit metric"}
+
+    # Statistical screen (autonomous path only): sign-flip randomization on the
+    # held-out per-trade P&L. If noise universes match the real edge too often,
+    # the "edge" is likely luck — refuse to self-apply. A screen, not proof
+    # (permutation destroys autocorrelation); the p threshold is deliberately
+    # loose and env-tunable.
+    perm_p: Optional[float] = None
+    if require_validated:
+        pnls = best.get("oos_trade_pnls") or []
+        if len(pnls) >= 6:
+            try:
+                import numpy as _np
+                from validation.permutation import returns_randomization_test
+                res = returns_randomization_test(
+                    pnls, n=2000, stat=lambda x: float(_np.mean(x)), seed=42,
+                )
+                perm_p = float(res["p_value"])
+                if perm_p > AUTO_APPLY_MAX_P:
+                    return {
+                        "status": "rejected",
+                        "reason": (f"held-out edge not distinguishable from luck "
+                                   f"(randomization p={perm_p:.2f} > {AUTO_APPLY_MAX_P:.2f}) "
+                                   f"— refusing autonomous apply"),
+                        "p_value": perm_p,
+                    }
+            except Exception:
+                logger.debug("randomization screen failed — proceeding without it",
+                             exc_info=True)
+    if oos_pnl <= 0:
+        return {
+            "status": "rejected",
+            "reason": f"{'out-of-sample' if validated else 'backtest'} profit is "
+                      f"${oos_pnl:.0f} (not positive) — refusing to apply params that "
+                      f"would not be profitable live. Re-run with a longer --days or wider grid.",
+        }
+
+    mapping = {
+        "LONG_THRESHOLD":      "long_threshold",
+        "SHORT_THRESHOLD":     "short_threshold",
+        "ATR_STOP_MULTIPLE":   "atr_stop_multiple",
+        "ATR_TARGET_MULTIPLE": "atr_target_multiple",
+        "TIME_STOP_BARS":      "time_stop_bars",
+    }
+    weights = _load_weights()
+    locked: set = set(weights.get("manual_overrides") or {})
+    applied: Dict[str, float] = {}
+    for src, dst in mapping.items():
+        if src in params and dst not in locked:
+            weights[dst] = float(params[src])
+            applied[dst] = float(params[src])
+    weights["applied_from_optimizer_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    weights["applied_by"]                = source
+    weights["applied_oos_pnl"]           = round(float(oos_pnl), 2)
+    weights["live_tuning_active"]        = True   # let the live bot honor these params
+    _save_weights(weights)
+
+    logger.info("Applied optimizer params (%s): %s (OOS PnL=$%.0f)", source, applied, oos_pnl)
+    return {
+        "status":    "applied",
+        "applied":   applied,
+        "oos_pnl":   round(float(oos_pnl), 2),
+        "validated": validated,
+        "p_value":   perm_p,
+        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+    }
+
+
+async def _auto_improve_cycle() -> None:
+    """One nightly self-improvement pass: re-optimize on fresh data, then apply
+    the winner ONLY if it survived walk-forward validation with positive
+    held-out profit. The applied thresholds/ATR multiples reach the live bot
+    without a restart (strategy_refresh_loop / PortfolioManager re-read
+    strategy_weights.json), and the WeightTuner keeps re-weighting agents from
+    every closed trade — together this is the always-on learning loop.
+    """
+    await _run_optimizer()
+    if _optimizer_stats.get("last_status") != "ok":
+        logger.info("Auto-improve: optimizer did not finish cleanly — nothing applied")
+        return
+    result = _apply_optimizer_params(require_validated=True, source="auto")
+    status = result.get("status")
+    if status == "applied":
+        msg = (f"Auto-improve: applied walk-forward-validated params "
+               f"{result.get('applied')} (OOS PnL=${result.get('oos_pnl', 0):.0f})")
+        logger.info(msg)
+        if _telegram is not None and _telegram.enabled:
+            try:
+                await _telegram.send_alert([msg])
+            except Exception:
+                logger.debug("auto-improve telegram notify failed", exc_info=True)
+    else:
+        logger.info("Auto-improve: params NOT applied (%s) — %s",
+                    status, result.get("reason", ""))
 
 
 async def _eod_snapshot(session: aiohttp.ClientSession) -> None:
@@ -2457,15 +2947,26 @@ async def _background_loop() -> None:
     consecutive_errors = 0
     last_day = ""
     last_backtest_day = ""
+    last_optimize_day = ""
     last_snapshot_day  = ""
     last_premarket_day = ""
     last_eod_extend_day = ""
     last_weekly_summary_day = ""
     while True:
-        # Reset daily scan stats at midnight
+        # Reset daily scan stats at midnight; bound the append-only logs so
+        # they can't grow into multi-MB files that slow every tailing read.
         today = str(date.today())
         if today != last_day:
             _reset_scan_stats_if_needed()
+            try:
+                from core.logrotate import trim_jsonl
+                for _f in (REJECT_LOG, SNAPSHOT_LOG, LEARNING_HISTORY_FILE,
+                           IMPROVEMENT_LOG,
+                           _HERE.parent / "logs" / "decisions.jsonl"):
+                    trim_jsonl(_f)
+                await _compact_trades()
+            except Exception:
+                logger.debug("log rotation failed", exc_info=True)
             last_day = today
 
         # EoD benchmark snapshot at ~15:55 ET (before backtest at 17:00+)
@@ -2493,6 +2994,16 @@ async def _background_loop() -> None:
                     and now_et.hour >= 17):
                 last_backtest_day = today
                 asyncio.create_task(_run_backtest())
+
+        # Nightly self-improvement: optimizer + validated auto-apply, once per
+        # weekday evening (staggered after the 17:00 backtest — both are heavy).
+        if _ET is not None and AUTO_OPTIMIZE:
+            now_et = datetime.now(_ET)
+            if (today != last_optimize_day
+                    and now_et.weekday() < 5
+                    and now_et.hour >= AUTO_OPTIMIZE_HOUR_ET):
+                last_optimize_day = today
+                asyncio.create_task(_auto_improve_cycle())
 
         # Pre-market gap scanner: runs once between 9:00–9:25 ET on weekdays
         if _ET is not None and _ALPACA_KEY and _ALPACA_SECRET:
@@ -2587,6 +3098,7 @@ async def _background_loop() -> None:
                 )
             ) as session:
                 await _check_and_close_trades(session)
+                await _check_time_stops(session)
                 await _revalidate_expired_recs(session)
         except Exception as exc:
             logger.error("Trade-check error: %s", exc)
@@ -2605,13 +3117,11 @@ async def lifespan(app: FastAPI):
     eod_rev  = asyncio.create_task(_eod_position_review_loop())
     strat    = asyncio.create_task(_strategy_improvement_loop())
     autox    = asyncio.create_task(_auto_execute_loop())
+    recon    = asyncio.create_task(_reconcile_loop())
     yield
-    task.cancel()
-    trail.cancel()
-    eod_rev.cancel()
-    strat.cancel()
-    autox.cancel()
-    for t in [task, trail, eod_rev, strat, autox]:
+    for t in [task, trail, eod_rev, strat, autox, recon]:
+        t.cancel()
+    for t in [task, trail, eod_rev, strat, autox, recon]:
         try:
             await t
         except asyncio.CancelledError:
@@ -2762,6 +3272,15 @@ def _win_rate_from_fills(fills: list) -> "tuple[float, int] | None":
     return (round(wins / total * 100, 1), total) if total > 0 else None
 
 
+def _slippage_summary_safe():
+    """Measured execution-cost summary for the dashboard, or None."""
+    try:
+        from core.slippage import slippage_summary
+        return slippage_summary()
+    except Exception:
+        return None
+
+
 @app.get("/api/stats", dependencies=[Depends(_verify_bot_secret)])
 def get_stats():
     all_trades = _load(HISTORY_FILE, [])
@@ -2870,6 +3389,7 @@ def get_stats():
         "strategy_version": weights.get("update_count", 0),
         "win_rate_30d":    weights.get("win_rate_30d"),
         "bias":            weights.get("bias", "neutral"),
+        "slippage":        _slippage_summary_safe(),
         "agents_active":   _AGENTS_AVAILABLE,
     }
 
@@ -3096,7 +3616,8 @@ async def execute_trade(body: ExecuteBody):
     if reason:
         raise HTTPException(status_code=409, detail=reason)
     if _telegram is not None and trade:
-        _fire(_telegram.send_trade_entry(trade))
+        logger.info("Telegram: sending trade_entry for %s %s", trade.get("direction"), trade.get("ticker"))
+        asyncio.create_task(_telegram.send_trade_entry(trade))
     return {"status": "recorded", "trade_id": trade["id"]}
 
 
@@ -3284,7 +3805,7 @@ async def _run_auto_executor() -> int:
                 continue
             placed += 1
             if _telegram is not None and trade:
-                _fire(_telegram.send_trade_entry(trade))
+                asyncio.create_task(_telegram.send_trade_entry(trade))
             logger.info("Auto-exec PLACED %s %s x%d @ market (order %s, score %.1f)",
                         direction, ticker, qty, order_id, rec.get("composite_score") or 0.0)
     return placed
@@ -3311,6 +3832,12 @@ async def _auto_execute_loop() -> None:
         last_reason = ""
         if not _is_market_open():
             continue
+        # Late-entry cutoff (same knob as live_runner and the backtest): a
+        # fresh 3xATR target in the final hour is an EOD coin-flip.
+        if _ET is not None and ENTRY_CUTOFF_MIN > 0:
+            _now = datetime.now(_ET)
+            if _now.hour * 60 + _now.minute >= 16 * 60 - ENTRY_CUTOFF_MIN:
+                continue
         try:
             placed = await _run_auto_executor()
             if placed:
@@ -3344,6 +3871,14 @@ async def reset_circuit_breaker():
     })
     logger.info("Circuit breaker manually reset — losses before %s acknowledged", now_iso)
     return {"status": "reset", "timestamp": now_iso}
+
+
+@app.post("/api/reset-weights", dependencies=[Depends(_verify_bot_secret)])
+async def reset_strategy_weights():
+    """Reset strategy_weights.json to factory defaults (clears adaptive tuning)."""
+    _save_weights({**DEFAULT_WEIGHTS})
+    logger.info("Strategy weights reset to factory defaults")
+    return {"status": "reset", "weights": DEFAULT_WEIGHTS, "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.get("/api/rejections", dependencies=[Depends(_verify_bot_secret)])
@@ -3462,59 +3997,11 @@ def get_optimizer_log():
 def apply_optimal_params():
     """Apply the optimizer's best params to LIVE trading — no redeploy.
 
-    Writes the tuned LONG/SHORT thresholds + ATR multiples into
-    strategy_weights.json, which the live RiskAgent and PortfolioManager read at
-    runtime. Guard: refuses to apply params whose out-of-sample (held-out) profit
-    is not positive — those would not be expected to make money live.
+    Manual (dashboard) apply: honors the OOS-positive guard but, like before,
+    also accepts a full-window (unvalidated) positive result — the operator is
+    in the loop to judge it.
     """
-    try:
-        data = json.loads((_REPO_ROOT / "optimization_results.json").read_text())
-    except Exception:
-        return {"status": "error", "reason": "no optimizer results found — run the optimizer first"}
-
-    best   = data.get("best") or {}
-    params = best.get("params") or {}
-    if not params:
-        return {"status": "error", "reason": "optimizer results have no best params"}
-
-    metrics   = best.get("oos") or best        # OOS metrics when walk-forward validated
-    validated = "oos" in best
-    oos_pnl   = metrics.get("total_pnl")
-    if oos_pnl is None:
-        return {"status": "error", "reason": "optimizer results missing profit metric"}
-    if oos_pnl <= 0:
-        return {
-            "status": "rejected",
-            "reason": f"{'out-of-sample' if validated else 'backtest'} profit is "
-                      f"${oos_pnl:.0f} (not positive) — refusing to apply params that "
-                      f"would not be profitable live. Re-run with a longer --days or wider grid.",
-        }
-
-    mapping = {
-        "LONG_THRESHOLD":      "long_threshold",
-        "SHORT_THRESHOLD":     "short_threshold",
-        "ATR_STOP_MULTIPLE":   "atr_stop_multiple",
-        "ATR_TARGET_MULTIPLE": "atr_target_multiple",
-    }
-    weights = _load_weights()
-    applied: Dict[str, float] = {}
-    for src, dst in mapping.items():
-        if src in params:
-            weights[dst] = float(params[src])
-            applied[dst] = float(params[src])
-    weights["applied_from_optimizer_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-    weights["applied_oos_pnl"]           = round(float(oos_pnl), 2)
-    weights["live_tuning_active"]        = True   # let the live bot honor these params
-    _save_weights(weights)
-
-    logger.info("Applied optimizer params to live config: %s (OOS PnL=$%.0f)", applied, oos_pnl)
-    return {
-        "status":    "applied",
-        "applied":   applied,
-        "oos_pnl":   round(float(oos_pnl), 2),
-        "validated": validated,
-        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-    }
+    return _apply_optimizer_params(require_validated=False, source="operator")
 
 
 @app.post("/api/optimize/reset", dependencies=[Depends(_verify_bot_secret)])
@@ -3735,10 +4222,48 @@ def health():
     }
 
 
+# Heartbeat considered dead after this many seconds without a write (the
+# live runner writes every 60s; allow a few missed beats for GC/network).
+HEARTBEAT_STALE_S = int(os.getenv("HEARTBEAT_STALE_S", "300"))
+
+
+def _check_live_heartbeat() -> None:
+    """Surface a health issue when the live runner's heartbeat goes stale.
+
+    Only meaningful when live_runner shares this machine's data dir (the
+    standard PC setup). If no heartbeat file has EVER been written here
+    (e.g. Railway-only deployment), stays silent — absence is not failure.
+    """
+    from core import health
+    hb_file = DATA_DIR / "live_heartbeat.json"
+    if not hb_file.exists():
+        return
+    if not _is_market_open():
+        health.resolve("live_runner:heartbeat")
+        return
+    try:
+        hb = json.loads(hb_file.read_text(encoding="utf-8"))
+        last = datetime.fromisoformat(str(hb.get("ts")))
+        age = (datetime.now(timezone.utc).replace(tzinfo=None) - last).total_seconds()
+    except Exception:
+        return
+    if age > HEARTBEAT_STALE_S:
+        health.report_issue(
+            "live_runner:heartbeat",
+            f"Live runner heartbeat is {age/60:.0f} min old during market hours — "
+            "the trading bot has likely crashed or lost its network.",
+            remediation="Check the live_runner window/process on the trading PC and "
+                        "restart it (START.bat). No trades are being evaluated until then.",
+        )
+    else:
+        health.resolve("live_runner:heartbeat")
+
+
 def _health_issues() -> list:
     """Actionable issues the operator needs to fix (rejected key, no equity, …)."""
     try:
         from core import health
+        _check_live_heartbeat()
         return [
             {
                 "key":         i.key,
@@ -3772,6 +4297,40 @@ def get_agent_attribution():
             "total_pnl": round(stats.get("total_pnl", 0.0), 2),
         }
     return result
+
+
+@app.get("/api/improvement-history", dependencies=[Depends(_verify_bot_secret)])
+def get_improvement_history(limit: int = 50):
+    """Timeline of optimizer apply/reject decisions (auto + operator).
+
+    Answers "what did the bot change about itself, when, and why" — applied
+    params, held-out profit, luck-screen p-value, and every refusal reason —
+    without reading server logs."""
+    limit = max(1, min(limit, 500))
+    records: list = []
+    try:
+        if IMPROVEMENT_LOG.exists():
+            for line in IMPROVEMENT_LOG.read_text(encoding="utf-8").splitlines()[-limit:]:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        logger.debug("improvement history read failed", exc_info=True)
+    weights = _load_weights()
+    return {
+        "history": list(reversed(records)),
+        "live_tuning_active": bool(weights.get("live_tuning_active")),
+        "current": {
+            "long_threshold":      weights.get("long_threshold"),
+            "short_threshold":     weights.get("short_threshold"),
+            "atr_stop_multiple":   weights.get("atr_stop_multiple"),
+            "atr_target_multiple": weights.get("atr_target_multiple"),
+            "applied_by":          weights.get("applied_by"),
+            "applied_at":          weights.get("applied_from_optimizer_at"),
+        },
+        "auto_optimize_enabled": AUTO_OPTIMIZE,
+    }
 
 
 @app.get("/api/learning", dependencies=[Depends(_verify_bot_secret)])

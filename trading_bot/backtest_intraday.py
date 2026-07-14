@@ -70,10 +70,16 @@ logger = logging.getLogger("bt30")
 RESULTS_FILE = (volume_dir() or Path(__file__).parent.parent) / "backtest_results.json"
 
 # -- Slippage model ------------------------------------------------------------
-SLIPPAGE_PCT = float(os.getenv("BACKTEST_SLIPPAGE_PCT", "0.0005"))  # 0.05% per side
+# Priority: explicit env override -> the venue's own MEASURED median entry
+# slippage (recorded on real closed trades) -> 0.05%/side default. Simulations
+# and the optimizer are thus costed at what fills actually cost here.
+from core.slippage import measured_slippage_pct  # noqa: E402
+_ENV_SLIPPAGE = os.getenv("BACKTEST_SLIPPAGE_PCT", "")
+SLIPPAGE_PCT = float(_ENV_SLIPPAGE) if _ENV_SLIPPAGE else measured_slippage_pct(0.0005)
 
-# -- Strategy weights file -----------------------------------------------------
-_WEIGHTS_FILE = Path(__file__).parent / "data" / "strategy_weights.json"
+# -- Strategy weights file (volume-aware — same file every component uses) -----
+from core.paths import data_dir as _data_dir  # noqa: E402
+_WEIGHTS_FILE = _data_dir() / "strategy_weights.json"
 
 
 def _load_current_weights() -> dict:
@@ -239,12 +245,20 @@ def simulate_day_trade(
     take_profit: float,
     qty: float,
     slippage_pct: float = 0.0,
+    time_stop_bars: int = 0,
 ) -> tuple[str, float, str, float, float]:
-    """Walk forward bars; force exit by 15:55 ET same calendar day."""
+    """Walk forward bars; force exit by 15:55 ET same calendar day.
+
+    ``time_stop_bars`` > 0 adds a stagnation exit: after that many bars, a
+    trade that has made less than 0.25x its stop distance of favorable
+    progress is closed at the bar close ("TIME_STOP") — it frees the position
+    slot instead of rolling the EOD dice. Tuned by the optimizer.
+    """
     entry_date = future_bars.index[0].astimezone(_ET).date() if len(future_bars) else date.today()
     mult = 1 if direction is Decision.LONG else -1
+    stop_dist = abs(entry - stop_loss)
 
-    for ts, bar in future_bars.iterrows():
+    for bar_i, (ts, bar) in enumerate(future_bars.iterrows()):
         bar_date = ts.astimezone(_ET).date()
         bar_time = ts.astimezone(_ET).time()
 
@@ -255,32 +269,49 @@ def simulate_day_trade(
             pnl -= abs(entry) * slippage_pct * 2 * qty
             return "EOD_CLOSE", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
 
-        high = float(bar["high"])
-        low  = float(bar["low"])
+        high     = float(bar["high"])
+        low      = float(bar["low"])
+        open_px  = float(bar["open"])
 
         if direction is Decision.LONG:
             sl_hit = low  <= stop_loss
             tp_hit = high >= take_profit
+            # Gap realism: a bar that OPENS through the stop fills at the open
+            # (worse than the stop price); a bar that opens through the target
+            # fills the limit at the open (better). Assuming exact stop-price
+            # fills flatters losses and biases the optimizer.
+            sl_px  = min(stop_loss,   open_px) if sl_hit else stop_loss
+            tp_px  = max(take_profit, open_px) if tp_hit else take_profit
         else:
             sl_hit = high >= stop_loss
             tp_hit = low  <= take_profit
+            sl_px  = max(stop_loss,   open_px) if sl_hit else stop_loss
+            tp_px  = min(take_profit, open_px) if tp_hit else take_profit
 
         if tp_hit and sl_hit:
             # Both triggered same bar -> worst case SL
-            exit_px = stop_loss
+            exit_px = sl_px
             pnl = mult * (exit_px - entry) * qty
             pnl -= abs(entry) * slippage_pct * 2 * qty
             return "SL_HIT", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
         elif tp_hit:
-            exit_px = take_profit
+            exit_px = tp_px
             pnl = mult * (exit_px - entry) * qty
             pnl -= abs(entry) * slippage_pct * 2 * qty
             return "TP_HIT", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
         elif sl_hit:
-            exit_px = stop_loss
+            exit_px = sl_px
             pnl = mult * (exit_px - entry) * qty
             pnl -= abs(entry) * slippage_pct * 2 * qty
             return "SL_HIT", exit_px, str(ts), pnl, mult * (exit_px - entry) / entry * 100
+
+        # Stagnation time-stop: enough bars elapsed, no meaningful progress.
+        if time_stop_bars > 0 and bar_i + 1 >= time_stop_bars:
+            close_px = float(bar["close"])
+            if mult * (close_px - entry) < 0.25 * stop_dist:
+                pnl = mult * (close_px - entry) * qty
+                pnl -= abs(entry) * slippage_pct * 2 * qty
+                return "TIME_STOP", close_px, str(ts), pnl, mult * (close_px - entry) / entry * 100
 
     # Fallback: use last bar's close
     last_ts  = future_bars.index[-1]
@@ -383,9 +414,11 @@ def regime_at(entry_ts: "pd.Timestamp", spy_bars, qqq_bars, vix_by_date: dict) -
 
 LOOKBACK_BARS = 200   # bars fed to agents
 STEP_BARS     = 6     # evaluate every ~30 min (6 x 5min = 30min) — matches live runner cadence
-# Entry filter: skip evaluations where the entry bar falls after this UTC hour.
-# 19:00 UTC = 15:00 ET -- no new entries in the last hour of RTH.
-ENTRY_CUTOFF_UTC_HOUR = 19
+# Entry filter: no new entries in the last ENTRY_CUTOFF_MIN minutes of RTH —
+# same knob live_runner uses, so the optimizer tunes the strategy the live
+# bot actually trades. (Replaces a fixed UTC-hour check that was off by an
+# hour outside daylight saving.)
+ENTRY_CUTOFF_MIN = int(os.getenv("ENTRY_CUTOFF_MIN", "60"))
 
 # -- Research-derived entry filters --------------------------------------------
 # Research #1 (Luo et al. 2023 / PEAD): skip the first 30 min of RTH.
@@ -443,11 +476,12 @@ async def backtest_ticker(
         entry_bar_idx = i
         entry_ts = bars.index[entry_bar_idx]
 
-        if entry_ts.astimezone(timezone.utc).hour >= ENTRY_CUTOFF_UTC_HOUR:
+        entry_et = entry_ts.astimezone(_ET)
+        if ENTRY_CUTOFF_MIN > 0 and \
+                entry_et.hour * 60 + entry_et.minute >= 16 * 60 - ENTRY_CUTOFF_MIN:
             continue
 
         # Research #1 (PEAD): skip 9:30-10:00 ET open noise
-        entry_et = entry_ts.astimezone(_ET)
         if entry_et.hour == 9:
             continue
 
@@ -508,6 +542,7 @@ async def backtest_ticker(
             take_profit=tp,
             qty=float(r.qty),
             slippage_pct=SLIPPAGE_PCT,
+            time_stop_bars=pm.risk.cfg.time_stop_bars,
         )
 
         results.append(TradeResult(

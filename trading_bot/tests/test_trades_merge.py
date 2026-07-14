@@ -111,3 +111,44 @@ def test_save_trade_changes_merges_against_latest_disk(tmp_path, monkeypatch):
     assert set(on_disk) == {"A", "B", "C"}           # C not clobbered
     assert on_disk["A"]["status"] == "closed"        # A's close persisted
     assert {t["id"] for t in merged} == {"A", "B", "C"}
+
+
+# ── compaction ───────────────────────────────────────────────────────────────
+
+def test_compaction_keeps_open_and_newest_closed(tmp_path, monkeypatch):
+    import asyncio, json
+    import api_server
+
+    monkeypatch.setattr(api_server, "TRADES_FILE", tmp_path / "trades.json")
+    monkeypatch.setattr(api_server, "_TRADES_CAP", 10)
+    monkeypatch.setattr(api_server, "_TRADES_KEEP", 5)
+    api_server._trades_lock = asyncio.Lock()
+
+    trades = (
+        [{"id": f"old-{i}", "status": "closed"} for i in range(8)]
+        + [{"id": "open-1", "status": "open"}]                 # open, mid-file
+        + [{"id": f"new-{i}", "status": "closed"} for i in range(4)]
+    )
+    (tmp_path / "trades.json").write_text(json.dumps(trades))
+
+    asyncio.run(api_server._compact_trades())
+    kept = json.loads((tmp_path / "trades.json").read_text())
+    ids = [t["id"] for t in kept]
+    assert "open-1" in ids                                     # open never dropped
+    assert ids[-1] == "new-3"                                  # newest closed kept
+    assert len([t for t in kept if t["status"] != "open"]) == 5
+    assert not any(i.startswith("old-") and i != "old-7" for i in ids[:2])
+
+
+def test_compaction_noop_under_cap(tmp_path, monkeypatch):
+    import asyncio, json
+    import api_server
+
+    monkeypatch.setattr(api_server, "TRADES_FILE", tmp_path / "trades.json")
+    monkeypatch.setattr(api_server, "_TRADES_CAP", 100)
+    api_server._trades_lock = asyncio.Lock()
+    trades = [{"id": "a", "status": "closed"}]
+    (tmp_path / "trades.json").write_text(json.dumps(trades))
+
+    asyncio.run(api_server._compact_trades())
+    assert json.loads((tmp_path / "trades.json").read_text()) == trades

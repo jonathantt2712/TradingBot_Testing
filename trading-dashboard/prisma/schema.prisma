@@ -22,6 +22,10 @@ model User {
   tempPasswordHash    String?
   tempPasswordAt      DateTime?
   autoExecute         Boolean   @default(false)
+  // "owner" may change shared-bot state (auto-execute, broker switch,
+  // optimizer apply/reset, circuit-breaker reset); "viewer" gets read access
+  // and trades their OWN Alpaca account only.
+  role                String    @default("viewer")
   createdAt           DateTime  @default(now())
   telegramChatId      String?
   telegramToken       String?

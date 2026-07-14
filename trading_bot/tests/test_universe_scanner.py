@@ -68,3 +68,62 @@ def test_sorted_by_momentum_and_capped_at_top(monkeypatch):
     assert len(result) == 10
     # Highest % change (SYM14) should be ranked first.
     assert result[0] == "SYM14"
+
+
+# ── snapshot enrichment (most_actives carry only symbol+volume) ─────────────
+
+def test_most_actives_enriched_and_scored(monkeypatch):
+    """A high-liquidity most-active name with a real move must be able to WIN
+    the ranking once snapshots supply its price/%change — previously its
+    momentum score was locked at 0."""
+    import asyncio
+    from data.universe_scanner import UniverseScanner
+
+    sc = UniverseScanner("k", "s")
+
+    async def _active(session, top=100):
+        return [{"symbol": "HOTSTK", "volume": 80_000_000}]   # no price/chg
+
+    async def _movers(session, top=50):
+        return {"gainers": [{"symbol": "MEHGNR", "price": 20.0,
+                             "percent_change": 1.0, "volume": 600_000}],
+                "losers": []}
+
+    async def _snaps(symbols):
+        assert "HOTSTK" in symbols
+        return {"HOTSTK": {
+            "latestTrade":  {"p": 50.0},
+            "dailyBar":     {"c": 50.0, "v": 80_000_000},
+            "prevDailyBar": {"c": 45.0},                      # +11.1% day
+        }}
+
+    monkeypatch.setattr(sc, "_fetch_most_active", _active)
+    monkeypatch.setattr(sc, "_fetch_market_movers", _movers)
+    monkeypatch.setattr(sc, "_fetch_snapshots", _snaps)
+
+    out = asyncio.run(sc.get_candidates(top_n=2))
+    assert out[0] == "HOTSTK"                                  # now outranks the mover
+
+
+def test_enrichment_failure_degrades_gracefully(monkeypatch):
+    import asyncio
+    from data.universe_scanner import UniverseScanner
+
+    sc = UniverseScanner("k", "s")
+
+    async def _active(session, top=100):
+        return [{"symbol": "HOTSTK", "volume": 80_000_000}]
+
+    async def _movers(session, top=50):
+        return {"gainers": [{"symbol": "GNR", "price": 20.0,
+                             "percent_change": 4.0, "volume": 5_000_000}], "losers": []}
+
+    async def _snaps(symbols):
+        return {}                                              # snapshots down
+
+    monkeypatch.setattr(sc, "_fetch_most_active", _active)
+    monkeypatch.setattr(sc, "_fetch_market_movers", _movers)
+    monkeypatch.setattr(sc, "_fetch_snapshots", _snaps)
+
+    out = asyncio.run(sc.get_candidates(top_n=5))
+    assert "GNR" in out                                        # movers still flow

@@ -150,6 +150,9 @@ THRESHOLD_GRID = {
 ATR_GRID = {
     "ATR_STOP_MULTIPLE":   [1.5, 2.0, 2.5, 3.0],
     "ATR_TARGET_MULTIPLE": [2.5, 3.0, 4.0, 5.0],
+    # Stagnation time-stop (5-min bars; 0 = off, 12 = 1 hour). Walk-forward
+    # decides whether cutting dead trades early actually improves expectancy.
+    "TIME_STOP_BARS":      [0, 12],
 }
 
 _FALLBACK_TICKERS = ["NVDA", "TSLA", "AAPL", "MSFT", "AMD", "META", "AMZN"]
@@ -285,10 +288,15 @@ async def _evaluate(
         return rec
 
     oos_sum = await _eval_combo(params, tickers, oos_cache, spy_bars, use_llm)
+    # Chronological per-trade P&L of the HELD-OUT split (capped): lets the
+    # auto-apply guard run a sign-flip randomization test — is this OOS edge
+    # distinguishable from luck? — without re-running the strategy.
+    oos_trades = sorted(oos_sum.get("trades") or [], key=lambda t: t.get("entry_time", ""))
     rec = {
         "params":     params,
         "in_sample":  _slim(is_sum),
         "oos":        _slim(oos_sum),
+        "oos_trade_pnls": [round(float(t.get("pnl_usd", 0.0)), 2) for t in oos_trades][:60],
         "rank_value": oos_sum.get(objective, _WORST) or _WORST,
         "trades_ok": (is_sum.get("total_trades", 0)  >= MIN_TRADES and
                       oos_sum.get("total_trades", 0) >= MIN_OOS_TRADES),
