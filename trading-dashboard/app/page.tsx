@@ -69,6 +69,22 @@ async function loadDashboard(creds: AlpacaCreds | null) {
       .filter((p: PnLPoint) => (p.equity ?? 0) > 0)
 
     if (pts.length > 0) {
+      // Append today as a live data point if the last completed day is before today
+      const today = new Date().toISOString().slice(0, 10)
+      if (pts.at(-1)!.date < today && account.status === 'fulfilled') {
+        const eq = parseFloat(account.value.equity)
+        if (eq > 0) {
+          const prevEq = pts.at(-1)!.equity ?? 0
+          pts.push({
+            date:           today,
+            daily_pnl:      +(eq - prevEq).toFixed(2),
+            cumulative_pnl: base > 0 ? +(eq - base).toFixed(2) : 0,
+            trade_count:    0,
+            equity:         +eq.toFixed(2),
+          })
+        }
+      }
+
       resolvedPnl = pts
       const sharpe = computeSharpe(pts)
       if (sharpe !== null) resolvedStats.sharpe_ratio = sharpe

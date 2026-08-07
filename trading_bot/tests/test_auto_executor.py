@@ -35,8 +35,11 @@ def test_strong_long_and_short_selected():
     assert {r["ticker"] for r in out} == {"AAA", "BBB"}
 
 
-def test_weak_conviction_excluded():
-    recs = [_rec("AAA", "LONG", 58), _rec("BBB", "SHORT", 45)]
+def test_below_floor_always_excluded(monkeypatch):
+    # Score 43 is below the adaptive floor (45) — excluded even in a drought.
+    monkeypatch.setattr(api_server, "_last_trade_placed_at", None)
+    monkeypatch.setattr(api_server, "AUTO_EXEC_MIN_SCORE", 60.0)
+    recs = [_rec("AAA", "LONG", 43), _rec("BBB", "SHORT", 57)]  # both below floor
     assert api_server._auto_exec_candidates(recs, "2026-06-23T00:00:00") == []
 
 

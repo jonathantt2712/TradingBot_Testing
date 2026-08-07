@@ -19,9 +19,12 @@ def _ev(role: AgentRole, score: float, confidence: float = 1.0) -> AgentEvaluati
     return AgentEvaluation(role=role, score=score, confidence=confidence)
 
 
-def make_pm(**risk_overrides) -> PortfolioManager:
+def make_pm(**overrides) -> PortfolioManager:
     settings = Settings()
-    for key, val in risk_overrides.items():
+    # Pin canonical defaults so tests are independent of .env / load_dotenv pollution.
+    settings.thresholds.long_above  = overrides.pop("long_above",  60.0)
+    settings.thresholds.short_below = overrides.pop("short_below", 40.0)
+    for key, val in overrides.items():
         setattr(settings.risk, key, val)
     return PortfolioManager(
         settings=settings,

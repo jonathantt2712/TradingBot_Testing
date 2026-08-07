@@ -5,7 +5,7 @@ import {
 } from 'recharts'
 import { useState, useEffect } from 'react'
 import type { PnLPoint } from '@/types/trading'
-import { formatCurrency } from '@/lib/utils'
+import { cn, formatCurrency } from '@/lib/utils'
 
 interface Props { data: PnLPoint[] }
 
@@ -18,13 +18,15 @@ const formatLabel = (label: string) => {
 
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null
-  const cum   = payload.find((p: any) => p.dataKey === 'cumulative_pnl')
-  const daily = payload.find((p: any) => p.dataKey === 'daily_pnl')
+  const cum       = payload.find((p: any) => p.dataKey === 'cumulative_pnl')
+  const daily     = payload.find((p: any) => p.dataKey === 'daily_pnl')
+  const portfolio = payload.find((p: any) => p.dataKey === 'equity')
   return (
     <div className="rounded-lg border border-bg-border bg-bg-elevated px-3 py-2 shadow-lg text-xs">
       <p className="text-muted mb-1">{formatLabel(label)}</p>
-      {cum   && <p className="text-brand-cyan font-medium">Cum: {formatCurrency(cum.value)}</p>}
-      {daily && (
+      {portfolio && <p className="text-brand-cyan font-medium">Value: {formatCurrency(portfolio.value)}</p>}
+      {cum       && <p className="text-brand-cyan font-medium">Cum: {formatCurrency(cum.value)}</p>}
+      {daily     && (
         <p className={daily.value >= 0 ? 'text-bull' : 'text-bear'}>
           Daily: {formatCurrency(daily.value)}
         </p>
@@ -33,7 +35,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   )
 }
 
-type View = 'cumulative' | 'daily' | 'today'
+type View = 'cumulative' | 'daily' | 'portfolio' | 'today'
 
 export function PnLChart({ data }: Props) {
   const [view,         setView]         = useState<View>('cumulative')
@@ -56,11 +58,22 @@ export function PnLChart({ data }: Props) {
   }, [view, todayData.length, todayLoading])
 
   const displayData = view === 'today' ? todayData : data
-  const isPositive  = (displayData.at(-1)?.cumulative_pnl ?? 0) >= 0
+
+  // Today's change: last point vs previous (for subtitle badge)
+  const lastPt   = data.at(-1)
+  const prevPt   = data.at(-2)
+  const todayPct = lastPt?.equity && prevPt?.equity && prevPt.equity > 0
+    ? +((lastPt.equity - prevPt.equity) / prevPt.equity * 100).toFixed(2)
+    : null
+
+  const isPositive = view === 'portfolio'
+    ? (lastPt?.equity ?? 0) >= (data.at(0)?.equity ?? 0)
+    : (displayData.at(-1)?.cumulative_pnl ?? 0) >= 0
 
   const tabs: { key: View; label: string }[] = [
     { key: 'cumulative', label: 'Cumulative' },
     { key: 'daily',      label: 'Daily' },
+    { key: 'portfolio',  label: 'Portfolio' },
     { key: 'today',      label: 'Today' },
   ]
 
@@ -69,8 +82,17 @@ export function PnLChart({ data }: Props) {
       <div className="flex items-center justify-between mb-5">
         <div>
           <h2 className="text-sm font-semibold text-primary">Equity Curve</h2>
-          <p className="text-xs text-muted mt-0.5">
-            {view === 'today' ? 'Intraday — שעון ישראל' : '1-year rolling P&L'}
+          <p className="text-xs text-muted mt-0.5 flex items-center gap-1.5">
+            <span>
+              {view === 'today'     ? 'Intraday — שעון ישראל'
+               : view === 'portfolio' ? 'Portfolio value'
+               : '1-year rolling P&L'}
+            </span>
+            {todayPct !== null && view !== 'today' && (
+              <span className={cn('font-medium', todayPct >= 0 ? 'text-bull' : 'text-bear')}>
+                ({todayPct >= 0 ? '+' : ''}{todayPct.toFixed(2)}% today)
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-1 rounded-lg border border-bg-border p-0.5">
@@ -130,6 +152,38 @@ export function PnLChart({ data }: Props) {
                   ))}
                 </Bar>
               </BarChart>
+            ) : view === 'portfolio' ? (
+              <AreaChart data={data} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="portfolioGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%"   stopColor="#22D3EE" stopOpacity={0.25} />
+                    <stop offset="100%" stopColor="#22D3EE" stopOpacity={0.0}  />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 10, fill: '#64748B' }}
+                  tickFormatter={d => d.slice(5)}
+                  axisLine={false} tickLine={false}
+                />
+                <YAxis
+                  tick={{ fontSize: 10, fill: '#64748B' }}
+                  tickFormatter={v => `$${(v / 1000).toFixed(1)}k`}
+                  axisLine={false} tickLine={false} width={52}
+                  domain={['auto', 'auto']}
+                />
+                <Tooltip content={<CustomTooltip />} />
+                <Area
+                  type="monotone"
+                  dataKey="equity"
+                  stroke="#22D3EE"
+                  strokeWidth={2}
+                  fill="url(#portfolioGrad)"
+                  dot={false}
+                  activeDot={{ r: 4, fill: '#22D3EE', strokeWidth: 0 }}
+                />
+              </AreaChart>
             ) : (
               <AreaChart data={displayData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
                 <defs>

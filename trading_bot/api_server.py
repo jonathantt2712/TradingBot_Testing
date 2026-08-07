@@ -155,9 +155,17 @@ _Decision          = None
 _EXIT_DECISIONS: list = []  # rolling log of exit-monitor and EOD review decisions
 _MAX_EXIT_LOG     = 500
 _telegram          = None   # TelegramPublisher — optional push notifications
+_bg_tasks: set = set()  # retain references so GC doesn't collect running tasks
 # Tracks last strategy-alert per ticker: {ticker: (unix_ts, score)} — prevents
 # the same strong signal from spamming Telegram on every 3-minute scan.
 _strategy_alerted: dict = {}
+
+
+def _fire(coro) -> None:
+    """Schedule a background coroutine and retain a reference to prevent GC."""
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
 
 try:
     import pandas as pd
@@ -863,7 +871,7 @@ async def _check_and_close_trades(session: aiohttp.ClientSession) -> None:
                 changed_ids.add(_trade_key(trade))
                 _update_agent_attribution(trade)
                 if _telegram is not None:
-                    asyncio.create_task(_telegram.send_trade_exit(trade, exit_price, exit_reason, pnl))
+                    _fire(_telegram.send_trade_exit(trade, exit_price, exit_reason, pnl))
                 logger.info(
                     "Closed (simulated) %s %s via %s: exit=%.2f  PnL=$%.2f (%.2f%%)",
                     direction, ticker_sym, exit_reason, exit_price, pnl, pnl_pct,
@@ -1393,6 +1401,24 @@ _circuit_breaker: Dict[str, Any] = {
     "daily_pnl_pct":   0.0,
 }
 
+# Wall-clock timestamp of the last successfully recorded trade entry.
+# Used to compute trading drought duration for adaptive threshold lowering.
+# Initialized from trades.json on first access; updated on every new entry.
+def _init_last_trade_ts() -> Optional[datetime]:
+    try:
+        trades = _load(TRADES_FILE, [])
+        if not isinstance(trades, list):
+            return None
+        executed = [t.get("executed_at") for t in trades if t.get("executed_at")]
+        if not executed:
+            return None
+        latest = max(executed)
+        return datetime.fromisoformat(latest)
+    except Exception:
+        return None
+
+_last_trade_placed_at: Optional[datetime] = None  # set lazily on first use
+
 
 def _reset_scan_stats_if_needed() -> None:
     today = str(date.today())
@@ -1494,24 +1520,37 @@ def _consecutive_losses() -> int:
 
 
 def _check_circuit_breaker() -> Optional[str]:
-    """Return a halt reason string if trading should be stopped, None if clear."""
-    # Consecutive loss check
+    """Update circuit-breaker dashboard state. Advisory only — never blocks entries.
+
+    The bot adapts to adverse conditions (lowers thresholds, widens search) rather
+    than halting. The dashboard banner still shows when thresholds are breached so
+    the operator is informed, but no entry is ever refused on this basis alone.
+    """
     consec = _consecutive_losses()
     _circuit_breaker["consecutive_losses"] = consec
     if consec >= MAX_CONSECUTIVE_LOSSES:
-        reason = f"{consec} consecutive losses — trading halted until manual reset"
-        _circuit_breaker.update({"halted": True, "reason": "consecutive_losses",
-                                  "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()})
-        return reason
+        logger.warning(
+            "Circuit-breaker advisory: %d consecutive losses (non-blocking — bot continues with adapted thresholds)",
+            consec,
+        )
+        _circuit_breaker.update({
+            "halted": True, "reason": "consecutive_losses",
+            "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        })
+        return None  # advisory only
 
-    # Daily P&L check
     daily_loss = _daily_pnl_pct()
     _circuit_breaker["daily_pnl_pct"] = round(daily_loss * 100, 2)
     if daily_loss <= -DAILY_LOSS_LIMIT_PCT:
-        reason = f"Daily loss limit hit ({daily_loss*100:.1f}%) — trading halted for today"
-        _circuit_breaker.update({"halted": True, "reason": "daily_loss",
-                                  "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()})
-        return reason
+        logger.warning(
+            "Circuit-breaker advisory: daily loss %.1f%% (non-blocking — bot continues with adapted thresholds)",
+            daily_loss * 100,
+        )
+        _circuit_breaker.update({
+            "halted": True, "reason": "daily_loss",
+            "halted_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        })
+        return None  # advisory only
 
     _circuit_breaker["halted"] = False
     _circuit_breaker["reason"] = None
@@ -1670,7 +1709,7 @@ async def _run_premarket_scan() -> None:
                 len(recs), gap_min, vol_min,
             )
             if _telegram is not None:
-                asyncio.create_task(_telegram.send_gapper_alert(recs))
+                _fire(_telegram.send_gapper_alert(recs))
 
     except Exception as exc:
         logger.warning("Pre-market scan failed: %s", exc)
@@ -1733,6 +1772,9 @@ async def _run_market_scan_inner(force: bool = False) -> None:
     if _AGENTS_AVAILABLE and _pm is not None:
         _pm.risk.cfg.atr_stop_multiple   = weights.get("atr_stop_multiple",   2.0)
         _pm.risk.cfg.atr_target_multiple = weights.get("atr_target_multiple", 3.0)
+        # Proactively lower the R/R floor so the Risk Agent doesn't veto viable
+        # setups. Default 1.0 (was 1.5 from env) — tuner can raise it in weights.
+        _pm.risk.cfg.min_risk_reward     = weights.get("min_risk_reward",      1.0)
 
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())) as session:
@@ -2567,7 +2609,7 @@ async def _trailing_stop_loop() -> None:
                             _close_simulated_trade(trade, effective_stop, "trailing_stop")
                             changed_ids.add(_trade_key(trade))
                             if _telegram is not None:
-                                asyncio.create_task(_telegram.send_trade_exit(trade, effective_stop, "trailing_stop", trade.get("pnl")))
+                                _fire(_telegram.send_trade_exit(trade, effective_stop, "trailing_stop", trade.get("pnl")))
                             logger.info("Trailing stop hit: %s LONG closed @ %.2f", ticker, effective_stop)
 
                     else:  # SHORT
@@ -2588,7 +2630,7 @@ async def _trailing_stop_loop() -> None:
                             _close_simulated_trade(trade, effective_stop, "trailing_stop")
                             changed_ids.add(_trade_key(trade))
                             if _telegram is not None:
-                                asyncio.create_task(_telegram.send_trade_exit(trade, effective_stop, "trailing_stop", trade.get("pnl")))
+                                _fire(_telegram.send_trade_exit(trade, effective_stop, "trailing_stop", trade.get("pnl")))
                             logger.info("Trailing stop hit: %s SHORT closed @ %.2f", ticker, effective_stop)
 
                 if changed_ids:
@@ -2711,7 +2753,7 @@ async def _do_exit_position(trade: dict, price: float, reason: str,
     _log_exit_decision(ticker, direction, "exit", reason, score=score, price=price)
     logger.info("Position EXIT: %s %s @ %.2f — %s", direction, ticker, price, reason)
     if _telegram is not None:
-        asyncio.create_task(_telegram.send_trade_exit(trade, price, reason))
+        _fire(_telegram.send_trade_exit(trade, price, reason))
     return True
 
 
@@ -3016,7 +3058,7 @@ async def _background_loop() -> None:
                     total_pnl = sum(t.get("pnl") or 0 for t in week_trades)
                     best  = max(week_trades, key=lambda t: t.get("pnl") or 0, default={})
                     worst = min(week_trades, key=lambda t: t.get("pnl") or 0, default={})
-                    asyncio.create_task(_telegram.send_weekly_summary({
+                    _fire(_telegram.send_weekly_summary({
                         "total_trades": len(week_trades),
                         "wins":         len(wins),
                         "losses":       len(losses),
@@ -3523,6 +3565,10 @@ async def _record_executed_trade(body: ExecuteBody) -> tuple[Optional[str], Opti
         history.append(trade)
         _save(HISTORY_FILE, history)
 
+    # Reset drought counter — a new entry resets the adaptive threshold
+    global _last_trade_placed_at
+    _last_trade_placed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
     # Store TP/SL context for auto-close detection
     ctx_data = _load(CONTEXT_FILE, {})
     if not isinstance(ctx_data, dict):
@@ -3596,12 +3642,42 @@ def _auto_exec_disarmed_reason() -> Optional[str]:
     return None
 
 
+def _adaptive_exec_min_score() -> float:
+    """Auto-exec conviction threshold, adaptively lowered during trading droughts.
+
+    Baseline: AUTO_EXEC_MIN_SCORE (env var, default 60).
+    Every 4 market-hours without a completed trade: -3 points (floor: 45).
+
+    Market hours approximation: 6.5h/day × 5 days/week ≈ 27% of calendar time.
+    We use elapsed calendar hours × 0.27 to estimate drought in market-hours.
+    """
+    global _last_trade_placed_at
+    if _last_trade_placed_at is None:
+        _last_trade_placed_at = _init_last_trade_ts()
+
+    if _last_trade_placed_at is None:
+        # No trade ever recorded — apply moderate initial reduction
+        drought_market_hours = 16.0
+    else:
+        elapsed_h = (datetime.now(timezone.utc).replace(tzinfo=None) - _last_trade_placed_at).total_seconds() / 3600
+        drought_market_hours = elapsed_h * 0.27  # calendar → market-hours approximation
+
+    reductions = int(drought_market_hours / 4)
+    effective = max(45.0, AUTO_EXEC_MIN_SCORE - reductions * 3)
+    if effective < AUTO_EXEC_MIN_SCORE:
+        logger.debug(
+            "Adaptive exec threshold: %.0f (drought ~%.1fh market-hours, %d reductions)",
+            effective, drought_market_hours, reductions,
+        )
+    return effective
+
+
 def _auto_exec_candidates(recs: list, now_iso: str) -> list:
     """Strong, fresh, sized recommendations eligible for autonomous entry.
 
-    Conviction is symmetric: a LONG needs composite_score >= AUTO_EXEC_MIN_SCORE,
-    a SHORT needs it <= 100 - AUTO_EXEC_MIN_SCORE. Expired or unsizable (qty<=0)
-    recs are skipped."""
+    Conviction threshold adapts downward during droughts (see _adaptive_exec_min_score).
+    Expired or unsizable (qty<=0) recs are always skipped."""
+    min_score = _adaptive_exec_min_score()
     out: list = []
     for r in recs:
         if not isinstance(r, dict):
@@ -3610,8 +3686,8 @@ def _auto_exec_candidates(recs: list, now_iso: str) -> list:
         score = r.get("composite_score")
         if score is None or direction not in ("LONG", "SHORT"):
             continue
-        strong = (score >= AUTO_EXEC_MIN_SCORE) if direction == "LONG" \
-            else (score <= 100 - AUTO_EXEC_MIN_SCORE)
+        strong = (score >= min_score) if direction == "LONG" \
+            else (score <= 100 - min_score)
         if not strong:
             continue
         exp = r.get("expires_at")
@@ -4135,6 +4211,12 @@ def health():
             "gemini":    gemini_set,
             "anthropic": anthropic_set,
             "vision_ready": gemini_set or anthropic_set,
+        },
+        "telegram": {
+            "enabled":          _telegram.enabled if _telegram is not None else False,
+            "has_bot_token":    bool(os.getenv("TELEGRAM_BOT_TOKEN")),
+            "has_dashboard_url": bool(os.getenv("DASHBOARD_URL")),
+            "has_bot_secret":   bool(os.getenv("BOT_API_SECRET")),
         },
         "issues": _health_issues(),
     }

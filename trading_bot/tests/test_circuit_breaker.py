@@ -1,5 +1,6 @@
-"""Circuit breaker — the safety brake that halts trading.
+"""Circuit breaker — advisory state tracker (non-blocking).
 
+The breaker now logs and updates dashboard state but never refuses an entry.
 _consecutive_losses and _check_circuit_breaker read TRADES_FILE; we point that
 at a temp file so the real _load runs. In api_server (needs FastAPI).
 """
@@ -66,40 +67,38 @@ def test_clear_when_no_losses(trades_file):
     assert api_server._circuit_breaker["halted"] is False
 
 
-def test_halts_on_consecutive_losses(trades_file):
+def test_advisory_on_consecutive_losses(trades_file):
+    # Breaker is advisory: returns None but sets halted=True on the dashboard state.
     _write(trades_file, [_closed(-5, _day(n)) for n in (3, 2, 1)])  # 3 in a row
     reason = api_server._check_circuit_breaker()
-    assert reason is not None
-    assert "consecutive losses" in reason
-    assert api_server._circuit_breaker["halted"] is True
+    assert reason is None                                   # never blocks
+    assert api_server._circuit_breaker["halted"] is True   # dashboard still shows
 
 
-def test_halts_on_daily_loss_limit(trades_file):
-    # one win long ago to set a non-trivial equity estimate, then a big loss today
+def test_advisory_on_daily_loss_limit(trades_file):
     today = date.today().isoformat() + "T15:00:00"
     _write(trades_file, [
         _closed(100, _day(10)),
-        _closed(-500, today),   # today's loss well beyond 2% of estimated equity
+        _closed(-500, today),   # well beyond 2% of estimated equity
     ])
     reason = api_server._check_circuit_breaker()
-    assert reason is not None
-    assert "Daily loss limit" in reason
+    assert reason is None                                   # never blocks
+    assert api_server._circuit_breaker["halted"] is True   # dashboard still shows
 
 
 # ── manual reset acknowledgement ─────────────────────────────────────────────
 
 def test_manual_reset_acknowledges_past_losses(trades_file, tmp_path, monkeypatch):
-    """Reset must persist a cutoff — otherwise the breaker recomputes the
-    streak from history and re-halts on the next entry check (deadlock when
-    flat: entries blocked → no new trade can ever break the streak)."""
+    """Reset persists a cutoff — losses before it are excluded from streak counts."""
     monkeypatch.setattr(api_server, "CB_RESET_FILE", tmp_path / "cb_reset.json")
     _write(trades_file, [_closed(-5, _day(n)) for n in (3, 2, 1)])
-    assert api_server._check_circuit_breaker() is not None   # halted
+    api_server._check_circuit_breaker()   # populate advisory state
+    assert api_server._circuit_breaker["halted"] is True  # advisory active
 
     api_server._save(api_server.CB_RESET_FILE,
                      {"reset_at": date.today().isoformat() + "T23:59:59"})
     assert api_server._consecutive_losses() == 0
-    assert api_server._check_circuit_breaker() is None       # stays clear
+    assert api_server._check_circuit_breaker() is None    # advisory cleared
 
 
 def test_losses_after_reset_count_again(trades_file, tmp_path, monkeypatch):

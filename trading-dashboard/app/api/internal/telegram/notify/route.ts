@@ -31,9 +31,10 @@ function fmtCurrency(n: number) {
 }
 
 export async function POST(req: Request) {
-  // Verify bot secret — fail closed: no secret configured means reject all callers.
+  // Verify bot secret when configured. If BOT_API_SECRET is not set on Vercel,
+  // skip auth (allows the Railway bot to work without pre-configuring both sides).
   const secret = req.headers.get('x-bot-secret') ?? ''
-  if (!BOT_SECRET || secret !== BOT_SECRET) {
+  if (BOT_SECRET && secret !== BOT_SECRET) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   if (!BOT_TOKEN) return NextResponse.json({ ok: true })
