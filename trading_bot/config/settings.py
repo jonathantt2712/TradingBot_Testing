@@ -152,6 +152,15 @@ class Settings:
     news_base_url:     str  = field(default_factory=lambda: _env("NEWS_BASE_URL", "https://www.polistock.app/"))
     news_api_key:      str  = field(default_factory=lambda: _env("NEWS_API_KEY"))
     gemini_api_key:    str  = field(default_factory=lambda: _env("GEMINI_API_KEY"))
+    # Trade analysis is 100% code by default — FundamentalAgent's keyword/FinBERT
+    # fallback, VisionAgent skipped, DecisionAgent skipped in favor of the
+    # weighted composite/threshold path (PortfolioManager._composite/_direction).
+    # That path is also what backtests and the optimizer use, so live trading no
+    # longer runs a different code path than the one the nightly walk-forward
+    # validates. Set USE_LLM_AGENTS=true to opt back into LLM-based analysis
+    # (news sentiment, chart vision, decision synthesis) at the cost of API
+    # tokens per ticker per scan.
+    use_llm_agents:    bool = field(default_factory=lambda: _env_bool("USE_LLM_AGENTS", False))
     # Vision keeps running on the free Gemini-Flash vision model, but its chart
     # score is cached per ticker for this many minutes so repeat scans don't burn
     # a fresh request each time (0 disables caching).

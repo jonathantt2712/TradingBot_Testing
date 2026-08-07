@@ -329,6 +329,13 @@ class AlpacaBroker(BaseBroker):
             )
             return None
 
+        # Client-side ID: if the POST times out after reaching Alpaca, the
+        # order can be found (GET /v2/orders:by_client_order_id) instead of
+        # existing untracked. Alpaca also rejects a duplicate ID, so an
+        # accidental re-submit cannot double-fill. That recovery only works
+        # if the ID actually survives the failure — logged below so it's
+        # greppable even though nothing here retries automatically.
+        client_order_id = f"tbot-{uuid.uuid4().hex[:20]}"
         body = {
             "symbol":        decision.ticker,
             "qty":           str(qty),
@@ -338,11 +345,7 @@ class AlpacaBroker(BaseBroker):
             "order_class":   "bracket",
             "stop_loss":     {"stop_price": str(round(sl, 2))},
             "take_profit":   {"limit_price": str(round(tp, 2))},
-            # Client-side ID: if the POST times out after reaching Alpaca, the
-            # order can be found (GET /v2/orders:by_client_order_id) instead of
-            # existing untracked. Alpaca also rejects a duplicate ID, so an
-            # accidental re-submit cannot double-fill.
-            "client_order_id": f"tbot-{uuid.uuid4().hex[:20]}",
+            "client_order_id": client_order_id,
         }
 
         try:
@@ -356,5 +359,6 @@ class AlpacaBroker(BaseBroker):
                 metadata  = resp,
             )
         except Exception as exc:
-            logger.error("submit_bracket(%s) failed: %s", decision.ticker, exc)
+            logger.error("submit_bracket(%s) failed (client_order_id=%s — check Alpaca "
+                        "before resubmitting): %s", decision.ticker, client_order_id, exc)
             return None

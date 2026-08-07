@@ -700,9 +700,9 @@ def print_summary(all_trades: list[TradeResult]) -> dict:
 
 # -- Weight learning -----------------------------------------------------------
 
-def _update_weights_from_backtest(backtest_trades: list) -> None:
+def _update_weights_from_backtest(backtest_trades: list, *, live_trades_file: Optional[Path] = None) -> None:
     """Combine backtest results with live closed trades and update strategy weights."""
-    live_trades_file = Path(__file__).parent / "data" / "trades.json"
+    live_trades_file = live_trades_file or (Path(__file__).parent / "data" / "trades.json")
     live_closed: list = []
     if live_trades_file.exists():
         try:
@@ -720,9 +720,15 @@ def _update_weights_from_backtest(backtest_trades: list) -> None:
     ]
 
     # Combined dataset: live trades counted 3x (recency bonus) + all backtest
-    combined = bt_dicts + live_closed[-20:] + live_closed[-20:] + live_closed[-20:]
-    if len(combined) < 10:
-        logger.info("Not enough data for weight update (%d trades)", len(combined))
+    recent_live = live_closed[-20:]
+    combined = bt_dicts + recent_live + recent_live + recent_live
+    # Gate the minimum-sample check on DISTINCT trades, not the 3x-duplicated
+    # list: the recency weighting is meant to bias the win-rate/PF stats
+    # toward recent form, not to let a handful of live trades pass as if they
+    # were 3x as much independent evidence for the "do we trust this" gate.
+    distinct_n = len(bt_dicts) + len(recent_live)
+    if distinct_n < 10:
+        logger.info("Not enough distinct data for weight update (%d trades)", distinct_n)
         return
 
     pnls   = [t.get("pnl", 0) or 0 for t in combined]
@@ -742,7 +748,32 @@ def _update_weights_from_backtest(backtest_trades: list) -> None:
     profit_factor = (avg_win * len(wins)) / abs(avg_loss * len(losses)) \
                     if losses and avg_loss != 0 else 2.0
 
-    if win_rate > 0.58 and profit_factor > 1.4:
+    # Luck screen: unlike the optimizer's "Apply Optimal Params" path (which
+    # requires walk-forward validation + a sign-flip randomization test before
+    # touching live params — see api_server._apply_optimizer_params_inner),
+    # this nightly nudge previously mutated real atr_stop/target_multiple off
+    # nothing but a win-rate/PF heuristic. Hold it to the same bar: skip the
+    # ATR nudge (but still record the informational stats below) unless the
+    # combined edge is distinguishable from a coin-flip at the same threshold
+    # the optimizer uses.
+    atr_nudge_blocked_reason: Optional[str] = None
+    if len(pnls) >= 6:
+        try:
+            from validation.permutation import returns_randomization_test
+            max_p = float(os.getenv("AUTO_APPLY_MAX_P", "0.20"))
+            res = returns_randomization_test(
+                pnls, n=2000, stat=lambda x: float(np.mean(x)), seed=42,
+            )
+            if float(res["p_value"]) > max_p:
+                atr_nudge_blocked_reason = f"edge not distinguishable from luck (p={res['p_value']:.2f})"
+        except Exception:
+            logger.debug("luck screen failed — proceeding without it", exc_info=True)
+    else:
+        atr_nudge_blocked_reason = f"too few trades for a luck screen ({len(pnls)} < 6)"
+
+    if atr_nudge_blocked_reason:
+        logger.info("ATR nudge skipped: %s", atr_nudge_blocked_reason)
+    elif win_rate > 0.58 and profit_factor > 1.4:
         cur["atr_target_multiple"] = round(min(5.5, cur.get("atr_target_multiple", 4.0) * 1.05), 3)
     elif win_rate < 0.40 or profit_factor < 0.9:
         cur["atr_stop_multiple"]   = round(max(1.0, cur.get("atr_stop_multiple",   2.0) * 0.95), 3)

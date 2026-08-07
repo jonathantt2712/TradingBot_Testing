@@ -114,6 +114,22 @@ def test_volatility_multiplier_neutral_at_baseline():
     assert mult == pytest.approx(1.0, rel=1e-6)
 
 
+def test_viability_score_monotonic_when_min_rr_outside_default_range(flat_bars):
+    # np.interp needs strictly increasing breakpoints. min_risk_reward is an
+    # env-configurable value (MIN_RISK_REWARD) — if it's ever set to >=3.0 the
+    # unclamped [1.0, min_rr, 3.0] breakpoints go non-monotonic and np.interp
+    # silently returns garbage instead of raising. Higher R/R must never score
+    # lower than a smaller R/R once clamped.
+    cfg = _cfg()
+    cfg.min_risk_reward = 3.5  # outside (1.0, 3.0)
+    agent = RiskAgent(cfg)
+    ctx = AnalysisContext(ticker="TEST", bars=flat_bars, account={"equity": 100_000.0})
+    from core.models import RiskParameters
+    low_rr  = RiskParameters(qty=1, entry=100, stop_loss=98, take_profit=101, risk_reward=2.5)
+    high_rr = RiskParameters(qty=1, entry=100, stop_loss=98, take_profit=103, risk_reward=4.0)
+    assert agent._viability_score(high_rr, ctx) >= agent._viability_score(low_rr, ctx)
+
+
 def test_kelly_multiplier_backtest_mode_returns_one():
     # In backtest mode Kelly must return 1.0 unconditionally (no file read,
     # no future-data leak into historical sizing).

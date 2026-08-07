@@ -42,7 +42,9 @@ except Exception:
     _HAS_TALIB_C = False
 
 
-# Signal weights (must sum to 1.0)
+# Relative signal weights. Not required to sum to 1.0 — the composite below
+# is a weighted MEAN (num/total_w), which normalises by whatever subset of
+# signals is actually present for a given ticker/bar count.
 _WEIGHTS = {
     "rsi":           0.11,
     "macd":          0.10,

@@ -193,6 +193,35 @@ def test_direction_risk_off_regime_shifts_both_bars():
     assert pm._direction(33.0) is Decision.SHORT
 
 
+def test_direction_learned_regime_threshold_is_not_double_counted(tmp_path, monkeypatch):
+    # regime_params carries a threshold the tuner already calibrated FOR this
+    # regime from its own trade history. The static +8/-6 RISK_OFF heuristic
+    # delta must NOT also apply on top of it, or the regime's effect on the
+    # entry bar is counted twice.
+    import json, execution.portfolio_manager as pm_mod
+    weights_file = tmp_path / "strategy_weights.json"
+    weights_file.write_text(json.dumps({
+        "live_tuning_active": True,
+        "regime_params": {
+            "risk_off": {
+                "agent_weights": {"technical": 0.4},
+                "long_threshold": 68.0,
+                "short_threshold": 34.0,
+            },
+        },
+    }))
+    monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
+    pm = make_pm()
+    pm._tuned_weights_ts = 0.0
+    pm.set_regime(_regime(MarketRegime.RISK_OFF))
+    long_base, short_base = pm._effective_thresholds(backtest_mode=False)
+    assert long_base == pytest.approx(68.0)
+    assert short_base == pytest.approx(34.0)
+    # Without the fix these would need composite>=76 (68+8) / <=28 (34-6).
+    assert pm._direction(69.0, long_base=long_base, short_base=short_base) is Decision.LONG
+    assert pm._direction(33.0, long_base=long_base, short_base=short_base) is Decision.SHORT
+
+
 # ── daily-loss kill switch ───────────────────────────────────────────────────
 
 def test_kill_switch_trips_after_daily_loss():
@@ -564,3 +593,101 @@ def test_entry_cutoff_blocks_final_hour(monkeypatch):
 
     _freeze_pm_clock(monkeypatch, datetime(2026, 7, 1, 14, 30, tzinfo=_ET))
     assert pm._entry_window_open() is True             # before the cutoff
+
+
+# ── DecisionAgent (LLM) path must still honor tuned thresholds ──────────────
+# Without this gate, the optimizer's auto-applied threshold tuning has zero
+# live effect whenever the LLM call succeeds: the LLM never sees numeric
+# thresholds, only regime prose, and decide() used its decision verbatim.
+
+class _StubDecisionAgent:
+    """Mimics DecisionAgent: returns a fixed (decision, composite, meta)."""
+
+    def __init__(self, decision: Decision, composite: float):
+        self._decision = decision
+        self._composite = composite
+        self.available = True
+
+    async def decide(self, ctx, evals, regime_value, regime_rationale):
+        return self._decision, self._composite, {"rationale": "stub"}
+
+
+def _mk_pm_with_decision_agent(decision_agent, *, long_above=None, short_below=None) -> PortfolioManager:
+    from core.models import RiskParameters
+
+    class _Stub:
+        def __init__(self, role, score):
+            self.role, self.score = role, score
+            self.data = None
+
+        async def safe_evaluate(self, ctx):
+            return AgentEvaluation(role=self.role, score=self.score, confidence=1.0)
+
+    class _StubRisk(_Stub):
+        def __init__(self):
+            super().__init__(AgentRole.RISK, 80)
+
+        def build_plan(self, ctx, *, intended):
+            return RiskParameters(qty=100.0, entry=100.0, stop_loss=98.0,
+                                  take_profit=106.0, risk_reward=3.0)
+
+    settings = Settings()
+    if long_above is not None:
+        settings.thresholds.long_above = long_above
+    if short_below is not None:
+        settings.thresholds.short_below = short_below
+    return PortfolioManager(
+        settings=settings,
+        broker=None,
+        fundamental=_Stub(AgentRole.FUNDAMENTAL, 70),
+        technical=_Stub(AgentRole.TECHNICAL, 70),
+        risk=_StubRisk(),
+        decision_agent=decision_agent,
+    )
+
+
+def _decide(pm):
+    from core.models import AnalysisContext
+    ctx = AnalysisContext(ticker="TEST", bars=None, account={"equity": 100_000.0})
+    return asyncio.run(pm.decide(ctx))
+
+
+def test_llm_long_below_tuned_threshold_is_downgraded():
+    # Tuned LONG threshold is 70; LLM approves LONG at composite 65 — the
+    # tuned threshold must win, or the optimizer's tuning is theater.
+    pm = _mk_pm_with_decision_agent(
+        _StubDecisionAgent(Decision.LONG, 65.0), long_above=70.0,
+    )
+    decision = _decide(pm)
+    assert decision.decision is Decision.PASS
+    assert decision.decision_meta["threshold_gate"] == "downgraded — below tuned LONG threshold"
+
+
+def test_llm_long_above_tuned_threshold_passes_through():
+    pm = _mk_pm_with_decision_agent(
+        _StubDecisionAgent(Decision.LONG, 75.0), long_above=70.0,
+    )
+    decision = _decide(pm)
+    assert decision.decision is Decision.LONG
+    assert "threshold_gate" not in (decision.decision_meta or {})
+
+
+def test_llm_short_above_tuned_threshold_is_downgraded():
+    # Tuned SHORT threshold is 30; LLM approves SHORT at composite 35 (not low
+    # enough to clear the tuned bar) — must be downgraded to PASS.
+    pm = _mk_pm_with_decision_agent(
+        _StubDecisionAgent(Decision.SHORT, 35.0), short_below=30.0,
+    )
+    decision = _decide(pm)
+    assert decision.decision is Decision.PASS
+    assert decision.decision_meta["threshold_gate"] == "downgraded — above tuned SHORT threshold"
+
+
+def test_llm_pass_is_never_upgraded():
+    # Tuned thresholds are a ceiling on aggressiveness only — the LLM's own
+    # more conservative PASS must never be second-guessed into a trade.
+    pm = _mk_pm_with_decision_agent(
+        _StubDecisionAgent(Decision.PASS, 90.0), long_above=60.0,
+    )
+    decision = _decide(pm)
+    assert decision.decision is Decision.PASS

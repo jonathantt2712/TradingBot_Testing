@@ -180,6 +180,13 @@ class PortfolioManager:
 
         evaluations = tuple(results)
 
+        # Computed unconditionally: the tuned/learned thresholds (optimizer
+        # Apply, per-regime learned params) must gate live entries regardless
+        # of which path below produces the decision — see the threshold-gate
+        # comment after the DecisionAgent branch.
+        retail_surcharge = float(technical.data.get("retail_surcharge", 0.0)) if technical and technical.data else 0.0
+        long_base, short_base = self._effective_thresholds(getattr(ctx, "backtest_mode", False))
+
         decision_meta: Optional[dict] = None
         if self._decision_agent is not None and self._decision_agent.available:
             regime_value = self._regime.regime.value if self._regime else "neutral"
@@ -196,18 +203,34 @@ class PortfolioManager:
             # so recommendations still flow rather than everything becoming PASS.
             if decision_meta and "error" in decision_meta:
                 composite = self._composite(fundamental, vision_eval, technical, liquid_eval, insider_eval, squeeze_eval, macro_eval)
-                retail_surcharge = float(technical.data.get("retail_surcharge", 0.0)) if technical and technical.data else 0.0
-                long_base, short_base = self._effective_thresholds(getattr(ctx, "backtest_mode", False))
                 decision = self._direction(composite, retail_surcharge=retail_surcharge,
                                            long_base=long_base, short_base=short_base)
                 decision_meta["fallback"] = "LLM unavailable — weighted composite used"
                 logger.debug("%s: DecisionAgent error → composite fallback (%.1f)", ctx.ticker, composite)
+            else:
+                # Threshold gate: the LLM never sees the optimizer's tuned
+                # numeric thresholds (only regime name/rationale prose), so
+                # without this, raising a threshold via the self-improvement
+                # loop has NO live effect whenever the LLM call succeeds — it
+                # would only ever apply in backtests/the optimizer, which both
+                # run with the LLM disabled. Enforce the tuned thresholds as a
+                # ceiling on aggressiveness: the LLM may still be more
+                # conservative (PASS), but can't greenlight a LONG/SHORT the
+                # tuned threshold would have blocked.
+                gate = self._direction(composite, retail_surcharge=retail_surcharge,
+                                       long_base=long_base, short_base=short_base)
+                if decision is Decision.LONG and gate is not Decision.LONG:
+                    logger.info("%s LLM LONG downgraded to PASS: composite %.1f below tuned threshold",
+                                ctx.ticker, composite)
+                    decision = Decision.PASS
+                    decision_meta["threshold_gate"] = "downgraded — below tuned LONG threshold"
+                elif decision is Decision.SHORT and gate is not Decision.SHORT:
+                    logger.info("%s LLM SHORT downgraded to PASS: composite %.1f above tuned threshold",
+                                ctx.ticker, composite)
+                    decision = Decision.PASS
+                    decision_meta["threshold_gate"] = "downgraded — above tuned SHORT threshold"
         else:
             composite = self._composite(fundamental, vision_eval, technical, liquid_eval, insider_eval, squeeze_eval, macro_eval)
-            retail_surcharge = 0.0
-            if technical is not None and technical.data:
-                retail_surcharge = float(technical.data.get("retail_surcharge", 0.0))
-            long_base, short_base = self._effective_thresholds(getattr(ctx, "backtest_mode", False))
             decision = self._direction(composite, retail_surcharge=retail_surcharge,
                                        long_base=long_base, short_base=short_base)
 
@@ -905,7 +928,13 @@ class PortfolioManager:
         base_short = short_base if short_base is not None else self._thresholds.short_below
         long_thr  = base_long  + retail_surcharge
         short_thr = base_short - retail_surcharge
-        if self._regime is not None:
+        # Regime heuristic delta: skip when the regime's own threshold has
+        # already been LEARNED (regime_params[regime].long/short_threshold) —
+        # _effective_thresholds already substituted that calibrated absolute
+        # value into long_base/short_base, so adding the static heuristic
+        # delta on top would double-count the regime's effect. Mirrors the
+        # analogous skip in _composite() for agent weights.
+        if self._regime is not None and not self._regime_block():
             long_thr  += self._regime.long_delta
             short_thr += self._regime.short_delta
         if composite >= long_thr:
