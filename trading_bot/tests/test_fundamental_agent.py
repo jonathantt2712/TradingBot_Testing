@@ -41,6 +41,24 @@ def _article(headline, summary="", **extra):
 
 # ── no-news path ─────────────────────────────────────────────────────────────
 
+# ── llm_enabled=False must skip the LLM branch even with a key present ──────
+
+def test_llm_enabled_false_never_calls_the_llm():
+    agent = FundamentalAgent(
+        _FakeNews([_article("Company beats earnings, analyst upgrade and record growth")]),
+        anthropic_api_key="fake-key-present",  # has_llm would be True on its own
+        llm_enabled=False,
+    )
+    assert agent._llm.has_llm is True  # sanity: the gate, not has_llm, must decide
+
+    async def _boom(*a, **k):
+        raise AssertionError("LLM must not be called when llm_enabled=False")
+    agent._llm.chat = _boom
+
+    ev = _run(agent)
+    assert "[keyword]" in ev.rationale
+
+
 def test_no_articles_is_neutral():
     ev = _run(_agent([]))
     assert ev.role is AgentRole.FUNDAMENTAL

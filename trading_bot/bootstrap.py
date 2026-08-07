@@ -109,8 +109,8 @@ def build_manager(
     broker: BaseBroker | None,
     *,
     include_live_only_agents: bool = True,
-    include_vision: bool = True,
-    include_decision_agent: bool = True,
+    include_vision: bool | None = None,
+    include_decision_agent: bool | None = None,
     include_insider: bool = True,
     include_squeeze: bool = True,
 ) -> PortfolioManager:
@@ -120,14 +120,21 @@ def build_manager(
     agents: their data sources report CURRENT platform state, which would leak
     look-ahead noise into historical evaluations.
 
-    ``include_vision=False`` (backtests) skips VisionAgent's LLM chart analysis.
-    Historical backtests evaluate hundreds of windows; each LLM call costs money
-    and time, making it impractical to include vision in offline simulations.
-
-    ``include_decision_agent=False`` (backtests) skips DecisionAgent's LLM call.
-    A 30-day backtest generates ~500 evaluation windows, making per-window LLM
-    calls prohibitively expensive.
+    ``include_vision`` / ``include_decision_agent`` default to
+    ``settings.use_llm_agents`` (env ``USE_LLM_AGENTS``, default off) when the
+    caller doesn't pass an explicit value. Backtests/optimizer pass an explicit
+    False regardless of the setting — LLM calls per evaluation window are
+    prohibitively slow/expensive at that volume. With LLM agents off,
+    DecisionAgent is skipped and PortfolioManager falls back to the weighted
+    composite/threshold path — the SAME deterministic code path backtests and
+    the optimizer use, so live trading is no longer validated against one code
+    path while running a different one.
     """
+    if include_vision is None:
+        include_vision = settings.use_llm_agents
+    if include_decision_agent is None:
+        include_decision_agent = settings.use_llm_agents
+
     news = build_news(settings)
     live_extras = include_live_only_agents
     squeeze_agent = SqueezeAgent(weight=settings.weights.squeeze) if include_squeeze else None
@@ -136,7 +143,8 @@ def build_manager(
         settings=settings,
         broker=broker,
         fundamental=FundamentalAgent(news, weight=settings.weights.fundamental,
-                                     gemini_api_key=settings.gemini_api_key),
+                                     gemini_api_key=settings.gemini_api_key,
+                                     llm_enabled=settings.use_llm_agents),
         vision=VisionAgent(weight=settings.weights.vision,
                            gemini_api_key=settings.gemini_api_key,
                            cache_ttl_min=settings.vision_cache_ttl_min) if include_vision else None,
