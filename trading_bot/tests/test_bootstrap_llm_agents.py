@@ -1,9 +1,12 @@
 """bootstrap.build_manager — LLM-agent opt-out wiring.
 
-Settings.use_llm_agents (env USE_LLM_AGENTS) defaults to False: trade analysis
-should run entirely on deterministic code (FundamentalAgent's keyword/FinBERT
-fallback, no VisionAgent, no DecisionAgent — PortfolioManager falls back to
-the weighted composite/threshold path) unless explicitly opted back in.
+Settings.use_llm_agents (env USE_LLM_AGENTS) defaults to False: trade
+analysis should run entirely on deterministic code — FundamentalAgent's
+keyword/FinBERT fallback, VisionAgent's code-based swing-structure read
+(the agent is ALWAYS constructed, never passed/omitted — see
+test_vision_agent.py for the fallback itself), and no DecisionAgent
+(PortfolioManager falls back to the weighted composite/threshold path) —
+unless explicitly opted back in.
 """
 import pytest
 
@@ -26,7 +29,8 @@ def test_llm_agents_off_by_default():
 
     pm = build_manager(s, broker=None)
 
-    assert pm.vision is None
+    assert pm.vision is not None            # always present — never a pass
+    assert pm.vision._llm_enabled is False  # runs the code-based structure read
     assert pm._decision_agent is None
     assert pm.fundamental._llm_enabled is False
 
@@ -37,6 +41,7 @@ def test_llm_agents_on_when_enabled():
     pm = build_manager(s, broker=None)
 
     assert pm.vision is not None
+    assert pm.vision._llm_enabled is True
     assert pm._decision_agent is not None
     assert pm.fundamental._llm_enabled is True
 
@@ -49,10 +54,11 @@ def test_explicit_include_flags_override_the_setting_default():
     assert s.use_llm_agents is False
 
     pm_on = build_manager(s, broker=None, include_vision=True, include_decision_agent=True)
-    assert pm_on.vision is not None
+    assert pm_on.vision._llm_enabled is True
     assert pm_on._decision_agent is not None
 
     s2 = _settings(use_llm_agents=True)
     pm_off = build_manager(s2, broker=None, include_vision=False, include_decision_agent=False)
-    assert pm_off.vision is None
+    assert pm_off.vision is not None            # still present, just LLM-disabled
+    assert pm_off.vision._llm_enabled is False
     assert pm_off._decision_agent is None
