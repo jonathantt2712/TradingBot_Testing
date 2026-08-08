@@ -47,7 +47,6 @@ from agents.vision_agent import VisionAgent  # noqa: E402
 from agents.report_agent import EODReportAgent  # noqa: E402
 from data.correlation_graph import CorrelationGraph  # noqa: E402
 from data.news_sources import AlpacaNewsSource, NewsSource, PoliStockSource  # noqa: E402
-from data.telegram_publisher import TelegramPublisher  # noqa: E402
 from execution.alpaca_broker import AlpacaBroker  # noqa: E402
 from execution.base_broker import BaseBroker  # noqa: E402
 from execution.ibkr_broker import IBKRBroker  # noqa: E402
@@ -290,9 +289,9 @@ def _tcp_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
 def preflight_checks(settings: Settings) -> None:
     """At startup, tell the operator what the bot needs that isn't configured.
 
-    Only reports genuinely missing essentials — these surface in the log, in
-    Telegram (via health_alert_loop), and in the EOD report. Reported through the
-    health board so they dedupe with any runtime failures of the same thing.
+    Only reports genuinely missing essentials — these surface in the log (via
+    health_alert_loop), on the dashboard, and in the EOD report. Reported through
+    the health board so they dedupe with any runtime failures of the same thing.
     """
     active = active_broker(settings)
     # Alpaca keys are needed for execution when Alpaca is selected, and ALWAYS for
@@ -334,16 +333,21 @@ def preflight_checks(settings: Settings) -> None:
                                 "uncheck 'Read-Only API', and confirm the socket port "
                                 "(7497 = TWS paper, 4002 = IB Gateway paper) matches IBKR_PORT.",
                 )
-    if not settings.gemini_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+    # An LLM key is only worth reporting when the operator opted INTO LLM
+    # analysis: the default pipeline is pure logic, so a missing key is not a
+    # missing essential — it's the normal, zero-token configuration.
+    if (settings.use_llm_agents
+            and not settings.gemini_api_key
+            and not os.environ.get("ANTHROPIC_API_KEY")):
         health.report_issue(
             "config:llm_key",
-            "No LLM API key set (GEMINI_API_KEY / ANTHROPIC_API_KEY).",
-            remediation="Set one for full Fundamental/Vision/Decision analysis; "
-                        "otherwise the bot uses keyword/FinBERT fallback.",
+            "USE_LLM_AGENTS=true but no LLM API key is set (GEMINI_API_KEY / ANTHROPIC_API_KEY).",
+            remediation="Set one, or leave USE_LLM_AGENTS off to run the "
+                        "deterministic (no-token) pipeline.",
             severity="warning",
         )
-    if not (settings.telegram_bot_token and settings.telegram_chat_id):
-        logger.info("Telegram not configured — alerts/EOD reports will only appear in the log.")
+    if not settings.telegram_bot_token:
+        logger.info("Telegram not configured — trade alerts will only appear in the log.")
 
 
 async def heartbeat_loop(*, execute: bool, broker_name: str,
@@ -368,20 +372,19 @@ async def heartbeat_loop(*, execute: bool, broker_name: str,
         await asyncio.sleep(interval_s)
 
 
-async def health_alert_loop(settings: Settings, *, interval_min: int = 10) -> None:
-    """Push newly-reported issues to Telegram so the operator is told promptly.
+async def health_alert_loop(*, interval_min: int = 10) -> None:
+    """Log newly-reported issues so the operator is told promptly.
 
     Runs the first check immediately (catches startup preflight issues), then
-    every interval_min. No-ops cleanly when Telegram isn't configured.
+    every interval_min. Telegram is reserved for actual buys and sells, so
+    issues surface here and on the dashboard's health board instead.
     """
-    publisher = TelegramPublisher(settings.telegram_bot_token)
     while True:
         try:
-            new = health.take_unsent()
-            if new and publisher.enabled:
-                await publisher.send_alert([i.as_line() for i in new])
+            for issue in health.take_unsent():
+                logger.warning("NEEDS ATTENTION: %s", issue.as_line())
         except Exception:
-            logger.exception("health alert push failed")
+            logger.exception("health alert logging failed")
         await asyncio.sleep(interval_min * 60)
 
 
@@ -390,15 +393,15 @@ async def eod_report_loop(settings: Settings) -> None:
 
     Fires in the window [close - eod_report_min_before, close); checks once a
     minute. Reads only the bot's own recorded activity (audit log / trade
-    history / memory), so it runs in both live and dry-run modes. Logs the
-    report and pushes it to Telegram when configured.
+    history / memory), so it runs in both live and dry-run modes. The note goes
+    to the log — Telegram carries buys and sells only.
     """
     if not settings.eod_report:
         logger.info("EOD report disabled (EOD_REPORT=false)")
         return
 
-    agent = EODReportAgent(gemini_api_key=settings.gemini_api_key)
-    publisher = TelegramPublisher(settings.telegram_bot_token)
+    agent = EODReportAgent(gemini_api_key=settings.gemini_api_key,
+                           llm_enabled=settings.use_llm_agents)
     reported_on = None
     while True:
         now = datetime.now(_ET)
@@ -410,7 +413,6 @@ async def eod_report_loop(settings: Settings) -> None:
             try:
                 report = await agent.generate()
                 logger.info("EOD REPORT:\n%s", report)
-                await publisher.send_report(report)
                 reported_on = now.date()
             except Exception:
                 logger.exception("EOD report failed — will retry next minute")

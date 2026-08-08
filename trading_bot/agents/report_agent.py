@@ -3,9 +3,9 @@
 Inspired by the ReportAgent pattern in a multi-agent simulation project: rather
 than dumping raw state into a prompt, it gathers a *bounded* set of facts from
 what the bot actually did today — the decision audit log, realised trade stats,
-and the reflection memory — and asks the LLM to narrate them, with the recorded
-numbers as the evidence. Falls back to a deterministic summary when no LLM key
-is configured, so a report always goes out.
+and the reflection memory — and writes the note from them. By default the note
+is built deterministically from those numbers (no tokens); with
+``llm_enabled=True`` (USE_LLM_AGENTS) an LLM narrates the same facts instead.
 
 This is the gather-then-summarise form of that pattern: the LLMAdapter has no
 native tool-calling, so the facts are collected up front rather than via a ReAct
@@ -103,10 +103,15 @@ class EODReportAgent:
         *,
         gemini_api_key: str = "",
         anthropic_api_key: str = "",
+        llm_enabled: bool = False,
         audit_file: Optional[Path] = None,
         trades_file: Optional[Path] = None,
         memory: Optional[TradeMemory] = None,
     ) -> None:
+        # Off by default (same as every other agent): the deterministic summary
+        # already carries every recorded number, so narrating it isn't worth an
+        # API call. Set USE_LLM_AGENTS=true to opt back in.
+        self._llm_enabled = llm_enabled
         self._llm = LLMAdapter(gemini_key=gemini_api_key, anthropic_key=anthropic_api_key)
         self._audit_file = Path(audit_file) if audit_file else _AUDIT_FILE
         self._trades_file = Path(trades_file) if trades_file else None
@@ -166,7 +171,7 @@ class EODReportAgent:
         needs = health.format_block()
         card = one_line(build_scorecard())
         body = None
-        if self._llm.has_llm:
+        if self._llm_enabled and self._llm.has_llm:
             prompt = (
                 "Write a concise (<=120 words) end-of-day desk note from these facts. "
                 "Cover what traded and why the rest did not, slippage, and any win-rate "

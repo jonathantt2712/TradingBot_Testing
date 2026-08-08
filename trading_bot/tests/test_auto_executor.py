@@ -92,6 +92,25 @@ def test_disarmed_when_toggle_off(monkeypatch):
     assert api_server._auto_exec_disarmed_reason() == "dashboard auto-execute toggle off"
 
 
+# ── /api/trade-mode reports WHY auto mode isn't trading ──────────────────────
+# Auto-execute being on is not the same as the bot being able to act on it;
+# a disarmed executor used to be invisible, which reads as "the bot is broken".
+
+def test_trade_mode_reports_armed(monkeypatch):
+    _arm_all(monkeypatch)
+    body = api_server.get_trade_mode()
+    assert body["auto_execute"] is True
+    assert body["armed"] is True and body["disarmed_reason"] is None
+
+
+def test_trade_mode_reports_the_blocking_reason(monkeypatch):
+    _arm_all(monkeypatch)
+    monkeypatch.setattr(api_server, "AUTO_EXECUTE_ON_RAILWAY", False)
+    body = api_server.get_trade_mode()
+    assert body["armed"] is False
+    assert body["disarmed_reason"] == "AUTO_EXECUTE_ON_RAILWAY off"
+
+
 # ── _entry_guard_reason (shared with /api/execute) ───────────────────────────
 
 def _open(ticker, direction="LONG", beta=1.0):

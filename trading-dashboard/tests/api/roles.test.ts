@@ -32,10 +32,9 @@ const VIEWER = { user: { id: 'u2', role: 'viewer' } }
 describe('shared-bot controls are owner-only', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('trade-mode is PER-USER — any signed-in user saves their own preference, bot untouched', async () => {
-    // Design from main: this toggle controls whether the DASHBOARD executes
-    // on this user's behalf; the bot's server-side loop is a separate
-    // mechanism (AUTO_EXECUTE_ON_RAILWAY). Not shared state → not owner-gated.
+  it('viewer trade-mode saves only their own preference — bot untouched', async () => {
+    // A viewer's auto mode is dashboard-side: it executes on their own Alpaca
+    // account while the Trades page is open. It must not arm the shared bot.
     vi.mocked(auth).mockResolvedValue(VIEWER as any)
     vi.mocked(prisma.user.update).mockResolvedValue({} as any)
     const res = await tradeModePost(req({ auto_execute: true }))
@@ -44,6 +43,14 @@ describe('shared-bot controls are owner-only', () => {
       expect.objectContaining({ where: { id: 'u2' } }),
     )
     expect(botPost).not.toHaveBeenCalled()
+  })
+
+  it('owner trade-mode also arms the bot, so it trades with no browser open', async () => {
+    vi.mocked(auth).mockResolvedValue(OWNER as any)
+    vi.mocked(prisma.user.update).mockResolvedValue({} as any)
+    const res = await tradeModePost(req({ auto_execute: true }))
+    expect(res.status).toBe(200)
+    expect(botPost).toHaveBeenCalledWith('/api/trade-mode', { auto_execute: true })
   })
 
   it('owner can switch broker', async () => {

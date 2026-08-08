@@ -274,7 +274,7 @@ flowchart TD
     loops --> l1["rescan_loop<br/>(30 min) — re-pick universe, evaluate"]
     loops --> l2["breakout_monitor_loop<br/>(5 min) — intraday breakouts"]
     loops --> l3["strategy_refresh_loop<br/>(60 min) — reload tuned params"]
-    loops --> l4["★ eod_report_loop<br/>(near close) — desk note → Telegram"]
+    loops --> l4["★ eod_report_loop<br/>(near close) — desk note → log"]
     loops --> l5["★ correlation_refresh_loop<br/>(60 min) — rebuild correlation graph"]
     loops --> l6["eod_flatten_loop<br/>(close-5min) — flatten book*"]
     loops --> l7["breakeven_lock_loop<br/>— trail stops to breakeven*"]

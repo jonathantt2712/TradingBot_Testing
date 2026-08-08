@@ -154,11 +154,8 @@ _pm                = None   # PortfolioManager — the SAME composition live/bac
 _Decision          = None
 _EXIT_DECISIONS: list = []  # rolling log of exit-monitor and EOD review decisions
 _MAX_EXIT_LOG     = 500
-_telegram          = None   # TelegramPublisher — optional push notifications
+_telegram          = None   # TelegramPublisher — trade entry/exit push notifications
 _bg_tasks: set = set()  # retain references so GC doesn't collect running tasks
-# Tracks last strategy-alert per ticker: {ticker: (unix_ts, score)} — prevents
-# the same strong signal from spamming Telegram on every 3-minute scan.
-_strategy_alerted: dict = {}
 
 
 def _fire(coro) -> None:
@@ -461,12 +458,25 @@ def _log_rejection(ticker: str, reason: str, score: float, details: dict) -> Non
 
 # === Kelly position sizing ===
 
+def _conviction(composite_score: float, direction: str) -> float:
+    """Conviction (0-100) for the rec's OWN side.
+
+    composite_score is a LONG-ness scale: 100 = strong long, 0 = strong short.
+    A SHORT's conviction is therefore its mirror image — read the raw score as
+    "how good is this trade" and every strong short looks like a weak long,
+    which is how shorts silently stopped being sized and traded.
+    """
+    score = float(composite_score)
+    return score if str(direction).upper() == "LONG" else 100.0 - score
+
+
 def _kelly_qty(
     equity: float,
     entry: float,
     stop_loss: float,
     take_profit: float,
     composite_score: float,
+    direction: str = "LONG",
 ) -> int:
     # Fail closed: no verified equity or a degenerate plan -> no size.
     # (qty=0 recs still show direction/levels; they just aren't tradeable.)
@@ -479,7 +489,7 @@ def _kelly_qty(
     # Win probability: the composite is an UNCALIBRATED blend, so cap the
     # optimism at 65%. Once a real track record exists (>=15 tuner updates),
     # anchor p to the measured 30-trade win rate instead.
-    p = min(max(composite_score / 100.0, 0.05), 0.65)
+    p = min(max(_conviction(composite_score, direction) / 100.0, 0.05), 0.65)
     try:
         w = _load_weights()
         measured = w.get("win_rate_30d")
@@ -1663,7 +1673,12 @@ async def _run_premarket_scan() -> None:
                     tp_pct      = weights.get("tp_pct",   0.05)
                     stop_loss   = round(entry * (1 - d * stop_pct), 2)
                     take_profit = round(entry * (1 + d * tp_pct),  2)
-                    qty         = _kelly_qty(equity, entry, stop_loss, take_profit, 65.0)
+                    # Score is a LONG-ness scale, so a gap-down's conviction has
+                    # to be mirrored — otherwise the auto-executor reads a strong
+                    # short as a weak long and skips it.
+                    conviction  = round(min(max(50.0 + abs(gap_pct) * 3, 55.0), 90.0), 1)
+                    score       = conviction if direction == "LONG" else round(100.0 - conviction, 1)
+                    qty         = _kelly_qty(equity, entry, stop_loss, take_profit, score, direction)
                     rr          = round(tp_pct / stop_pct, 2)
                     dollar_rsk  = round(abs(entry - stop_loss) * qty, 2)
                     expires_at  = (_next_market_open() + timedelta(minutes=win_mins)).isoformat()
@@ -1675,7 +1690,7 @@ async def _run_premarket_scan() -> None:
                         "id":              f"{sym}-pm-{int(datetime.now(timezone.utc).replace(tzinfo=None).timestamp())}",
                         "ticker":          sym,
                         "direction":       direction,
-                        "composite_score": round(min(max(50.0 + abs(gap_pct) * 3, 55.0), 90.0), 1),
+                        "composite_score": score,
                         "agent_used":      False,
                         "rationale":       rationale,
                         "risk":            {"entry": entry, "stop_loss": stop_loss,
@@ -1708,8 +1723,6 @@ async def _run_premarket_scan() -> None:
                 "Pre-market scan: %d gappers identified (>%.0f%% gap, vol>%d)",
                 len(recs), gap_min, vol_min,
             )
-            if _telegram is not None:
-                _fire(_telegram.send_gapper_alert(recs))
 
     except Exception as exc:
         logger.warning("Pre-market scan failed: %s", exc)
@@ -2008,9 +2021,13 @@ async def _run_market_scan_inner(force: bool = False) -> None:
                         continue
 
                     # Cap min_score at 55 so adaptive tuning can't choke all signals.
+                    # Compare CONVICTION, not the raw long-ness score: a strong
+                    # short scores near 0, so testing `score < min` rejected
+                    # exactly the shorts worth taking and kept the marginal ones.
                     effective_min = min(min_score, 55)
-                    if score < effective_min:
-                        _rej(sym, f"Below min score ({score:.1f} < {effective_min})", price=price, chg_pct=chg_pct, score=score)
+                    conviction    = _conviction(score, direction)
+                    if conviction < effective_min:
+                        _rej(sym, f"Below min score ({conviction:.1f} < {effective_min})", price=price, chg_pct=chg_pct, score=score)
                         continue
                     agent_used = True
                     intended   = _Decision.LONG if direction == "LONG" else _Decision.SHORT
@@ -2032,7 +2049,7 @@ async def _run_market_scan_inner(force: bool = False) -> None:
                         d     = 1 if direction == "LONG" else -1
                         stop_loss   = round(entry * (1 - d * stop_pct), 2)
                         take_profit = round(entry * (1 + d * tp_pct),   2)
-                        qty  = _kelly_qty(equity, entry, stop_loss, take_profit, score)
+                        qty  = _kelly_qty(equity, entry, stop_loss, take_profit, score, direction)
                         rr   = round(tp_pct / stop_pct, 2)
 
                 else:
@@ -2045,17 +2062,14 @@ async def _run_market_scan_inner(force: bool = False) -> None:
                 intra_w = weights.get("intra_weight", 2.0)
                 score   = min(max(50 + chg_pct * chg_w + intra_pct * intra_w, score_floor), score_ceil)
                 direction = "LONG" if chg_pct > 0 else "SHORT"
-                if direction == "LONG" and score < min_score:
-                    _rej(sym, f"Fallback score too low ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
-                    continue
-                if direction == "SHORT" and (100 - score) < min_score:
+                if _conviction(score, direction) < min_score:
                     _rej(sym, f"Fallback score too low ({score:.1f})", price=price, chg_pct=chg_pct, score=score)
                     continue
                 entry       = round(price, 2)
                 d           = 1 if direction == "LONG" else -1
                 stop_loss   = round(entry * (1 - d * stop_pct), 2)
                 take_profit = round(entry * (1 + d * tp_pct),   2)
-                qty         = _kelly_qty(equity, entry, stop_loss, take_profit, score)
+                qty         = _kelly_qty(equity, entry, stop_loss, take_profit, score, direction)
                 rr          = round(tp_pct / stop_pct, 2)
                 rationale   = f"fallback chg={chg_pct:+.1f}% intra={intra_pct:+.1f}%"
 
@@ -2111,28 +2125,6 @@ async def _run_market_scan_inner(force: bool = False) -> None:
             "rejected":   rejected,
             "scanned_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         })
-
-        # Push high-conviction signals to Telegram
-        if _telegram is not None and recs:
-            import time as _time
-            now_ts = _time.time()
-            new_hits = []
-            for r in recs:
-                score  = r.get("composite_score", 0)
-                ticker = r.get("ticker", "")
-                if score <= 60:
-                    continue
-                prev = _strategy_alerted.get(ticker)
-                if prev is None:
-                    new_hits.append(r)
-                    _strategy_alerted[ticker] = (now_ts, score)
-                else:
-                    prev_ts, prev_score = prev
-                    if now_ts - prev_ts >= 4 * 3600 or score >= prev_score + 10:
-                        new_hits.append(r)
-                        _strategy_alerted[ticker] = (now_ts, score)
-            if new_hits:
-                asyncio.create_task(_telegram.send_strategy_alert(new_hits))
 
         scanned_n = len(symbols_raw)
         skipped_n = scanned_n - len(recs)
@@ -2457,11 +2449,6 @@ async def _auto_improve_cycle() -> None:
         msg = (f"Auto-improve: applied walk-forward-validated params "
                f"{result.get('applied')} (OOS PnL=${result.get('oos_pnl', 0):.0f})")
         logger.info(msg)
-        if _telegram is not None and _telegram.enabled:
-            try:
-                await _telegram.send_alert([msg])
-            except Exception:
-                logger.debug("auto-improve telegram notify failed", exc_info=True)
     else:
         logger.info("Auto-improve: params NOT applied (%s) — %s",
                     status, result.get("reason", ""))
@@ -2951,7 +2938,6 @@ async def _background_loop() -> None:
     last_snapshot_day  = ""
     last_premarket_day = ""
     last_eod_extend_day = ""
-    last_weekly_summary_day = ""
     while True:
         # Reset daily scan stats at midnight; bound the append-only logs so
         # they can't grow into multi-MB files that slow every tailing read.
@@ -3036,38 +3022,6 @@ async def _background_loop() -> None:
                         )
                 except Exception as exc:
                     logger.warning("EOD rec extension failed: %s", exc)
-
-        # Weekly Telegram summary — every Monday at 8:00 AM ET
-        if _ET is not None and _telegram is not None and _telegram.enabled:
-            now_et = datetime.now(_ET)
-            if (today != last_weekly_summary_day
-                    and now_et.weekday() == 0       # Monday
-                    and now_et.hour == 8 and now_et.minute < 10):
-                last_weekly_summary_day = today
-                try:
-                    from datetime import timedelta as _td
-                    week_ago = (datetime.utcnow() - _td(days=7)).isoformat()
-                    history  = _load(HISTORY_FILE, [])
-                    week_trades = [
-                        t for t in (history if isinstance(history, list) else [])
-                        if t.get("status") == "closed"
-                        and (t.get("executed_at") or "") >= week_ago
-                    ]
-                    wins   = [t for t in week_trades if (t.get("pnl") or 0) > 0]
-                    losses = [t for t in week_trades if (t.get("pnl") or 0) < 0]
-                    total_pnl = sum(t.get("pnl") or 0 for t in week_trades)
-                    best  = max(week_trades, key=lambda t: t.get("pnl") or 0, default={})
-                    worst = min(week_trades, key=lambda t: t.get("pnl") or 0, default={})
-                    _fire(_telegram.send_weekly_summary({
-                        "total_trades": len(week_trades),
-                        "wins":         len(wins),
-                        "losses":       len(losses),
-                        "total_pnl":    total_pnl,
-                        "best_trade":   {"ticker": best.get("ticker"), "pnl": best.get("pnl") or 0},
-                        "worst_trade":  {"ticker": worst.get("ticker"), "pnl": worst.get("pnl") or 0},
-                    }))
-                except Exception as exc:
-                    logger.warning("Weekly Telegram summary failed: %s", exc)
 
         # Refresh regime every loop iteration (every 5 min) regardless of
         # whether the full scan runs — keeps the dashboard card fresh off-hours.
@@ -4123,8 +4077,18 @@ class TradeModeBody(BaseModel):
 
 @app.get("/api/trade-mode", dependencies=[Depends(_verify_bot_secret)])
 def get_trade_mode():
-    """Return the current execution mode (auto-execute vs manual approval)."""
-    return _load_trade_mode()
+    """Return the current execution mode plus whether the bot can actually act on it.
+
+    ``auto_execute`` alone doesn't place orders — the deploy still has to be
+    armed (see _auto_exec_disarmed_reason). Reporting the blocking reason here
+    is what keeps "auto is on but nothing trades" from being silent.
+    """
+    disarmed = _auto_exec_disarmed_reason()
+    return {
+        **_load_trade_mode(),
+        "armed":           disarmed is None,
+        "disarmed_reason": disarmed,
+    }
 
 
 @app.post("/api/trade-mode", dependencies=[Depends(_verify_bot_secret)])
@@ -4138,8 +4102,15 @@ def set_trade_mode(body: TradeModeBody):
         "auto_execute": body.auto_execute,
         "updated_at":   datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     })
-    logger.info("Trade mode set: auto_execute=%s", body.auto_execute)
-    return {"status": "ok", "auto_execute": body.auto_execute}
+    disarmed = _auto_exec_disarmed_reason()
+    logger.info("Trade mode set: auto_execute=%s (executor %s)", body.auto_execute,
+                "armed" if disarmed is None else f"disarmed — {disarmed}")
+    return {
+        "status":          "ok",
+        "auto_execute":    body.auto_execute,
+        "armed":           disarmed is None,
+        "disarmed_reason": disarmed,
+    }
 
 
 class BrokerModeBody(BaseModel):
@@ -4199,6 +4170,7 @@ def health():
         "trading": {
             "execute_live": execute_live,
             "auto_execute": auto_execute,
+            "auto_exec_disarmed_reason": _auto_exec_disarmed_reason(),
             "paper_mode":   alpaca_paper,
             "broker":       _load_broker_mode()["broker"],
             "mode_label":   (

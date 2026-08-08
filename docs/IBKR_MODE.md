@@ -81,7 +81,8 @@ On startup the **preflight** tells you exactly what's wrong if IBKR isn't ready:
 - `ib_insync` not installed → "run pip install -r requirements.txt"
 - TWS/Gateway not reachable → "start TWS, enable the API, check the port"
 
-These surface in the log, in Telegram (if configured), and in the EOD report.
+These surface in the log, on the dashboard's health board, and in the EOD
+report. (Telegram carries buys and sells only.)
 
 ---
 

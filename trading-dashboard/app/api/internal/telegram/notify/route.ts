@@ -1,7 +1,8 @@
 /**
  * POST /api/internal/telegram/notify
- * Called by the Python bot when a trade or market event occurs.
+ * Called by the Python bot when a position is opened or closed.
  * Reads all subscribed chat_ids from DB and sends messages via Telegram.
+ * Trade entries and exits are the only notifications the bot sends.
  */
 import { NextResponse } from 'next/server'
 import { prisma }       from '@/lib/prisma'
@@ -81,37 +82,6 @@ export async function POST(req: Request) {
     ]
     if (friendly) lines.push('', `📋 <b>Reason:</b> ${friendly}`)
     await broadcast(lines.join('\n'))
-  }
-
-  else if (type === 'market_event') {
-    const { headline = '', detail = '' } = data
-    await broadcast(`📡 <b>Market Update</b>\n\n${headline}${detail ? '\n\n' + detail.slice(0, 300) : ''}`)
-  }
-
-  else if (type === 'weekly_summary') {
-    const { total_trades = 0, wins = 0, losses = 0, total_pnl = 0, best_trade, worst_trade } = data
-    const winRate   = total_trades ? (wins / total_trades * 100).toFixed(1) : '0.0'
-    const pnlEmoji  = total_pnl >= 0 ? '📈' : '📉'
-    const now       = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-
-    const lines = [
-      '📊 <b>Weekly Summary</b>',
-      `Week of ${now}`,
-      '',
-      `${pnlEmoji} <b>Total P&amp;L:</b> ${fmtCurrency(total_pnl)}`,
-      `🏆 <b>Win Rate:</b> ${winRate}%  (${wins}W / ${losses}L / ${total_trades} trades)`,
-    ]
-    if (best_trade?.ticker)  lines.push(`⭐ <b>Best Trade:</b> ${best_trade.ticker} +$${Math.abs(best_trade.pnl ?? 0).toFixed(0)}`)
-    if (worst_trade?.ticker) lines.push(`💔 <b>Worst Trade:</b> ${worst_trade.ticker} -$${Math.abs(worst_trade.pnl ?? 0).toFixed(0)}`)
-    lines.push('', 'Keep it up — see you next week! 🚀')
-
-    // Weekly summary: send to users active for 7+ days
-    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-    const users  = await prisma.user.findMany({
-      where:  { telegramChatId: { not: null }, telegramActivatedAt: { lte: cutoff } },
-      select: { telegramChatId: true },
-    })
-    await Promise.all(users.map(u => tgSend(u.telegramChatId!, lines.join('\n'))))
   }
 
   return NextResponse.json({ ok: true })
