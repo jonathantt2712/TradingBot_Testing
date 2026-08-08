@@ -1,7 +1,12 @@
 """Telegram notification publisher.
 
-Sends trade/market/weekly alerts by calling the dashboard's internal
-notify endpoint (POST {DASHBOARD_URL}/api/internal/telegram/notify).
+Sends trade alerts by calling the dashboard's internal notify endpoint
+(POST {DASHBOARD_URL}/api/internal/telegram/notify).
+
+Two hard rules live here, so every caller inherits them:
+  * only actual buys and sells are pushed (entry / exit) — no scanner
+    chatter, gap lists, weekly digests or health nags;
+  * nothing is pushed while the US equities market is closed.
 
 All subscriber data lives in PostgreSQL (via Prisma in the dashboard).
 No local file storage — works on Railway without persistent volumes.
@@ -14,15 +19,38 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from typing import Any, Optional
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
 
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ET = _ZoneInfo("America/New_York")
+except ImportError:  # pragma: no cover — stdlib on every supported version
+    _ET = None
+
+
+def market_is_open() -> bool:
+    """True during the US equities regular session (Mon–Fri 09:30–16:00 ET).
+
+    Same window api_server._is_market_open uses. When the timezone database is
+    unavailable we can't tell, so we allow the send rather than swallow a fill.
+    """
+    if _ET is None:
+        return True
+    now = datetime.now(_ET)
+    if now.weekday() >= 5:                        # Saturday=5, Sunday=6
+        return False
+    open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+    close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return open_t <= now <= close_t
+
 
 class TelegramPublisher:
-    """Posts notification payloads to the dashboard's Telegram notify endpoint."""
+    """Posts trade entry/exit payloads to the dashboard's Telegram notify endpoint."""
 
     def __init__(self, bot_token: str = "") -> None:
         self._token        = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -35,6 +63,9 @@ class TelegramPublisher:
 
     async def _notify(self, payload: dict[str, Any]) -> None:
         if not self.enabled:
+            return
+        if not market_is_open():
+            logger.info("Telegram %s suppressed — market closed", payload.get("type"))
             return
         url     = f"{self._dashboard}/api/internal/telegram/notify"
         headers = {"Content-Type": "application/json"}
@@ -65,43 +96,3 @@ class TelegramPublisher:
             "reason":     reason,
             "pnl":        pnl,
         }})
-
-    async def send_market_event(self, headline: str, detail: str = "") -> None:
-        await self._notify({"type": "market_event", "data": {"headline": headline, "detail": detail}})
-
-    async def send_weekly_summary(self, stats: dict[str, Any]) -> None:
-        await self._notify({"type": "weekly_summary", "data": stats})
-
-    # ------------------------------------------------------------------
-    # Legacy methods — kept for backward compatibility with scanner hooks
-    # ------------------------------------------------------------------
-
-    async def send_report(self, text: str) -> None:
-        if text:
-            await self.send_market_event("EOD Report", text[:500])
-
-    async def send_alert(self, lines: list[str]) -> None:
-        if lines:
-            await self.send_market_event("⚠️ Bot needs attention", "\n".join(lines)[:500])
-
-    async def send_gapper_alert(self, gappers: list[dict]) -> None:
-        if not gappers:
-            return
-        parts = ["Pre-Market Gappers:"]
-        for g in gappers[:5]:
-            arrow = "🟢" if g.get("direction") == "LONG" else "🔴"
-            parts.append(f"{arrow} {g.get('ticker','?')}  gap={g.get('gap_pct',0):+.1f}%")
-        await self.send_market_event("📈 Pre-Market Gappers", "\n".join(parts))
-
-    async def send_strategy_alert(self, hits: list[dict]) -> None:
-        if not hits:
-            return
-        parts = []
-        for h in hits[:5]:
-            arrow = "🟢" if h.get("direction") == "LONG" else "🔴"
-            parts.append(
-                f"{arrow} {h.get('ticker','?')} {h.get('direction','?')}"
-                f" score={h.get('composite_score',0):.0f}"
-                f" entry=${h.get('risk',{}).get('entry',0):.2f}"
-            )
-        await self.send_market_event("⚡ Strategy Alert", "\n".join(parts))

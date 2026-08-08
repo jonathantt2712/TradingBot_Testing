@@ -488,7 +488,7 @@ async def _run_session(settings, tickers: Sequence[str], *, execute: bool) -> bo
             ),
             strategy_refresh_loop(pm, interval_min=STRATEGY_REFRESH_MIN),
             eod_report_loop(settings),
-            health_alert_loop(settings),
+            health_alert_loop(),
             heartbeat_loop(execute=execute, broker_name=active_mode,
                            active_tickers=active_tickers),
             correlation_refresh_loop(

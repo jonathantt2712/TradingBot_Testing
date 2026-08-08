@@ -1,13 +1,19 @@
-"""Fundamental Analyst — news sentiment + earnings/catalyst scoring via LLM.
+"""Fundamental Analyst — news sentiment + earnings/catalyst scoring.
 
-Provider priority (automatic, based on available env keys):
-  1. GEMINI_API_KEY    -> Google Gemini Flash (free tier)
-  2. ANTHROPIC_API_KEY -> Anthropic Claude Haiku (paid)
-  3. none              -> keyword sentiment fallback (always works, no cost)
+Scorer priority:
+  1. LLM (Gemini Flash / Claude Haiku) — ONLY when USE_LLM_AGENTS=true, since
+     it costs API tokens per ticker per scan.
+  2. FinBERT — the default. Runs locally, no API cost, no network after the
+     model is cached.
+  3. Keyword/phrase lists — always available, used when FinBERT can't load
+     (transformers missing, or FINBERT_DISABLED=true).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -18,24 +24,49 @@ from core.models import AgentEvaluation, AnalysisContext
 
 logger = logging.getLogger(__name__)
 
-# FinBERT: optional — only used if transformers is installed (large dependency,
-# not in requirements.txt by default). When available, used as an intermediate
-# fallback between LLM and pure keyword scoring.
-try:
-    from transformers import pipeline as _hf_pipeline  # type: ignore
-    _finbert_model = _hf_pipeline(
-        "sentiment-analysis",
-        model="ProsusAI/finbert",
-        tokenizer="ProsusAI/finbert",
-        max_length=512,
-        truncation=True,
-    )
-    _HAS_FINBERT = True
-    import logging as _log
-    _log.getLogger(__name__).info("FinBERT loaded successfully")
-except Exception:
-    _finbert_model = None
-    _HAS_FINBERT = False
+# FinBERT — the default news scorer (offline, no API cost). Loaded LAZILY on the
+# first scoring call, NOT at import: building the pipeline costs ~9s and a Hugging
+# Face round-trip, which importing this module used to charge to every pytest run,
+# api_server boot and live_runner start, including runs that never score news.
+# Set FINBERT_DISABLED=true to force the keyword scorer instead.
+_finbert_model = None         # the transformers pipeline, once built
+_finbert_state = "unloaded"   # unloaded | ready | unavailable
+# Scoring runs in a thread pool (one task per ticker), so the build must be
+# serialised — otherwise the first scan of the day builds the model N times.
+_finbert_lock = threading.Lock()
+
+
+def _load_finbert():
+    """Return the FinBERT pipeline, building it once. None when unavailable.
+
+    A failed load (transformers missing, no network for the model download) is
+    remembered so every subsequent article batch doesn't retry it.
+    """
+    global _finbert_model, _finbert_state
+    if _finbert_state != "unloaded":
+        return _finbert_model
+    with _finbert_lock:
+        if _finbert_state != "unloaded":     # built while we waited for the lock
+            return _finbert_model
+        if os.getenv("FINBERT_DISABLED", "").lower() in ("1", "true", "yes"):
+            _finbert_state = "unavailable"
+            return None
+        try:
+            from transformers import pipeline as _hf_pipeline  # type: ignore
+            _finbert_model = _hf_pipeline(
+                "sentiment-analysis",
+                model="ProsusAI/finbert",
+                tokenizer="ProsusAI/finbert",
+                max_length=512,
+                truncation=True,
+            )
+            _finbert_state = "ready"
+            logger.info("FinBERT loaded — news scored offline, no API cost")
+        except Exception as exc:
+            _finbert_model = None
+            _finbert_state = "unavailable"
+            logger.info("FinBERT unavailable (%s) — using keyword news scoring", exc)
+    return _finbert_model
 
 _SYSTEM_PROMPT = (
     "You are a professional equity analyst specialising in short-term catalysts. "
@@ -153,8 +184,11 @@ class FundamentalAgent(BaseAgent):
             except Exception as exc:
                 logger.warning("Fundamental LLM call failed for %s: %s", ctx.ticker, exc)
 
-        # Try FinBERT as intermediate fallback (only when LLM unavailable)
-        finbert_result = self._finbert_score(articles)
+        # FinBERT — the default scorer. Runs in a worker thread: the one-time
+        # model build takes ~9s and inference is CPU-bound, and this agent is
+        # evaluated concurrently across the whole universe, so doing it inline
+        # would stall the event loop (and the API server with it).
+        finbert_result = await asyncio.to_thread(self._finbert_score, articles)
         if finbert_result is not None:
             score, confidence = finbert_result
             # Cap confidence at 0.90 (universal cap)
@@ -227,22 +261,23 @@ class FundamentalAgent(BaseAgent):
     })
 
     def _finbert_score(self, articles: list) -> Optional[tuple[float, float]]:
-        """Score headlines using FinBERT sentiment model.
+        """Score headlines using the FinBERT sentiment model.
 
-        Returns (score_1_to_100, confidence) or None if FinBERT unavailable.
-        Only called when LLM is unavailable (expensive fallback for LLM).
+        Returns (score_1_to_100, confidence), or None when FinBERT can't run —
+        the caller then falls through to keyword scoring.
         """
-        if not _HAS_FINBERT or _finbert_model is None:
+        headlines = [
+            a.get("headline", a.get("title", ""))[:256]
+            for a in articles[:5]  # cap at 5 to limit compute time
+            if a.get("headline") or a.get("title")
+        ]
+        if not headlines:
+            return None
+        model = _load_finbert()      # built once, on first use
+        if model is None:
             return None
         try:
-            headlines = [
-                a.get("headline", a.get("title", ""))[:256]
-                for a in articles[:5]  # cap at 5 to limit compute time
-                if a.get("headline") or a.get("title")
-            ]
-            if not headlines:
-                return None
-            results = _finbert_model(headlines)
+            results = model(headlines)
             pos = sum(r["score"] for r in results if r["label"].lower() == "positive")
             neg = sum(r["score"] for r in results if r["label"].lower() == "negative")
             total = len(results)

@@ -108,7 +108,12 @@ class PortfolioManager:
         self._tuner = WeightTuner(self._weights)
         self._tuned_weights: dict = {}
         self._tuned_file: dict = {}       # full strategy_weights.json, TTL-cached
-        self._tuned_weights_ts: float = 0.0
+        # None = never loaded. NOT 0.0: time.monotonic() counts from system boot,
+        # so on a freshly-booted host (a Railway container, a CI runner) it is
+        # itself < TTL for the first minute — `now - 0.0 > TTL` stayed False and
+        # the tuned weights/thresholds were silently ignored until a minute of
+        # uptime had passed. The bot's first scan starts ~5s after boot.
+        self._tuned_weights_ts: Optional[float] = None
         # Data-derived correlation graph for the concentration cap; None until a
         # runner builds and injects it, in which case the static groups are used.
         self._corr_graph = None
@@ -806,7 +811,7 @@ class PortfolioManager:
     def _tuned(self) -> dict:
         """The full strategy_weights.json (TTL-cached), or {} when tuning is off."""
         now = time.monotonic()
-        if now - self._tuned_weights_ts > _TUNED_WEIGHTS_TTL:
+        if self._tuned_weights_ts is None or now - self._tuned_weights_ts > _TUNED_WEIGHTS_TTL:
             try:
                 w = json.loads(_WEIGHTS_FILE.read_text())
                 self._tuned_file = w if (isinstance(w, dict) and w.get("live_tuning_active")) else {}

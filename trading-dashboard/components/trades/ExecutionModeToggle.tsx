@@ -6,24 +6,31 @@ import { cn } from '@/lib/utils'
 
 /**
  * Toggle between MANUAL approval (bot only suggests; you click Execute on each
- * trade) and AUTO-EXECUTE (the bot places buy/sell orders itself).
+ * trade) and AUTO-EXECUTE (orders are placed for you).
  *
- * Writes to the bot server's /api/trade-mode, which live_runner reads each
- * scan — the switch takes effect within one cycle, no redeploy.
+ * Saves this user's preference and — for owners — forwards the switch to the
+ * bot server's /api/trade-mode, which live_runner and the auto-executor read
+ * each cycle. The bot reports back whether its executor is actually armed; if
+ * it isn't, say so rather than let auto mode sit there doing nothing.
  */
 interface Props {
   onToggle?: (auto: boolean) => void
 }
 
 export function ExecutionModeToggle({ onToggle }: Props) {
-  const [auto,    setAuto]    = useState<boolean | null>(null)
-  const [saving,  setSaving]  = useState(false)
+  const [auto,     setAuto]     = useState<boolean | null>(null)
+  const [saving,   setSaving]   = useState(false)
+  const [disarmed, setDisarmed] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     fetch('/api/trade-mode', { cache: 'no-store' })
       .then(r => r.ok ? r.json() : { auto_execute: false })
-      .then(d => { if (!cancelled) setAuto(!!d.auto_execute) })
+      .then(d => {
+        if (cancelled) return
+        setAuto(!!d.auto_execute)
+        setDisarmed(d.bot?.armed === false ? (d.bot.disarmed_reason ?? 'bot executor disarmed') : null)
+      })
       .catch(() => { if (!cancelled) setAuto(false) })
     return () => { cancelled = true }
   }, [])
@@ -34,18 +41,27 @@ export function ExecutionModeToggle({ onToggle }: Props) {
     const prev = auto
     setAuto(next)
     try {
-      const res = await fetch('/api/trade-mode', {
+      const res  = await fetch('/api/trade-mode', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ auto_execute: next }),
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
+      const reason = data.bot?.armed === false ? (data.bot.disarmed_reason ?? 'bot executor disarmed') : null
+      setDisarmed(reason)
       onToggle?.(next)
-      toast.success(next ? 'Auto-execute ON' : 'Manual approval ON', {
-        description: next
-          ? 'New recommendations will be executed automatically.'
-          : 'You approve each trade manually.',
-      })
+      if (next && reason) {
+        toast.warning('Auto-execute ON — but the bot is not armed', {
+          description: `${reason}. Trades only run while this page is open.`,
+        })
+      } else {
+        toast.success(next ? 'Auto-execute ON' : 'Manual approval ON', {
+          description: next
+            ? 'New recommendations will be executed automatically.'
+            : 'You approve each trade manually.',
+        })
+      }
     } catch (err: any) {
       setAuto(prev)
       toast.error('Could not change mode', { description: err?.message || 'Server error' })
@@ -63,7 +79,15 @@ export function ExecutionModeToggle({ onToggle }: Props) {
   }
 
   return (
-    <div className="flex items-center gap-1 rounded-lg border border-bg-border p-0.5" title="Choose whether the bot executes trades itself or waits for your approval">
+    <div
+      className={cn(
+        'flex items-center gap-1 rounded-lg border p-0.5',
+        auto && disarmed ? 'border-caution/50' : 'border-bg-border',
+      )}
+      title={auto && disarmed
+        ? `Bot executor disarmed: ${disarmed}. Trades only run while this page is open.`
+        : 'Choose whether the bot executes trades itself or waits for your approval'}
+    >
       <button
         onClick={() => toggle(false)}
         disabled={saving}

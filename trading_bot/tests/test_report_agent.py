@@ -64,6 +64,27 @@ def test_generate_deterministic_without_llm(tmp_path):
     assert "NVDA" in report
 
 
+def test_configured_key_does_not_spend_tokens_by_default(tmp_path):
+    """A key in the environment is not consent to burn it — llm_enabled gates it."""
+    now = datetime.now(timezone.utc)
+    f = tmp_path / "decisions.jsonl"
+    _write_audit(f, _audit_records(now.isoformat()))
+    agent = EODReportAgent(
+        gemini_api_key="a-real-looking-key",
+        audit_file=f,
+        trades_file=tmp_path / "trades.json",
+        memory=TradeMemory(path=tmp_path / "mem.json"),
+    )
+
+    async def _boom(*_a, **_kw):
+        raise AssertionError("no LLM call may be made with llm_enabled off")
+    agent._llm.chat = _boom
+
+    assert agent._llm.has_llm is True                    # key IS present
+    report = asyncio.run(agent.generate(now=now))
+    assert "evaluated 2" in report                       # deterministic note anyway
+
+
 def test_generate_handles_empty_day(tmp_path):
     agent = EODReportAgent(
         audit_file=tmp_path / "nope.jsonl",            # no file at all
