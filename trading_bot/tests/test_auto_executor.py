@@ -60,6 +60,7 @@ def _arm_all(monkeypatch):
     monkeypatch.setattr(api_server, "_ALPACA_PAPER", True)
     monkeypatch.setattr(api_server, "_ALPACA_KEY", "k")
     monkeypatch.setattr(api_server, "_ALPACA_SECRET", "s")
+    monkeypatch.setenv("EXECUTE_LIVE", "false")
     monkeypatch.setattr(api_server, "_load_trade_mode", lambda: {"auto_execute": True})
 
 
@@ -84,6 +85,14 @@ def test_disarmed_without_keys(monkeypatch):
     _arm_all(monkeypatch)
     monkeypatch.setattr(api_server, "_ALPACA_SECRET", "")
     assert api_server._auto_exec_disarmed_reason() == "Alpaca API keys not set"
+
+
+def test_disarmed_when_live_runner_owns_execution(monkeypatch):
+    # start.sh runs live_runner.py next to this server. Both read the same
+    # toggle and the same account, so arming both doubles every position.
+    _arm_all(monkeypatch)
+    monkeypatch.setenv("EXECUTE_LIVE", "true")
+    assert "live_runner owns execution" in api_server._auto_exec_disarmed_reason()
 
 
 def test_disarmed_when_toggle_off(monkeypatch):

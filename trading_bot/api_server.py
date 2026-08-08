@@ -3591,6 +3591,13 @@ def _auto_exec_disarmed_reason() -> Optional[str]:
         return "ALPACA_PAPER is false — refusing to auto-trade a non-paper account"
     if not (_ALPACA_KEY and _ALPACA_SECRET):
         return "Alpaca API keys not set"
+    # start.sh launches live_runner.py alongside this server, so on Railway both
+    # executors read the SAME toggle and the same account. With EXECUTE_LIVE=true
+    # live_runner is already placing entries; sweeping recs here too would double
+    # every position. live_runner wins — it owns brackets, EOD flatten and the
+    # breakeven lock, which this sweeper doesn't do.
+    if os.getenv("EXECUTE_LIVE", "false").lower() in ("1", "true", "yes"):
+        return "EXECUTE_LIVE=true — live_runner owns execution on this host"
     if not _load_trade_mode().get("auto_execute", False):
         return "dashboard auto-execute toggle off"
     return None
