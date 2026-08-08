@@ -1,9 +1,12 @@
-"""Fundamental Analyst — news sentiment + earnings/catalyst scoring via LLM.
+"""Fundamental Analyst — news sentiment + earnings/catalyst scoring.
 
-Provider priority (automatic, based on available env keys):
-  1. GEMINI_API_KEY    -> Google Gemini Flash (free tier)
-  2. ANTHROPIC_API_KEY -> Anthropic Claude Haiku (paid)
-  3. none              -> keyword sentiment fallback (always works, no cost)
+Scorer priority:
+  1. LLM (Gemini Flash / Claude Haiku) — ONLY when USE_LLM_AGENTS=true, since
+     it costs API tokens per ticker per scan.
+  2. FinBERT — the default. Runs locally, no API cost, no network after the
+     model is cached.
+  3. Keyword/phrase lists — always available, used when FinBERT can't load
+     (transformers missing, or FINBERT_DISABLED=true).
 """
 from __future__ import annotations
 
