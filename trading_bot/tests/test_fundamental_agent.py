@@ -1,18 +1,23 @@
-"""FundamentalAgent — the deterministic, always-available paths.
+"""FundamentalAgent — news scoring without an LLM.
 
-We don't exercise the LLM or FinBERT branches (network / heavy deps); we pin
-the keyword fallback (the zero-cost path that always runs) and the article
-freshness filter. The agent is constructed with no API keys so ``has_llm`` is
-False and FinBERT is absent in CI, so ``evaluate`` deterministically lands on
-the keyword fallback.
+Order of preference is FinBERT, then the keyword lists. The real model is never
+built here (conftest sets FINBERT_DISABLED — a ~440 MB download), so these tests
+pin the keyword path by default and stub the pipeline where the FinBERT branch
+itself is under test.
 """
 from datetime import datetime, timedelta, timezone
 
 import asyncio
 
+import pytest
+
+import agents.fundamental_agent as fa
 from agents.fundamental_agent import FundamentalAgent
 from core.enums import AgentRole
 from core.models import AnalysisContext
+
+# Captured before the autouse fixture stubs it out, for the loader's own test.
+_REAL_LOAD_FINBERT = fa._load_finbert
 
 
 class _FakeNews:
@@ -37,6 +42,19 @@ def _run(agent):
 
 def _article(headline, summary="", **extra):
     return {"headline": headline, "summary": summary, **extra}
+
+
+@pytest.fixture(autouse=True)
+def _no_finbert(monkeypatch):
+    """Default every test to the keyword path; FinBERT tests opt in explicitly."""
+    monkeypatch.setattr(fa, "_load_finbert", lambda: None)
+
+
+def _stub_finbert(monkeypatch, labels):
+    """Install a fake pipeline returning ``labels`` (list of (label, score))."""
+    def _pipe(headlines):
+        return [{"label": lbl, "score": sc} for lbl, sc in labels]
+    monkeypatch.setattr(fa, "_load_finbert", lambda: _pipe)
 
 
 # ── no-news path ─────────────────────────────────────────────────────────────
@@ -115,6 +133,46 @@ def test_keyword_confidence_capped():
 def test_score_clamped_to_valid_range():
     ev = _run(_agent([_article("miss cut downgrade fraud bankruptcy collapse plunge lawsuit recall")]))
     assert 1.0 <= ev.score <= 100.0
+
+
+# ── FinBERT branch (stubbed pipeline — the real model is never built here) ───
+
+def test_finbert_preferred_over_keywords(monkeypatch):
+    _stub_finbert(monkeypatch, [("positive", 0.95)])
+    # Bearish WORDS, positive model verdict: proves FinBERT decided, not keywords.
+    ev = _run(_agent([_article("Company missed estimates, downgrade and fraud probe")]))
+    assert "[finbert]" in ev.rationale
+    assert ev.reasoning["provider"] == "finbert"
+    assert ev.score > 50.0
+
+
+def test_finbert_negative_scores_bearish(monkeypatch):
+    _stub_finbert(monkeypatch, [("negative", 0.9)])
+    ev = _run(_agent([_article("Some headline")]))
+    assert ev.score < 50.0
+
+
+def test_falls_back_to_keywords_when_finbert_unavailable():
+    # The autouse fixture makes _load_finbert return None — a missing/failed
+    # model must never cost us a reading.
+    ev = _run(_agent([_article("Company beats earnings, analyst upgrade and record growth")]))
+    assert "[keyword]" in ev.rationale
+    assert ev.score > 50.0
+
+
+def test_finbert_not_built_when_there_is_nothing_to_score(monkeypatch):
+    called = []
+    monkeypatch.setattr(fa, "_load_finbert", lambda: called.append(1))
+    _run(_agent([]))                      # no articles at all
+    assert called == []
+
+
+def test_load_finbert_honours_the_disable_switch(monkeypatch):
+    monkeypatch.setattr(fa, "_finbert_state", "unloaded")
+    monkeypatch.setattr(fa, "_finbert_model", None)
+    monkeypatch.setenv("FINBERT_DISABLED", "true")
+    assert _REAL_LOAD_FINBERT() is None
+    assert fa._finbert_state == "unavailable"
 
 
 # ── freshness filter ─────────────────────────────────────────────────────────

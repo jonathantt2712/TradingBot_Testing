@@ -4,18 +4,35 @@ pandas>=2.1
 numpy>=1.26
 aiohttp>=3.9
 
-# --- Technical analysis (OPTIONAL) ---
-# pandas-ta releases were pulled from PyPI / require Python >= 3.12, which
-# breaks a fresh `pip install -r requirements.txt`. The TechnicalAgent already
-# degrades gracefully without it (candlestick patterns off, built-in RSI/MACD
-# fallbacks). Install manually if desired:
-#   pip install pandas-ta   # or pandas-ta-classic on older Pythons
+# --- Technical analysis ---
+# pandas-ta-classic is the maintained fork; the original pandas-ta is unmaintained
+# and breaks on numpy >= 2 (`from numpy import NaN`). It imports as
+# `pandas_ta_classic` — technical_agent accepts either module name.
+# ta-lib is the native TA-Lib binding and is what actually enables the
+# candlestick-pattern signal (cdl_pattern needs the C library); 0.6+ ships
+# prebuilt wheels for Linux, macOS and Windows, so no compiler is required.
+# TechnicalAgent still degrades gracefully if either is missing.
+pandas-ta-classic>=0.6
+ta-lib>=0.6
 
 # --- Brokers / data ---
 alpaca-py>=0.21
 ib-insync>=0.9.86
 
-# --- Vision / LLM sentiment ---
+# --- News sentiment (FinBERT — offline, no API tokens) ---
+# The default scorer for FundamentalAgent. Heavy: ~750 MB of torch, plus a
+# ~440 MB model pulled from Hugging Face on FIRST USE (cached afterwards). The
+# extra index gets the CPU-only torch build — without it, Linux resolves to the
+# CUDA wheel and drags in ~2.5 GB of GPU libraries this bot never touches.
+# If a Railway build ever hits an image-size or build-time limit, deleting these
+# three lines is safe: loading is lazy and failure is non-fatal, so the agent
+# just scores news with its keyword lists instead. FINBERT_DISABLED=true forces
+# that same fallback without touching the install.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+transformers>=4.40
+
+# --- Vision / LLM sentiment (OPTIONAL — only used when USE_LLM_AGENTS=true) ---
 anthropic>=0.50
 google-genai>=1.5          # Gemini fallback in core/llm_adapter.py
 

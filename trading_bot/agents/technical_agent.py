@@ -27,11 +27,18 @@ from core.models import AgentEvaluation, AnalysisContext
 
 logger = logging.getLogger(__name__)
 
+# pandas-ta ships under two module names: the original `pandas_ta` (unmaintained,
+# breaks on numpy >= 2) and the maintained `pandas-ta-classic` fork, which imports
+# as `pandas_ta_classic`. Accept either — requirements.txt pins the fork.
 try:
     import pandas_ta as ta  # type: ignore
     _HAS_PANDAS_TA = True
 except Exception:
-    _HAS_PANDAS_TA = False
+    try:
+        import pandas_ta_classic as ta  # type: ignore
+        _HAS_PANDAS_TA = True
+    except Exception:
+        _HAS_PANDAS_TA = False
 
 # cdl_pattern(name="all") prints "[i] Requires TA-Lib" for every pattern (~60
 # lines) unless the native C library is installed. Gate on actual talib presence.

@@ -1,4 +1,5 @@
 """Shared fixtures — make trading_bot importable and provide bar builders."""
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,6 +9,12 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Never let the suite pull FinBERT: building it downloads ~440 MB from Hugging
+# Face and takes ~9s, which would make CI slow and network-dependent. Tests that
+# want the FinBERT branch stub the pipeline instead. Set before any agent import
+# so the very first _load_finbert() call short-circuits.
+os.environ.setdefault("FINBERT_DISABLED", "true")
 
 
 def make_session_bars(
