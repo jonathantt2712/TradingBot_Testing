@@ -212,7 +212,7 @@ def test_direction_learned_regime_threshold_is_not_double_counted(tmp_path, monk
     }))
     monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
     pm = make_pm()
-    pm._tuned_weights_ts = 0.0
+    pm._tuned_weights_ts = None
     pm.set_regime(_regime(MarketRegime.RISK_OFF))
     long_base, short_base = pm._effective_thresholds(backtest_mode=False)
     assert long_base == pytest.approx(68.0)
@@ -414,7 +414,32 @@ def test_effective_thresholds_live_reads_tuned_file(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
     pm = make_pm()
-    pm._tuned_weights_ts = 0.0   # force cache miss so file is read
+    pm._tuned_weights_ts = None   # force cache miss so file is read
+    long_t, short_t = pm._effective_thresholds(backtest_mode=False)
+    assert long_t == pytest.approx(68.0)
+    assert short_t == pytest.approx(32.0)
+
+
+def test_tuned_file_read_on_a_freshly_booted_host(tmp_path, monkeypatch):
+    """A brand-new PortfolioManager must read the tuned file immediately.
+
+    time.monotonic() counts from system boot, so on a fresh Railway container or
+    CI runner it is itself below the 60s TTL. With the "never loaded" marker set
+    to 0.0, `now - 0.0 > TTL` was False and every tuned threshold/weight was
+    silently ignored for the first minute of uptime — and the first scan starts
+    ~5s after boot. This reproduces that host, not a mocked clock offset.
+    """
+    import json, execution.portfolio_manager as pm_mod
+    weights_file = tmp_path / "strategy_weights.json"
+    weights_file.write_text(json.dumps({
+        "live_tuning_active": True,
+        "long_threshold": 68.0,
+        "short_threshold": 32.0,
+    }))
+    monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
+    monkeypatch.setattr(pm_mod.time, "monotonic", lambda: 3.0)   # booted 3s ago
+
+    pm = make_pm()                      # no cache priming — as in production
     long_t, short_t = pm._effective_thresholds(backtest_mode=False)
     assert long_t == pytest.approx(68.0)
     assert short_t == pytest.approx(32.0)
@@ -430,7 +455,7 @@ def test_effective_thresholds_inactive_tuning_falls_back_to_config(tmp_path, mon
     }))
     monkeypatch.setattr(pm_mod, "_WEIGHTS_FILE", weights_file)
     pm = make_pm()
-    pm._tuned_weights_ts = 0.0
+    pm._tuned_weights_ts = None
     long_t, short_t = pm._effective_thresholds(backtest_mode=False)
     # live_tuning_active is False → thresholds in file are NOT applied
     assert long_t == pm._thresholds.long_above

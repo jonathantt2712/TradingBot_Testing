@@ -72,7 +72,7 @@ def _pm(tmp_path, monkeypatch, regime, file_dict):
     pm._regime = types.SimpleNamespace(regime=types.SimpleNamespace(value=regime))
     pm._tuned_file = {}
     pm._tuned_weights = {}
-    pm._tuned_weights_ts = 0.0
+    pm._tuned_weights_ts = None
     return pm
 
 
